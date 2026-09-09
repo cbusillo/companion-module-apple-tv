@@ -36,3 +36,11 @@ probe; input older than one second expires, and no command is retried. An
 unsupported or failed health query prevents the module claiming readiness. The
 app-list query's sleep/wake behavior must be confirmed on the actual device
 before accepting this as a replacement.
+
+## Companion permissions
+
+The module declares `filesystem` to read its owner-only credential file and
+`child-process` to run the Python worker. Companion currently grants general
+filesystem access for that declaration; it cannot limit the grant to one file.
+The module itself validates the selected file and directory and does not write
+credentials. The separate pairing utility owns credential creation.
