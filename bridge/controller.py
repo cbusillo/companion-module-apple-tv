@@ -1,12 +1,23 @@
 """Adapted from MIT-licensed Media Control Relay; see LICENSE-MCR."""
 from __future__ import annotations
 import asyncio
-import secrets
 from typing import Any
 from collections.abc import Callable, Awaitable
 import pyatv
 from pyatv.const import FeatureName, FeatureState, Protocol as PyATVProtocol
 from pyatv.storage.memory_storage import MemoryStorage
+from pyatv.interface import DeviceListener
+
+class SessionListener(DeviceListener):
+    def __init__(self, lost):
+        self.lost = lost
+
+    def connection_lost(self, exception):
+        self.lost()
+
+    def connection_closed(self):
+        self.lost()
+
 
 CAPABILITY_FEATURES = {
     "navigation": (FeatureName.Up, FeatureName.Down, FeatureName.Left, FeatureName.Right),
@@ -32,36 +43,26 @@ def result(
     state: str,
     *,
     capabilities: list[str] | None = None,
-    targets: list[dict[str, str]] | None = None,
-    secret: dict[str, str | None] | None = None,
 ) -> dict[str, Any]:
     return {
         "state": state,
         "capabilities": capabilities or [],
-        "targets": targets or [],
-        "secret": secret,
     }
 
 class PyATVController:
     def __init__(self) -> None:
         self.storage = MemoryStorage()
-        self.targets: dict[str, Any] = {}
-        self.pairing: Any = None
-        self.pairing_config: Any = None
         self.atv: Any = None
+        self.listener = None
+        self.connected = False
+        self.on_lost = lambda: None
 
     async def handle(self, operation: dict[str, Any]) -> dict[str, Any]:
         operation_name = operation.get("operation")
-        if operation_name == "discover":
-            return await self._discover()
-        if operation_name == "beginPairing":
-            return await self._begin_pairing(operation)
-        if operation_name == "finishPairing":
-            return await self._finish_pairing(operation)
         if operation_name == "connect":
             return await self._connect(operation)
         if operation_name == "status":
-            return self._status()
+            return await self._health()
         if operation_name == "action":
             return await self._action(operation.get("action"))
         if operation_name == "disconnect":
@@ -70,81 +71,7 @@ class PyATVController:
         raise HelperError("malformedRequest")
 
     async def close(self) -> None:
-        await self._close_pairing()
         await self._disconnect()
-
-    async def _discover(self) -> dict[str, Any]:
-        configs = await pyatv.scan(
-            asyncio.get_running_loop(),
-            protocol=PyATVProtocol.Companion,
-            storage=self.storage,
-        )
-        self.targets.clear()
-        targets: list[dict[str, str]] = []
-        for config in configs:
-            target_id = secrets.token_urlsafe(18)
-            self.targets[target_id] = config
-            targets.append({"id": target_id, "name": config.name or "Apple TV"})
-        targets.sort(key=lambda target: target["name"].casefold())
-        return result("dormant", targets=targets)
-
-    async def _begin_pairing(self, operation: dict[str, Any]) -> dict[str, Any]:
-        target_id = operation.get("targetID")
-        if not isinstance(target_id, str) or not 1 <= len(target_id) <= 128:
-            raise HelperError("malformedRequest")
-        config = self.targets.get(target_id)
-        if config is None:
-            raise HelperError("unavailable")
-
-        await self._close_pairing()
-        pairing = await pyatv.pair(
-            config,
-            PyATVProtocol.Companion,
-            asyncio.get_running_loop(),
-            storage=self.storage,
-            name="Media Control Relay",
-        )
-        try:
-            await pairing.begin()
-        except Exception as error:
-            await pairing.close()
-            raise HelperError("pairingFailed") from error
-        self.pairing = pairing
-        self.pairing_config = config
-        return result("pairingRequired")
-
-    async def _finish_pairing(self, operation: dict[str, Any]) -> dict[str, Any]:
-        pin = operation.get("pin")
-        if not isinstance(pin, int) or not 0 <= pin <= 9999:
-            raise HelperError("malformedRequest")
-        if self.pairing is None or self.pairing_config is None:
-            raise HelperError("pairingRequired", "pairingRequired")
-
-        pairing = self.pairing
-        config = self.pairing_config
-        try:
-            pairing.pin(pin)
-            await pairing.finish()
-            credential = pairing.service.credentials
-        except Exception as error:
-            raise HelperError("pairingFailed") from error
-        finally:
-            await pairing.close()
-            self.pairing = None
-            self.pairing_config = None
-
-        if not credential or not config.set_credentials(PyATVProtocol.Companion, str(credential)):
-            raise HelperError("pairingFailed")
-        connection_secret = {
-            "host": str(config.address),
-            "identifier": config.identifier,
-            "credentials": str(credential),
-        }
-        try:
-            await self._connect_config(config)
-        except Exception:
-            return result("offline", secret=connection_secret)
-        return result("ready", capabilities=self._capabilities(), secret=connection_secret)
 
     async def _connect(self, operation: dict[str, Any]) -> dict[str, Any]:
         secret_value = operation.get("secret")
@@ -156,7 +83,7 @@ class PyATVController:
         if (
             not isinstance(host, str)
             or not 1 <= len(host) <= 255
-            or (identifier is not None and not isinstance(identifier, str))
+            or (not isinstance(identifier, str) or not 1 <= len(identifier) <= 255)
             or not isinstance(credentials, str)
             or not 1 <= len(credentials) <= 4096
         ):
@@ -176,7 +103,7 @@ class PyATVController:
                 protocol=PyATVProtocol.Companion,
                 storage=self.storage,
             )
-        if not configs:
+        if len(configs) != 1 or configs[0].identifier != identifier:
             raise HelperError("offline")
         config = configs[0]
         if not config.set_credentials(PyATVProtocol.Companion, credentials):
@@ -185,16 +112,7 @@ class PyATVController:
             await self._connect_config(config)
         except Exception as error:
             raise HelperError("offline") from error
-        refreshed_secret = {
-            "host": str(config.address),
-            "identifier": config.identifier,
-            "credentials": credentials,
-        }
-        return result(
-            "ready",
-            capabilities=self._capabilities(),
-            secret=refreshed_secret,
-        )
+        return result("ready", capabilities=self._capabilities())
 
     async def _connect_config(self, config: Any) -> None:
         await self._disconnect()
@@ -205,15 +123,29 @@ class PyATVController:
             storage=self.storage,
         )
 
-    def _status(self) -> dict[str, Any]:
-        if self.atv is not None:
-            return result("ready", capabilities=self._capabilities())
-        if self.pairing is not None:
-            return result("pairingRequired")
-        return result("dormant")
+        session = self.atv
+        def lost():
+            if self.atv is session and self.connected:
+                self.connected = False
+                self.on_lost()
+        self.listener = SessionListener(lost)
+        self.atv.listener = self.listener
+        self.connected = True
+
+
+    async def _health(self):
+        if not self.connected or self.atv is None:
+            raise HelperError("offline")
+        try:
+            await self.atv.apps.app_list()
+        except pyatv.exceptions.NotSupportedError as error:
+            raise HelperError("healthUnsupported", "unknown") from error
+        if not self.connected:
+            raise HelperError("offline")
+        return result("ready", capabilities=self._capabilities())
 
     def _capabilities(self) -> list[str]:
-        if self.atv is None:
+        if self.atv is None or not self.connected:
             return []
         features = self.atv.features
         return [
@@ -226,7 +158,7 @@ class PyATVController:
         ]
 
     async def _action(self, action: Any) -> dict[str, Any]:
-        if self.atv is None:
+        if self.atv is None or not self.connected:
             raise HelperError("offline")
         if not isinstance(action, dict) or not isinstance(action.get("action"), str):
             raise HelperError("malformedRequest")
@@ -293,15 +225,13 @@ class PyATVController:
         for _ in range(abs(delta)):
             await command()
 
-    async def _close_pairing(self) -> None:
-        if self.pairing is not None:
-            await self.pairing.close()
-        self.pairing = None
-        self.pairing_config = None
-
     async def _disconnect(self) -> None:
-        if self.atv is not None:
-            tasks = self.atv.close()
+        atv, self.atv = self.atv, None
+        self.connected = False
+        self.listener = None
+        if atv is not None:
+            atv.listener = None
+            tasks = atv.close()
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
         self.atv = None

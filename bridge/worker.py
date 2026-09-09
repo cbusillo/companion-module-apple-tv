@@ -7,17 +7,28 @@ from controller import PyATVController, HelperError
 
 MAX_FRAME = 16384
 async def serve(reader, emit, controller):
+    controller.on_lost = lambda: emit({"id": 0, "state": "offline"})
     try:
         while True:
-            line = await reader.readline()
+            try:
+                line = await reader.readline()
+            except ValueError:
+                emit({"id": 0, "state": "offline", "error": "invalid_frame"})
+                return
             if not line:
                 return
             if len(line) > MAX_FRAME:
                 return
-            request = json.loads(line)
+            try:
+                request = json.loads(line)
+                if not isinstance(request, dict):
+                    raise ValueError("not_object")
+            except (ValueError, UnicodeError):
+                emit({"id": 0, "state": "offline", "error": "invalid_frame"})
+                return
             request_id = request.get('id')
             operation = request.get('operation')
-            if not isinstance(request_id, int) or operation not in {'connect','status','action','disconnect'}:
+            if type(request_id) is not int or operation not in {'connect','status','action','disconnect'}:
                 emit({'id':request_id,'error':'invalid_request'})
                 continue
             try:

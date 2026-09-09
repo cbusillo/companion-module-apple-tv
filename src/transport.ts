@@ -21,10 +21,12 @@ export class Transport {
 			}
 		}
 		child.on('error', fail)
+		child.stdin.on('error', fail)
 		child.on('exit', fail)
-		child.stdout.on('data', (chunk: Buffer) => {
+		child.stdout.setEncoding('utf8')
+		child.stdout.on('data', (chunk: string) => {
 			if (this.child !== child) return
-			this.buffer += chunk.toString('utf8')
+			this.buffer += chunk
 			if (this.buffer.length > 65536) {
 				fail()
 				return
@@ -40,6 +42,10 @@ export class Transport {
 						(reply.capabilities !== undefined &&
 							(!Array.isArray(reply.capabilities) || !reply.capabilities.every((c) => typeof c === 'string')))
 					) {
+						fail()
+						return
+					}
+					if (reply.id === 0 && reply.state === 'offline') {
 						fail()
 						return
 					}

@@ -40,7 +40,7 @@ test('parallel request is rejected rather than unbounded buffering', async () =>
 		t.stop()
 	}
 })
-for (const operation of ['malformed', 'oversize', 'exit'])
+for (const operation of ['malformed', 'oversize', 'exit', 'lost'])
 	test(operation + ' closes session', async () => {
 		const { t } = transport()
 		try {
@@ -58,6 +58,15 @@ test('replacement session rejects old pending request', async () => {
 	await rejected
 	try {
 		assert.equal((await t.request({ operation: 'status' })).state, 'ready')
+	} finally {
+		t.stop()
+	}
+})
+
+test('split UTF-8 chunks preserve response values', async () => {
+	const { t } = transport()
+	try {
+		assert.deepEqual((await t.request({ operation: 'unicode' })).capabilities, ['é'])
 	} finally {
 		t.stop()
 	}

@@ -1,8 +1,9 @@
 import { InstanceBase, InstanceStatus, type SomeCompanionConfigField } from '@companion-module/base'
-import { readFile, lstat } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { open } from 'node:fs/promises'
+import { existsSync, constants } from 'node:fs'
 import { isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { performance } from 'node:perf_hooks'
 import { GetConfigFields, type ModuleConfig } from './config.js'
 import { Transport } from './transport.js'
 export type ModuleSchema = {
@@ -38,6 +39,10 @@ export default class AppleTV extends InstanceBase<ModuleSchema> {
 	private tail: Promise<void> = Promise.resolve()
 	private queued = 0
 	private ready = false
+	private healthTimer: NodeJS.Timeout | undefined
+	private probe = false
+	private retryDelay = 5000
+	private lastActivity = 0
 	async init(config: ModuleConfig): Promise<void> {
 		this.setVariableDefinitions({
 			connection: { name: 'Connection state' },
@@ -66,6 +71,7 @@ export default class AppleTV extends InstanceBase<ModuleSchema> {
 	async configUpdated(config: ModuleConfig): Promise<void> {
 		await this.destroy()
 		this.config = config
+		this.retryDelay = 5000
 		if (!config.enabled) {
 			this.updateStatus(InstanceStatus.Disconnected, 'Disabled')
 			this.setVariableValues({ connection: 'disabled', last_result: '' })
@@ -79,15 +85,27 @@ export default class AppleTV extends InstanceBase<ModuleSchema> {
 		this.setVariableValues({ connection: 'connecting' })
 		try {
 			if (!isAbsolute(this.config.python) || !isAbsolute(this.config.credentialFile)) throw new Error('configuration')
-			const stat = await lstat(this.config.credentialFile)
-			if (
-				!stat.isFile() ||
-				stat.size > 8192 ||
-				(stat.mode & 0o077) !== 0 ||
-				(process.getuid && stat.uid !== process.getuid())
+			const file = await open(
+				this.config.credentialFile,
+				constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
 			)
-				throw new Error('credential_permissions')
-			const secret: unknown = JSON.parse(await readFile(this.config.credentialFile, 'utf8'))
+			let secret: unknown
+			try {
+				const stat = await file.stat()
+				if (
+					!stat.isFile() ||
+					stat.size > 8192 ||
+					(stat.mode & 0o077) !== 0 ||
+					(process.getuid && stat.uid !== process.getuid())
+				)
+					throw new Error('credential_permissions')
+				const buffer = Buffer.alloc(8193)
+				const { bytesRead } = await file.read(buffer, 0, buffer.length, 0)
+				if (bytesRead > 8192) throw new Error('credential_size')
+				secret = JSON.parse(buffer.subarray(0, bytesRead).toString('utf8'))
+			} finally {
+				await file.close()
+			}
 			if (this.generation !== generation) return
 			this.transport.start(this.config.python, [
 				fileURLToPath(
@@ -100,26 +118,66 @@ export default class AppleTV extends InstanceBase<ModuleSchema> {
 			const response = await this.transport.request({ operation: 'connect', secret })
 			if (this.generation !== generation) return
 			if (response.state !== 'ready' || response.error) throw new Error('connection')
-			this.capabilities = new Set(response.capabilities)
+			const health = await this.transport.request({ operation: 'status' }, 3000)
+			if (this.generation !== generation) return
+			if (health.state !== 'ready' || health.error) throw new Error('health')
+			this.capabilities = new Set(health.capabilities)
 			this.ready = true
 			this.updateStatus(InstanceStatus.Ok)
 			this.setVariableValues({ connection: 'ready', last_result: '' })
+			this.lastActivity = performance.now()
+			this.healthTimer = setInterval(() => {
+				void this.checkHealth().catch(() => undefined)
+			}, 1000)
 		} catch {
 			if (this.generation === generation) this.offline()
 		}
+	}
+	private async checkHealth(): Promise<void> {
+		if (!this.ready || this.queued || this.probe || performance.now() - this.lastActivity < 30000) return
+		const generation = this.generation
+		this.probe = true
+		const task = this.tail.then(async () => {
+			try {
+				if (generation !== this.generation) return
+				const reply = await this.transport.request({ operation: 'status' }, 3000)
+				if (generation !== this.generation) return
+				if (reply.error || reply.state !== 'ready') {
+					this.offline()
+					return
+				}
+				this.capabilities = new Set(reply.capabilities)
+				this.retryDelay = 5000
+				this.lastActivity = performance.now()
+			} catch {
+				if (generation === this.generation) this.offline()
+			} finally {
+				if (generation === this.generation) this.probe = false
+			}
+		})
+		this.tail = task.catch(() => undefined)
+		await task
 	}
 	private offline(): void {
 		++this.generation
 		this.ready = false
 		this.capabilities.clear()
 		this.transport.stop()
+		if (this.healthTimer) clearInterval(this.healthTimer)
+		this.healthTimer = undefined
+		this.probe = false
 		this.updateStatus(InstanceStatus.ConnectionFailure, 'Offline or unconfigured; no input replay')
 		this.setVariableValues({ connection: 'offline', last_result: 'not confirmed' })
-		if (!this.timer && this.config?.enabled)
-			this.timer = setTimeout(() => {
-				this.timer = undefined
-				void this.connect()
-			}, 5000)
+		if (!this.timer && this.config?.enabled) {
+			this.timer = setTimeout(
+				() => {
+					this.timer = undefined
+					void this.connect().catch(() => undefined)
+				},
+				this.retryDelay + Math.floor(Math.random() * 1000),
+			)
+			this.retryDelay = Math.min(this.retryDelay * 2, 60000)
+		}
 	}
 	private async dispatch(key: string): Promise<void> {
 		const command = commands[key]
@@ -128,11 +186,12 @@ export default class AppleTV extends InstanceBase<ModuleSchema> {
 			return
 		}
 		const generation = this.generation
-		const submitted = Date.now()
+		const submitted = performance.now()
 		this.queued++
 		const task = this.tail
 			.then(async () => {
-				if (generation !== this.generation || Date.now() - submitted > 1000) {
+				if (generation !== this.generation) return
+				if (performance.now() - submitted > 1000) {
 					this.setVariableValues({ last_result: 'expired; not sent' })
 					return
 				}
@@ -142,7 +201,11 @@ export default class AppleTV extends InstanceBase<ModuleSchema> {
 					if (reply.error) {
 						this.setVariableValues({ last_result: 'rejected' })
 						if (reply.state !== 'ready') this.offline()
-					} else this.setVariableValues({ last_result: 'dispatched; not state-confirmed' })
+					} else {
+						this.lastActivity = performance.now()
+						this.retryDelay = 5000
+						this.setVariableValues({ last_result: 'dispatched; not state-confirmed' })
+					}
 				} catch {
 					if (generation === this.generation) this.offline()
 				}
@@ -159,6 +222,9 @@ export default class AppleTV extends InstanceBase<ModuleSchema> {
 		this.capabilities.clear()
 		if (this.timer) clearTimeout(this.timer)
 		this.timer = undefined
+		if (this.healthTimer) clearInterval(this.healthTimer)
+		this.healthTimer = undefined
+		this.probe = false
 		this.transport.stop()
 	}
 }
