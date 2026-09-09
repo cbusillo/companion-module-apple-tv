@@ -8,8 +8,9 @@ This module communicates directly with pyatv in its own child process, without
 the MCR app. It does not pair devices or claim physical outcome confirmation.
 Supported commands depend on the connected device's reported capabilities.
 
-Retain MCR for rollback until the replacement passes physical qualification. Do
-not paste credentials into configuration fields or committed files.
+MCR remains the native Mac keyboard volume/mute router. Keep its old Apple TV
+paths for rollback until all migrated callers pass qualification. Do not paste
+credentials into configuration fields or committed files.
 
 ## Pairing utility (owner-observed pilot)
 
@@ -44,3 +45,6 @@ The module declares `filesystem` to read its owner-only credential file and
 filesystem access for that declaration; it cannot limit the grant to one file.
 The module itself validates the selected file and directory and does not write
 credentials. The separate pairing utility owns credential creation.
+
+This module owns Apple TV controls only. Samsung automation belongs to HA;
+native keyboard routing and its direct Samsung transport remain in MCR.

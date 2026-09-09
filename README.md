@@ -1,12 +1,15 @@
 # Apple TV Companion module prototype
 
-Prototype for retiring the Media Control Relay app when Companion can replace
-the required behavior. It uses a persistent, locally spawned Python/pyatv
+Prototype for moving Apple TV control-surface actions from Media Control Relay
+to Companion. MCR remains the native Mac keyboard volume/mute router with its
+direct Samsung transport. It uses a persistent, locally spawned Python/pyatv
 worker. No installed MCR app or MCR socket is used.
 
-This is not yet a production replacement. Real-device pairing, Apple TV
-dispatch, encoder response, reconnect, and Samsung/automatic-media-key parity
-remain unqualified. The module starts disabled and does not create pairings.
+The owner confirmed the pilot controls, sleep/wake and pilot-session reconnect
+on September 9, 2026. Startup/login, broader network-loss behavior and rollback
+still need qualification. Samsung control and native keyboard routing are
+outside this module. New connections start disabled; pairing is handled by the
+separate interactive utility.
 
 ## Development
 
@@ -50,8 +53,8 @@ playback or device power. `last_result` distinguishes dispatch acknowledgement
 from physical state confirmation. Readiness requires a successful app-list round
 trip. Disconnect notifications invalidate the session immediately; after 30
 seconds idle another app-list query detects a silent connection loss within a
-three-second request timeout. Real-device sleep/wake behavior still needs
-qualification.
+three-second request timeout. The local sleep/wake pilot passed; this does not
+establish behavior on other devices or during a network blackhole.
 
 ## Failure and lifecycle contract
 
@@ -75,13 +78,22 @@ installed runtime. The new worker excludes discovery/pairing operations from its
 public request surface. pyatv 0.18.0 is locked in uv.lock. Bitfocus's official
 TypeScript module template is retained in git history.
 
-## Retirement gate
+## Ownership and migration gate
 
-Do not uninstall MCR until Apple TV pairing/session/reconnect and real usage,
-Samsung volume/mute routing, automatic physical-media-key behavior (or explicit
-owner retirement), shutdown outcomes, login startup and rollback have each been
-accepted. Host-specific profiles and credentials belong outside this repository.
-Owner layout edits must not be overwritten.
+MCR stays responsible for route-sensitive native keyboard volume/mute and its
+independent direct Samsung transport. Companion owns control-surface actions; HA
+owns device automation. This module replaces only Apple TV control-surface paths
+and must not grow a Mac keyboard observer or Samsung adapter.
+
+Before removing MCR's old Apple TV paths, inventory registered URL consumers,
+startup hooks and shutdown callers; qualify their replacement and rollback. Do
+not uninstall MCR. Host-specific profiles and credentials stay outside this
+repository, and owner layout edits must not be overwritten.
+
+The durable decision and remaining work are tracked in
+[MCR ownership plan #101](https://github.com/cbusillo/media-control-relay/issues/101)
+and
+[Apple TV qualification #102](https://github.com/cbusillo/media-control-relay/issues/102).
 
 ## Pairing utility (owner-observed pilot)
 
