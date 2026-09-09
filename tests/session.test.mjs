@@ -163,3 +163,10 @@ test('successful action refreshes capabilities', async () => {
 	await module.dispatch('up')
 	assert.equal(module.capabilities.has('select'), true)
 })
+
+test('omitted action capability field preserves last known capabilities', async () => {
+	const { module } = fixture()
+	module.transport.request = async () => ({ state: 'ready' })
+	await module.dispatch('up')
+	assert.equal(module.capabilities.has('navigation'), true)
+})

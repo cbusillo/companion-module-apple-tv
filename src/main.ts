@@ -157,7 +157,7 @@ export default class AppleTV extends InstanceBase<ModuleSchema> {
 					this.offline()
 					return
 				}
-				this.capabilities = new Set(reply.capabilities)
+				if (Array.isArray(reply.capabilities)) this.capabilities = new Set(reply.capabilities)
 				this.retryDelay = 5000
 				this.lastActivity = performance.now()
 			} catch {
@@ -218,7 +218,7 @@ export default class AppleTV extends InstanceBase<ModuleSchema> {
 					} else {
 						this.lastActivity = performance.now()
 						this.retryDelay = 5000
-						this.capabilities = new Set(reply.capabilities)
+						if (Array.isArray(reply.capabilities)) this.capabilities = new Set(reply.capabilities)
 						this.setVariableValues({ last_result: 'dispatched; not state-confirmed' })
 					}
 				} catch {
