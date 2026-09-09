@@ -147,3 +147,19 @@ test('successful real action resets retry backoff during active use', async () =
 	await module.dispatch('up')
 	assert.equal(module.retryDelay, 5000)
 })
+
+test('unsupported health query stops reconnect attempts', async () => {
+	const { module, updates } = fixture()
+	module.config.enabled = true
+	module.transport.request = async () => ({ state: 'unknown', error: 'healthUnsupported' })
+	await module.checkHealth()
+	assert.equal(module.ready, false)
+	assert.equal(module.timer, undefined)
+	assert.equal(updates.at(-1).connection, 'unsupported')
+})
+test('successful action refreshes capabilities', async () => {
+	const { module } = fixture()
+	module.transport.request = async () => ({ state: 'ready', capabilities: ['navigation', 'select'] })
+	await module.dispatch('up')
+	assert.equal(module.capabilities.has('select'), true)
+})

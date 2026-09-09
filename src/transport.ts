@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+const MAX_FRAME = 16384
 export type Reply = { id: number; state?: string; capabilities?: string[]; error?: string }
 export class Transport {
 	private child: ChildProcessWithoutNullStreams | undefined
@@ -27,13 +28,17 @@ export class Transport {
 		child.stdout.on('data', (chunk: string) => {
 			if (this.child !== child) return
 			this.buffer += chunk
-			if (this.buffer.length > 65536) {
+			if (Buffer.byteLength(this.buffer) > MAX_FRAME * 4) {
 				fail()
 				return
 			}
 			let end: number
 			while ((end = this.buffer.indexOf('\n')) >= 0) {
 				const line = this.buffer.slice(0, end)
+				if (Buffer.byteLength(line) + 1 > MAX_FRAME) {
+					fail()
+					return
+				}
 				this.buffer = this.buffer.slice(end + 1)
 				try {
 					const reply = JSON.parse(line) as Reply
@@ -67,7 +72,7 @@ export class Transport {
 		if (!child || this.pending.size >= 1) return Promise.reject(new Error('not_available'))
 		const id = ++this.sequence
 		const frame = JSON.stringify({ ...value, id }) + '\n'
-		if (Buffer.byteLength(frame) > 16384) return Promise.reject(new Error('oversized_request'))
+		if (Buffer.byteLength(frame) > MAX_FRAME) return Promise.reject(new Error('oversized_request'))
 		return new Promise((resolve, reject) => {
 			const timer = setTimeout(() => {
 				this.stop()

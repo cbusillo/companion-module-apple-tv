@@ -1,7 +1,7 @@
 import { InstanceBase, InstanceStatus, type SomeCompanionConfigField } from '@companion-module/base'
-import { open } from 'node:fs/promises'
+import { open, lstat } from 'node:fs/promises'
 import { existsSync, constants } from 'node:fs'
-import { isAbsolute } from 'node:path'
+import { isAbsolute, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { performance } from 'node:perf_hooks'
 import { GetConfigFields, type ModuleConfig } from './config.js'
@@ -85,6 +85,9 @@ export default class AppleTV extends InstanceBase<ModuleSchema> {
 		this.setVariableValues({ connection: 'connecting' })
 		try {
 			if (!isAbsolute(this.config.python) || !isAbsolute(this.config.credentialFile)) throw new Error('configuration')
+			const parent = await lstat(dirname(this.config.credentialFile))
+			if (!parent.isDirectory() || (parent.mode & 0o077) !== 0 || (process.getuid && parent.uid !== process.getuid()))
+				throw new Error('credential_directory')
 			const file = await open(
 				this.config.credentialFile,
 				constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
@@ -120,6 +123,10 @@ export default class AppleTV extends InstanceBase<ModuleSchema> {
 			if (response.state !== 'ready' || response.error) throw new Error('connection')
 			const health = await this.transport.request({ operation: 'status' }, 3000)
 			if (this.generation !== generation) return
+			if (health.error === 'healthUnsupported') {
+				this.offline(false)
+				return
+			}
 			if (health.state !== 'ready' || health.error) throw new Error('health')
 			this.capabilities = new Set(health.capabilities)
 			this.ready = true
@@ -142,6 +149,10 @@ export default class AppleTV extends InstanceBase<ModuleSchema> {
 				if (generation !== this.generation) return
 				const reply = await this.transport.request({ operation: 'status' }, 3000)
 				if (generation !== this.generation) return
+				if (reply.error === 'healthUnsupported') {
+					this.offline(false)
+					return
+				}
 				if (reply.error || reply.state !== 'ready') {
 					this.offline()
 					return
@@ -158,7 +169,7 @@ export default class AppleTV extends InstanceBase<ModuleSchema> {
 		this.tail = task.catch(() => undefined)
 		await task
 	}
-	private offline(): void {
+	private offline(retry = true): void {
 		++this.generation
 		this.ready = false
 		this.capabilities.clear()
@@ -166,9 +177,12 @@ export default class AppleTV extends InstanceBase<ModuleSchema> {
 		if (this.healthTimer) clearInterval(this.healthTimer)
 		this.healthTimer = undefined
 		this.probe = false
-		this.updateStatus(InstanceStatus.ConnectionFailure, 'Offline or unconfigured; no input replay')
-		this.setVariableValues({ connection: 'offline', last_result: 'not confirmed' })
-		if (!this.timer && this.config?.enabled) {
+		this.updateStatus(
+			retry ? InstanceStatus.ConnectionFailure : InstanceStatus.BadConfig,
+			retry ? 'Offline or unconfigured; no input replay' : 'Required health query unsupported; connection stopped',
+		)
+		this.setVariableValues({ connection: retry ? 'offline' : 'unsupported', last_result: 'not confirmed' })
+		if (retry && !this.timer && this.config?.enabled) {
 			this.timer = setTimeout(
 				() => {
 					this.timer = undefined
@@ -204,6 +218,7 @@ export default class AppleTV extends InstanceBase<ModuleSchema> {
 					} else {
 						this.lastActivity = performance.now()
 						this.retryDelay = 5000
+						this.capabilities = new Set(reply.capabilities)
 						this.setVariableValues({ last_result: 'dispatched; not state-confirmed' })
 					}
 				} catch {
