@@ -196,9 +196,17 @@ export default class AppleTV extends InstanceBase<ModuleSchema> {
 		}
 	}
 	private async dispatch(key: string): Promise<void> {
+		// The worker checks current capabilities immediately before dispatch.
+		// A cached negative here can outlive the start of seekable playback.
 		const command = commands[key]
-		if (!this.ready || !command || !this.capabilities.has(command.capability) || this.queued >= 8) {
-			this.setVariableValues({ last_result: 'unavailable or busy' })
+		if (!this.ready || !command || this.queued >= 8) {
+			this.setVariableValues({
+				last_result: !this.ready
+					? 'not connected; not sent'
+					: !command
+						? 'unknown command; not sent'
+						: 'busy; not sent',
+			})
 			return
 		}
 		const generation = this.generation
@@ -215,7 +223,9 @@ export default class AppleTV extends InstanceBase<ModuleSchema> {
 					const reply = await this.transport.request({ operation: 'action', action: command.action }, 3000)
 					if (generation !== this.generation) return
 					if (reply.error) {
-						this.setVariableValues({ last_result: 'rejected' })
+						this.setVariableValues({
+							last_result: reply.error === 'unsupportedAction' ? 'unsupported by current playback' : 'rejected',
+						})
 						if (reply.state !== 'ready') this.offline()
 					} else {
 						this.lastActivity = performance.now()

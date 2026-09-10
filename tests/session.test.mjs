@@ -89,7 +89,7 @@ test('busy queue suppresses probe and rejects inputs beyond eight', async () => 
 	await module.checkHealth()
 	await module.dispatch('up')
 	assert.deepEqual(calls, [])
-	assert.equal(updates.at(-1).last_result, 'unavailable or busy')
+	assert.equal(updates.at(-1).last_result, 'busy; not sent')
 })
 test('destroy prevents a late probe reply from restoring readiness', async () => {
 	const { module } = fixture()
@@ -177,9 +177,8 @@ for (const [command, delta] of [
 	['seekForward30', 30],
 	['seekBackward30', -30],
 ]) {
-	test(command + ' dispatches its exact seek interval once', async () => {
+	test(command + ' dispatches once even when cached seek availability is stale', async () => {
 		const { module } = fixture()
-		module.capabilities.add('relativeSeek')
 		const requests = []
 		module.transport.request = async (request) => {
 			requests.push(request)
@@ -188,9 +187,29 @@ for (const [command, delta] of [
 		await module.dispatch(command)
 		assert.deepEqual(requests, [{ operation: 'action', action: { action: 'relativeSeek', delta } }])
 	})
-	test(command + ' is rejected without seek capability', async () => {
-		const { module, calls } = fixture()
+	test(command + ' reports a current worker rejection without replay', async () => {
+		const { module, calls, updates } = fixture()
+		module.transport.request = async (request) => {
+			calls.push(request.operation)
+			return { state: 'ready', error: 'unsupportedAction' }
+		}
+		await module.dispatch(command)
+		assert.deepEqual(calls, ['action'])
+		assert.equal(updates.at(-1).last_result, 'unsupported by current playback')
+		assert.equal(module.ready, true)
+		assert.equal(module.timer, undefined)
+	})
+}
+
+for (const [ready, command, reason] of [
+	[false, 'seekForward30', 'not connected; not sent'],
+	[true, 'notACommand', 'unknown command; not sent'],
+]) {
+	test(reason, async () => {
+		const { module, calls, updates } = fixture()
+		module.ready = ready
 		await module.dispatch(command)
 		assert.deepEqual(calls, [])
+		assert.equal(updates.at(-1).last_result, reason)
 	})
 }
