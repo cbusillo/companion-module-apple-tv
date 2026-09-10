@@ -58,6 +58,11 @@ seconds idle another app-list query detects a silent connection loss within a
 three-second request timeout. The local sleep/wake pilot passed; this does not
 establish behavior on other devices or during a network blackhole.
 
+Since 0.2.3, `last_result` replaces `unavailable or busy` with separate
+`not connected; not sent`, `unknown command; not sent`, and `busy; not sent`
+results. Unsupported actions report `unsupported by current playback`. Update
+any custom comparisons against the old strings when upgrading.
+
 ## Failure and lifecycle contract
 
 - At most eight submitted actions; queued input expires after one second.

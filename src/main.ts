@@ -36,6 +36,7 @@ export default class AppleTV extends InstanceBase<ModuleSchema> {
 	config!: ModuleConfig
 	private generation = 0
 	private transport = new Transport(() => this.offline())
+	// Retained session snapshot; dispatch uses the worker's per-action check.
 	private capabilities = new Set<string>()
 	private timer: NodeJS.Timeout | undefined
 	private tail: Promise<void> = Promise.resolve()
