@@ -44,7 +44,8 @@ yarn package
    simultaneously.
 
 One Remote command action exposes navigation, select, back, home, play/pause,
-previous/next, relative volume (one step), and seek (ten seconds). Each action
+previous/next, relative volume (one step), and seek (ten or thirty seconds).
+Each action
 requires the corresponding pyatv capability. No mute, power, text entry or
 app-launch support is claimed.
 

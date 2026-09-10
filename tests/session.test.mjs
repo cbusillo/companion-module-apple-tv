@@ -170,3 +170,27 @@ test('omitted action capability field preserves last known capabilities', async 
 	await module.dispatch('up')
 	assert.equal(module.capabilities.has('navigation'), true)
 })
+
+for (const [command, delta] of [
+	['seekForward', 10],
+	['seekBackward', -10],
+	['seekForward30', 30],
+	['seekBackward30', -30],
+]) {
+	test(command + ' dispatches its exact seek interval once', async () => {
+		const { module } = fixture()
+		module.capabilities.add('relativeSeek')
+		const requests = []
+		module.transport.request = async (request) => {
+			requests.push(request)
+			return { state: 'ready' }
+		}
+		await module.dispatch(command)
+		assert.deepEqual(requests, [{ operation: 'action', action: { action: 'relativeSeek', delta } }])
+	})
+	test(command + ' is rejected without seek capability', async () => {
+		const { module, calls } = fixture()
+		await module.dispatch(command)
+		assert.deepEqual(calls, [])
+	})
+}

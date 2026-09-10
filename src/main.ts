@@ -29,6 +29,8 @@ const commands: Record<string, { capability: string; action: Record<string, unkn
 	volumeDown: { capability: 'relativeVolume', action: { action: 'relativeVolume', delta: -1 } },
 	seekForward: { capability: 'relativeSeek', action: { action: 'relativeSeek', delta: 10 } },
 	seekBackward: { capability: 'relativeSeek', action: { action: 'relativeSeek', delta: -10 } },
+	seekForward30: { capability: 'relativeSeek', action: { action: 'relativeSeek', delta: 30 } },
+	seekBackward30: { capability: 'relativeSeek', action: { action: 'relativeSeek', delta: -30 } },
 }
 export default class AppleTV extends InstanceBase<ModuleSchema> {
 	config!: ModuleConfig
