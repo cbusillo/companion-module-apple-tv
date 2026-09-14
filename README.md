@@ -47,8 +47,39 @@ One Remote command action exposes navigation, select, back, home, play/pause,
 previous/next, relative volume (one step), and seek (ten or thirty seconds).
 The worker checks the current pyatv capability immediately before each action.
 Cached availability never blocks a newly available action; unsupported commands
-are rejected without replay. No mute, power, text entry or
-app-launch support is claimed.
+are rejected without replay. Version 0.3 adds Control Center, App Switcher,
+Screensaver, state-based sleep/wake, app launching by bundle identifier, and
+volume save/zero/restore. Text entry remains outside the module.
+
+Volume save/restore requires current `Volume` and `SetVolume` availability. It
+never guesses a level when playback is already at zero. The saved level is
+session-local and cleared by dial changes, external nonzero volume changes,
+reported output-device changes, lost capabilities, or reconnect. Output changes
+that the device does not report cannot be detected. A power toggle refuses an
+unknown state rather than guessing which command to send.
+
+## Now Playing
+
+An optional AirPlay pairing enables the MRP metadata transport. Add it to a new
+credential file with the interactive helper; the existing remote pairing stays
+untouched:
+
+```sh
+uv run python bridge/pair_metadata.py \
+  --source ~/.config/companion-apple-tv/credentials.json \
+  --output ~/.config/companion-apple-tv/credentials-with-metadata.json
+```
+
+Select the new file in Companion after successful verification. The helper
+never accepts a PIN as a command argument, prints credentials, or overwrites an
+existing destination. The runtime never initiates pairing.
+
+The module polls cached device metadata once per second through its serialized
+worker queue and provides title, artist, app, playback state, elapsed time,
+remaining time, progress, volume, mute-save state, and power variables. Live
+streams without a duration have no invented remaining time. Transient metadata
+errors retain the last good text and mark it stale. Connection loss explicitly
+marks telemetry offline. Available metadata depends on the playing app.
 
 The connection variable reports session setup, not independently verified
 playback or device power. `last_result` distinguishes dispatch acknowledgement

@@ -1,6 +1,12 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 const MAX_FRAME = 16384
-export type Reply = { id: number; state?: string; capabilities?: string[]; error?: string }
+export type Reply = {
+	id: number
+	state?: string
+	capabilities?: string[]
+	error?: string
+	values?: Record<string, string>
+}
 export class Transport {
 	private child: ChildProcessWithoutNullStreams | undefined
 	private pending = new Map<
@@ -44,6 +50,11 @@ export class Transport {
 					const reply = JSON.parse(line) as Reply
 					if (
 						!Number.isInteger(reply.id) ||
+						(reply.values !== undefined &&
+							(!reply.values ||
+								typeof reply.values !== 'object' ||
+								Array.isArray(reply.values) ||
+								!Object.values(reply.values).every((v) => typeof v === 'string'))) ||
 						(reply.capabilities !== undefined &&
 							(!Array.isArray(reply.capabilities) || !reply.capabilities.every((c) => typeof c === 'string')))
 					) {

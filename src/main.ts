@@ -5,13 +5,14 @@ import { isAbsolute, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { performance } from 'node:perf_hooks'
 import { GetConfigFields, type ModuleConfig } from './config.js'
-import { Transport } from './transport.js'
+import { Transport, type Reply } from './transport.js'
+import { displayDefaults, displayValues, type DisplayValues } from './display.js'
 export type ModuleSchema = {
 	config: ModuleConfig
 	secrets: undefined
-	actions: { command: { options: { command: string } } }
+	actions: { command: { options: { command: string } }; launchApp: { options: { appId: string } } }
 	feedbacks: Record<string, never>
-	variables: { connection: string; last_result: string }
+	variables: { connection: string; last_result: string } & DisplayValues
 }
 export const UpgradeScripts = []
 const commands: Record<string, { capability: string; action: Record<string, unknown> }> = {
@@ -20,10 +21,19 @@ const commands: Record<string, { capability: string; action: Record<string, unkn
 	left: { capability: 'navigation', action: { action: 'navigate', direction: 'left' } },
 	right: { capability: 'navigation', action: { action: 'navigate', direction: 'right' } },
 	...Object.fromEntries(
-		['select', 'back', 'home', 'playPause', 'previous', 'next'].map((key) => [
-			key,
-			{ capability: key, action: { action: key } },
-		]),
+		[
+			'select',
+			'back',
+			'home',
+			'playPause',
+			'previous',
+			'next',
+			'toggleMute',
+			'controlCenter',
+			'appSwitcher',
+			'screensaver',
+			'power',
+		].map((key) => [key, { capability: key, action: { action: key } }]),
 	),
 	volumeUp: { capability: 'relativeVolume', action: { action: 'relativeVolume', delta: 1 } },
 	volumeDown: { capability: 'relativeVolume', action: { action: 'relativeVolume', delta: -1 } },
@@ -50,7 +60,11 @@ export default class AppleTV extends InstanceBase<ModuleSchema> {
 		this.setVariableDefinitions({
 			connection: { name: 'Connection state' },
 			last_result: { name: 'Last dispatch result (not physical confirmation)' },
+			...(Object.fromEntries(
+				Object.keys(displayDefaults).map((key) => [key, { name: key.replaceAll('_', ' ') }]),
+			) as Record<keyof DisplayValues, { name: string }>),
 		})
+		this.setVariableValues(displayDefaults)
 		this.setActionDefinitions({
 			command: {
 				name: 'Remote command',
@@ -64,6 +78,11 @@ export default class AppleTV extends InstanceBase<ModuleSchema> {
 					},
 				],
 				callback: async (event) => this.dispatch(event.options.command),
+			},
+			launchApp: {
+				name: 'Launch App',
+				options: [{ id: 'appId', type: 'textinput', label: 'App Bundle Identifier', default: '' }],
+				callback: async (event) => this.dispatchAction({ action: 'launchApp', appId: event.options.appId }),
 			},
 		})
 		await this.configUpdated(config)
@@ -137,11 +156,36 @@ export default class AppleTV extends InstanceBase<ModuleSchema> {
 			this.setVariableValues({ connection: 'ready', last_result: '' })
 			this.lastActivity = performance.now()
 			this.healthTimer = setInterval(() => {
-				void this.checkHealth().catch(() => undefined)
+				void this.checkHealth()
+					.then(async () => this.refreshSnapshot())
+					.catch(() => undefined)
 			}, 1000)
 		} catch {
 			if (this.generation === generation) this.offline()
 		}
+	}
+	private applySnapshot(reply: Reply): void {
+		if (reply.values) this.setVariableValues(displayValues(reply.values))
+	}
+	private async refreshSnapshot(): Promise<void> {
+		if (!this.ready || this.queued || this.probe) return
+		const generation = this.generation
+		this.probe = true
+		const task = this.tail.then(async () => {
+			try {
+				if (generation !== this.generation) return
+				const reply = await this.transport.request({ operation: 'snapshot' }, 3000)
+				if (generation !== this.generation) return
+				if (reply.error || reply.state !== 'ready') this.offline()
+				else this.applySnapshot(reply)
+			} catch {
+				if (generation === this.generation) this.offline()
+			} finally {
+				if (generation === this.generation) this.probe = false
+			}
+		})
+		this.tail = task.catch(() => undefined)
+		await task
 	}
 	private async checkHealth(): Promise<void> {
 		if (!this.ready || this.queued || this.probe || performance.now() - this.lastActivity < 30000) return
@@ -184,7 +228,13 @@ export default class AppleTV extends InstanceBase<ModuleSchema> {
 			retry ? InstanceStatus.ConnectionFailure : InstanceStatus.BadConfig,
 			retry ? 'Offline or unconfigured; no input replay' : 'Required health query unsupported; connection stopped',
 		)
-		this.setVariableValues({ connection: retry ? 'offline' : 'unsupported', last_result: 'not confirmed' })
+		this.setVariableValues({
+			connection: retry ? 'offline' : 'unsupported',
+			last_result: 'not confirmed',
+			metadata_state: 'Offline',
+			mute_state: 'Unavailable',
+			power: 'Unknown',
+		})
 		if (retry && !this.timer && this.config?.enabled) {
 			this.timer = setTimeout(
 				() => {
@@ -210,6 +260,13 @@ export default class AppleTV extends InstanceBase<ModuleSchema> {
 			})
 			return
 		}
+		await this.dispatchAction(command.action)
+	}
+	private async dispatchAction(action: Record<string, unknown>): Promise<void> {
+		if (!this.ready || this.queued >= 8) {
+			this.setVariableValues({ last_result: !this.ready ? 'not connected; not sent' : 'busy; not sent' })
+			return
+		}
 		const generation = this.generation
 		const submitted = performance.now()
 		this.queued++
@@ -221,11 +278,21 @@ export default class AppleTV extends InstanceBase<ModuleSchema> {
 					return
 				}
 				try {
-					const reply = await this.transport.request({ operation: 'action', action: command.action }, 3000)
+					const reply = await this.transport.request(
+						{ operation: 'action', action },
+						action.action === 'toggleMute' ? 7000 : 3000,
+					)
 					if (generation !== this.generation) return
 					if (reply.error) {
 						this.setVariableValues({
-							last_result: reply.error === 'unsupportedAction' ? 'unsupported by current playback' : 'rejected',
+							last_result:
+								reply.error === 'unsupportedAction'
+									? 'unsupported by current playback'
+									: reply.error === 'noSavedVolume'
+										? 'already at zero; no saved volume'
+										: reply.error === 'unknownPower'
+											? 'power state unknown; not sent'
+											: 'rejected',
 						})
 						if (reply.state !== 'ready') this.offline()
 					} else {

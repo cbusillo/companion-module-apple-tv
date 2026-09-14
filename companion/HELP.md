@@ -8,6 +8,11 @@ This module communicates directly with pyatv in its own child process, without
 the MCR app. It does not pair devices or claim physical outcome confirmation.
 Supported commands depend on the connected device's reported capabilities.
 
+Version 0.3 includes volume save/zero/restore, Control Center, App Switcher,
+Screensaver, sleep/wake, and app launching. An optional separately provisioned
+AirPlay credential adds Now Playing metadata. See README.md for the interactive
+pairing helper and volume restore behavior.
+
 MCR remains the native Mac keyboard volume/mute router. Keep its old Apple TV
 paths for rollback until all migrated callers pass qualification. Do not paste
 credentials into configuration fields or committed files.

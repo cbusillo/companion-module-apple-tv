@@ -28,12 +28,17 @@ async def serve(reader, emit, controller):
                 return
             request_id = request.get('id')
             operation = request.get('operation')
-            if type(request_id) is not int or operation not in {'connect','status','action','disconnect'}:
+            if type(request_id) is not int or operation not in {'connect','status','snapshot','action','disconnect'}:
                 emit({'id':request_id,'error':'invalid_request'})
                 continue
             try:
                 outcome = await asyncio.wait_for(controller.handle(request), 12)
-                emit({'id':request_id,'state':outcome['state'],'capabilities':outcome.get('capabilities',[])})
+                reply = {'id':request_id,'state':outcome['state'],'capabilities':outcome.get('capabilities',[])}
+                if operation == 'snapshot':
+                    allowed = {'volume','mute_state','power','metadata_state','title','artist','app','playback_state','position','duration'}
+                    reply['values'] = {key: value[:240] for key, value in outcome.get('values', {}).items()
+                                       if key in allowed and isinstance(value, str)}
+                emit(reply)
             except HelperError as error:
                 emit({'id':request_id,'error':error.code,'state':error.state,'capabilities':[]})
             except Exception:

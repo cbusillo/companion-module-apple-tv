@@ -1,12 +1,31 @@
 """Adapted from MIT-licensed Media Control Relay; see LICENSE-MCR."""
 from __future__ import annotations
 import asyncio
+import math
+import time
 from typing import Any
 from collections.abc import Callable, Awaitable
 import pyatv
-from pyatv.const import FeatureName, FeatureState, Protocol as PyATVProtocol
+from pyatv.const import FeatureName, FeatureState, InputAction, PowerState, Protocol as PyATVProtocol
 from pyatv.storage.memory_storage import MemoryStorage
-from pyatv.interface import DeviceListener
+from pyatv.interface import AudioListener, DeviceListener
+
+
+class MuteListener(AudioListener):
+    def __init__(self, forget):
+        self.forget = forget
+
+    def volume_update(self, old_level, new_level):
+        if old_level != new_level and new_level > 0:
+            self.forget()
+
+    def volume_device_update(self, output_device, old_level, new_level):
+        if old_level != new_level and new_level > 0:
+            self.forget()
+
+    def outputdevices_update(self, old_devices, new_devices):
+        if {device.identifier for device in old_devices} != {device.identifier for device in new_devices}:
+            self.forget()
 
 class SessionListener(DeviceListener):
     def __init__(self, lost):
@@ -29,6 +48,12 @@ CAPABILITY_FEATURES = {
     "next": (FeatureName.Next,),
     "relativeSeek": (FeatureName.SkipForward, FeatureName.SkipBackward),
     "relativeVolume": (FeatureName.VolumeUp, FeatureName.VolumeDown),
+    "toggleMute": (FeatureName.Volume, FeatureName.SetVolume),
+    "controlCenter": (FeatureName.ControlCenter,),
+    "appSwitcher": (FeatureName.Home,),
+    "screensaver": (FeatureName.Screensaver,),
+    "power": (FeatureName.TurnOn, FeatureName.TurnOff, FeatureName.PowerState),
+    "launchApp": (FeatureName.LaunchApp,),
 }
 
 class HelperError(Exception):
@@ -56,6 +81,12 @@ class PyATVController:
         self.listener = None
         self.connected = False
         self.on_lost = lambda: None
+        self.saved_volume = None
+        self.saved_outputs = None
+        self.metadata_enabled = False
+        self.playback = {}
+        self.playback_at = 0.0
+        self.audio_listener = None
 
     async def handle(self, operation: dict[str, Any]) -> dict[str, Any]:
         operation_name = operation.get("operation")
@@ -65,6 +96,8 @@ class PyATVController:
             return await self._health()
         if operation_name == "action":
             return await self._action(operation.get("action"))
+        if operation_name == "snapshot":
+            return await self._snapshot()
         if operation_name == "disconnect":
             await self._disconnect()
             return result("dormant")
@@ -80,12 +113,15 @@ class PyATVController:
         host = secret_value.get("host")
         identifier = secret_value.get("identifier")
         credentials = secret_value.get("credentials")
+        metadata_credentials = secret_value.get("airplay_credentials")
         if (
             not isinstance(host, str)
             or not 1 <= len(host) <= 255
             or (not isinstance(identifier, str) or not 1 <= len(identifier) <= 255)
             or not isinstance(credentials, str)
             or not 1 <= len(credentials) <= 4096
+            or (metadata_credentials is not None and
+                (not isinstance(metadata_credentials, str) or not 1 <= len(metadata_credentials) <= 4096))
         ):
             raise HelperError("malformedRequest")
 
@@ -93,33 +129,35 @@ class PyATVController:
             asyncio.get_running_loop(),
             hosts=[host],
             identifier=identifier or None,
-            protocol=PyATVProtocol.Companion,
+            protocol={PyATVProtocol.Companion, PyATVProtocol.AirPlay} if metadata_credentials else PyATVProtocol.Companion,
             storage=self.storage,
         )
         if not configs and identifier:
             configs = await pyatv.scan(
                 asyncio.get_running_loop(),
                 identifier=identifier,
-                protocol=PyATVProtocol.Companion,
+                protocol={PyATVProtocol.Companion, PyATVProtocol.AirPlay} if metadata_credentials else PyATVProtocol.Companion,
                 storage=self.storage,
             )
-        if len(configs) != 1 or configs[0].identifier != identifier:
+        if len(configs) != 1 or identifier not in configs[0].all_identifiers:
             raise HelperError("offline")
         config = configs[0]
         if not config.set_credentials(PyATVProtocol.Companion, credentials):
             raise HelperError("pairingRequired", "pairingRequired")
+        if metadata_credentials and not config.set_credentials(PyATVProtocol.AirPlay, metadata_credentials):
+            raise HelperError("metadataPairingRequired", "pairingRequired")
         try:
-            await self._connect_config(config)
+            await self._connect_config(config, bool(metadata_credentials))
         except Exception as error:
             raise HelperError("offline") from error
         return result("ready", capabilities=self._capabilities())
 
-    async def _connect_config(self, config: Any) -> None:
+    async def _connect_config(self, config: Any, metadata_enabled: bool = False) -> None:
         await self._disconnect()
         self.atv = await pyatv.connect(
             config,
             asyncio.get_running_loop(),
-            protocol=PyATVProtocol.Companion,
+            protocol=None if metadata_enabled else PyATVProtocol.Companion,
             storage=self.storage,
         )
 
@@ -131,6 +169,9 @@ class PyATVController:
         self.listener = SessionListener(lost)
         self.atv.listener = self.listener
         self.connected = True
+        self.metadata_enabled = metadata_enabled
+        self.audio_listener = MuteListener(self._forget_mute)
+        self.atv.audio.listener = self.audio_listener
 
 
     async def _health(self):
@@ -173,6 +214,12 @@ class PyATVController:
             "next": "next",
             "relativeSeek": "relativeSeek",
             "relativeVolume": "relativeVolume",
+            "toggleMute": "toggleMute",
+            "controlCenter": "controlCenter",
+            "appSwitcher": "appSwitcher",
+            "screensaver": "screensaver",
+            "power": "power",
+            "launchApp": "launchApp",
         }.get(action_name)
         if required_capability and required_capability not in self._capabilities():
             raise HelperError("unsupportedAction", "ready")
@@ -205,10 +252,97 @@ class PyATVController:
         elif action_name == "relativeSeek":
             await self._skip(remote, action.get("delta"))
         elif action_name == "relativeVolume":
+            self._forget_mute()
             await self._volume(remote, action.get("delta"))
+        elif action_name == "toggleMute":
+            await self._toggle_mute()
+        elif action_name == "controlCenter":
+            await remote.control_center()
+        elif action_name == "appSwitcher":
+            await remote.home(action=InputAction.DoubleTap)
+        elif action_name == "screensaver":
+            await remote.screensaver()
+        elif action_name == "power":
+            power = self.atv.power
+            if power.power_state == PowerState.On:
+                await power.turn_off()
+            elif power.power_state == PowerState.Off:
+                await power.turn_on()
+            else:
+                raise HelperError("unknownPower", "ready")
+        elif action_name == "launchApp":
+            app_id = action.get("appId")
+            if not isinstance(app_id, str) or not 1 <= len(app_id) <= 255:
+                raise HelperError("unsupportedAction", "ready")
+            await self.atv.apps.launch_app(app_id)
         else:
             raise HelperError("unsupportedAction", "ready")
         return result("ready", capabilities=self._capabilities())
+
+    def _forget_mute(self):
+        self.saved_volume = None
+        self.saved_outputs = None
+
+    def _volume_state(self):
+        if "toggleMute" not in self._capabilities():
+            self._forget_mute()
+            return None, None
+        volume = self.atv.audio.volume
+        if not isinstance(volume, (int, float)) or not math.isfinite(volume) or not 0 <= volume <= 100:
+            self._forget_mute()
+            return None, None
+        outputs = None
+        if self.atv.features.get_feature(FeatureName.OutputDevices).state == FeatureState.Available:
+            outputs = tuple(sorted(device.identifier for device in self.atv.audio.output_devices))
+        if self.saved_volume is not None and (volume > 0 or outputs != self.saved_outputs):
+            self._forget_mute()
+        return volume, outputs
+
+    async def _toggle_mute(self):
+        volume, outputs = self._volume_state()
+        if volume is None:
+            raise HelperError("unsupportedAction", "ready")
+        if self.saved_volume is not None:
+            restore = self.saved_volume
+            self._forget_mute()
+            await self.atv.audio.set_volume(restore)
+        elif volume > 0:
+            await self.atv.audio.set_volume(0.0)
+            self.saved_volume, self.saved_outputs = volume, outputs
+        else:
+            # Never invent a restore level for a device already at zero.
+            raise HelperError("noSavedVolume", "ready")
+
+    async def _snapshot(self):
+        if not self.connected or self.atv is None:
+            raise HelperError("offline")
+        volume, _ = self._volume_state()
+        values = {
+            "volume": "" if volume is None else str(round(volume)),
+            "mute_state": "Muted" if self.saved_volume is not None else "Unmuted" if volume is not None else "Unavailable",
+            "power": self.atv.power.power_state.name,
+            "metadata_state": "Pairing Required" if not self.metadata_enabled else "Ready",
+        }
+        if self.metadata_enabled:
+            try:
+                playing = await asyncio.wait_for(self.atv.metadata.playing(), 1.5)
+                app = self.atv.metadata.app
+                self.playback = {
+                    "title": (playing.title or "Nothing Playing")[:240],
+                    "artist": (playing.artist or playing.series_name or "")[:120],
+                    "app": (app.name if app else "")[:80],
+                    "playback_state": playing.device_state.name,
+                    "position": str(max(0, int(playing.position or 0))),
+                    "duration": str(max(0, int(playing.total_time or 0))),
+                }
+                self.playback_at = time.monotonic()
+            except Exception:
+                # Retain the last good display on a transient metadata failure.
+                values["metadata_state"] = "Stale" if self.playback else "Unavailable"
+        values.update(self.playback)
+        if self.playback_at and time.monotonic() - self.playback_at > 15:
+            values["metadata_state"] = "Stale"
+        return {**result("ready", capabilities=self._capabilities()), "values": values}
 
     async def _skip(self, remote: Any, delta: Any) -> None:
         if not isinstance(delta, int) or delta == 0 or abs(delta) > 60:
@@ -226,11 +360,18 @@ class PyATVController:
             await command()
 
     async def _disconnect(self) -> None:
+        self._forget_mute()
+        self.playback = {}
+        self.playback_at = 0.0
+        self.metadata_enabled = False
         atv, self.atv = self.atv, None
         self.connected = False
         self.listener = None
         if atv is not None:
             atv.listener = None
+            if self.audio_listener is not None:
+                atv.audio.listener = None
+            self.audio_listener = None
             tasks = atv.close()
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)

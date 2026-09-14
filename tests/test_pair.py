@@ -73,7 +73,7 @@ class ProvisionTests(unittest.IsolatedAsyncioTestCase):
 class HealthTests(unittest.IsolatedAsyncioTestCase):
     async def test_disconnect_callback_and_old_callback_is_ignored(self):
         controller = PyATVController()
-        def atv(): return SimpleNamespace(listener=None, close=Mock(return_value=set()), apps=SimpleNamespace(app_list=AsyncMock(return_value=[])))
+        def atv(): return SimpleNamespace(listener=None, audio=SimpleNamespace(listener=None), close=Mock(return_value=set()), apps=SimpleNamespace(app_list=AsyncMock(return_value=[])))
         first, second = atv(), atv()
         lost = Mock(); controller.on_lost = lost
         with patch('controller.pyatv.connect', AsyncMock(side_effect=[first, second])):
