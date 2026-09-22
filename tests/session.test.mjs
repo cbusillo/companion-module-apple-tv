@@ -201,6 +201,24 @@ for (const [command, delta] of [
 	})
 }
 
+for (const [command, direction] of [
+	['swipeUp', 'up'],
+	['swipeDown', 'down'],
+	['swipeLeft', 'left'],
+	['swipeRight', 'right'],
+]) {
+	test(command + ' dispatches one bounded cardinal swipe', async () => {
+		const { module } = fixture()
+		const requests = []
+		module.transport.request = async (request) => {
+			requests.push(request)
+			return { state: 'ready' }
+		}
+		await module.dispatch(command)
+		assert.deepEqual(requests, [{ operation: 'action', action: { action: 'swipe', direction } }])
+	})
+}
+
 for (const [ready, command, reason] of [
 	[false, 'seekForward30', 'not connected; not sent'],
 	[true, 'notACommand', 'unknown command; not sent'],

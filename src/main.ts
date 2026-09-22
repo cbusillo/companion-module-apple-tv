@@ -41,6 +41,10 @@ const commands: Record<string, { capability: string; action: Record<string, unkn
 	seekBackward: { capability: 'relativeSeek', action: { action: 'relativeSeek', delta: -10 } },
 	seekForward30: { capability: 'relativeSeek', action: { action: 'relativeSeek', delta: 30 } },
 	seekBackward30: { capability: 'relativeSeek', action: { action: 'relativeSeek', delta: -30 } },
+	swipeUp: { capability: 'swipe', action: { action: 'swipe', direction: 'up' } },
+	swipeDown: { capability: 'swipe', action: { action: 'swipe', direction: 'down' } },
+	swipeLeft: { capability: 'swipe', action: { action: 'swipe', direction: 'left' } },
+	swipeRight: { capability: 'swipe', action: { action: 'swipe', direction: 'right' } },
 }
 export default class AppleTV extends InstanceBase<ModuleSchema> {
 	config!: ModuleConfig

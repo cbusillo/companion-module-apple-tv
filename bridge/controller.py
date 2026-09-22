@@ -54,7 +54,16 @@ CAPABILITY_FEATURES = {
     "screensaver": (FeatureName.Screensaver,),
     "power": (FeatureName.TurnOn, FeatureName.TurnOff, FeatureName.PowerState),
     "launchApp": (FeatureName.LaunchApp,),
+    "swipe": (FeatureName.Swipe,),
 }
+
+SWIPE_COORDINATES = {
+    "up": (500, 800, 500, 200),
+    "down": (500, 200, 500, 800),
+    "left": (800, 500, 200, 500),
+    "right": (200, 500, 800, 500),
+}
+SWIPE_DURATION_MS = 300
 
 class HelperError(Exception):
     """A bounded, client-visible helper error category."""
@@ -220,6 +229,7 @@ class PyATVController:
             "screensaver": "screensaver",
             "power": "power",
             "launchApp": "launchApp",
+            "swipe": "swipe",
         }.get(action_name)
         if required_capability and required_capability not in self._capabilities():
             raise HelperError("unsupportedAction", "ready")
@@ -275,6 +285,12 @@ class PyATVController:
             if not isinstance(app_id, str) or not 1 <= len(app_id) <= 255:
                 raise HelperError("unsupportedAction", "ready")
             await self.atv.apps.launch_app(app_id)
+        elif action_name == "swipe":
+            direction = action.get("direction")
+            coordinates = SWIPE_COORDINATES.get(direction) if isinstance(direction, str) else None
+            if coordinates is None:
+                raise HelperError("unsupportedAction", "ready")
+            await self.atv.touch.swipe(*coordinates, SWIPE_DURATION_MS)
         else:
             raise HelperError("unsupportedAction", "ready")
         return result("ready", capabilities=self._capabilities())
