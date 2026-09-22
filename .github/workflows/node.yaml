@@ -1,0 +1,67 @@
+name: Validation
+
+on:
+  push:
+    branches:
+      - '**'
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  node:
+    name: Node build, lint, test, and package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Use Node.js 22.x
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22.x
+      - name: Enable Corepack
+        run: corepack enable
+      - name: Install locked dependencies
+        run: yarn install --immutable
+      - name: Build and check types
+        run: yarn build
+      - name: Lint
+        run: yarn lint
+      - name: Test
+        run: yarn test
+      - name: Build Companion package
+        run: yarn package
+
+  python:
+    name: Python worker tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - name: Install locked dependencies
+        run: uv sync --locked
+      - name: Test worker
+        run: uv run python -m unittest discover -s tests -p 'test_*.py' -v
+
+  validation-gate:
+    name: validation-gate
+    if: ${{ always() }}
+    needs: [node, python]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all validation jobs
+        env:
+          NODE_RESULT: ${{ needs.node.result }}
+          PYTHON_RESULT: ${{ needs.python.result }}
+        run: |
+          test "$NODE_RESULT" = success
+          test "$PYTHON_RESULT" = success
