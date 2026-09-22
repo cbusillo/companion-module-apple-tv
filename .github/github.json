@@ -1,0 +1,59 @@
+{
+	"defaultBranch": "main",
+	"projectType": "companion-module",
+	"qualityGate": {
+		"setup": {
+			"node": "corepack enable && yarn install --immutable",
+			"python": "uv sync --locked"
+		},
+		"tests": {
+			"node": "yarn test",
+			"python": "uv run python -m unittest discover -s tests -p 'test_*.py' -v"
+		},
+		"lint": {
+			"node": "yarn lint"
+		},
+		"build": {
+			"node": "yarn build"
+		},
+		"package": {
+			"module": "yarn package"
+		},
+		"inspection": {
+			"tool": "jetbrains",
+			"ide": "PyCharm",
+			"prepare": {
+				"python": {
+					"version": "3.13",
+					"moduleName": "companion-apple-tv-worker",
+					"testRoots": ["tests"],
+					"sync": true
+				}
+			},
+			"scopePreference": ["changed_files", "directory", "whole_project"]
+		},
+		"docsRequiredWhen": [
+			"user-visible control behavior changes",
+			"worker protocol or capability changes",
+			"pairing or credential handling changes",
+			"packaging or installation changes",
+			"validation gate changes"
+		]
+	},
+	"importantWorkflows": ["Validation", "Companion Module Checks"],
+	"requiredStatusChecks": ["validation-gate", "Check module"],
+	"healthUrls": [],
+	"cleanup": {
+		"deleteMergedLocalBranches": true,
+		"removeMergedCleanWorktrees": true
+	},
+	"metadataFreshness": {
+		"updateWhen": [
+			"validation gates change",
+			"primary commands change",
+			"important workflows change",
+			"JetBrains routing changes",
+			"cleanup policy changes"
+		]
+	}
+}
