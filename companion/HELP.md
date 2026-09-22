@@ -1,11 +1,10 @@
-# Apple TV (pyatv prototype)
+# Apple TV
 
 Disabled by default. Requires a separately prepared local Python environment and
-owner-only credential JSON file. Read README.md before enabling a physical
-pilot.
+owner-only credential JSON file. Read README.md before enabling a connection.
 
-This module communicates directly with pyatv in its own child process, without
-the MCR app. It does not pair devices or claim physical outcome confirmation.
+This module communicates directly with pyatv in its own child process. It does
+not pair devices or claim physical outcome confirmation.
 Supported commands depend on the connected device's reported capabilities.
 
 Version 0.3 includes volume save/zero/restore, Control Center, App Switcher,
@@ -13,14 +12,11 @@ Screensaver, sleep/wake, and app launching. An optional separately provisioned
 AirPlay credential adds Now Playing metadata. See README.md for the interactive
 pairing helper and volume restore behavior.
 
-MCR remains the native Mac keyboard volume/mute router. Keep its old Apple TV
-paths for rollback until all migrated callers pass qualification. Do not paste
-credentials into configuration fields or committed files.
+Do not paste credentials into configuration fields or committed files.
 
-## Pairing utility (owner-observed pilot)
+## Pairing utility
 
-Run from an interactive terminal, with the exact host and stable identifier
-selected for the pilot:
+Run from an interactive terminal with the exact host and stable identifier:
 
 ```sh
 uv run python bridge/pair.py \
@@ -50,6 +46,3 @@ The module declares `filesystem` to read its owner-only credential file and
 filesystem access for that declaration; it cannot limit the grant to one file.
 The module itself validates the selected file and directory and does not write
 credentials. The separate pairing utility owns credential creation.
-
-This module owns Apple TV controls only. Samsung automation belongs to HA;
-native keyboard routing and its direct Samsung transport remain in MCR.

@@ -1,15 +1,13 @@
-# Apple TV Companion module prototype
+# Apple TV Companion module
 
-Prototype for moving Apple TV control-surface actions from Media Control Relay
-to Companion. MCR remains the native Mac keyboard volume/mute router with its
-direct Samsung transport. It uses a persistent, locally spawned Python/pyatv
-worker. No installed MCR app or MCR socket is used.
+Apple TV control for Bitfocus Companion using a persistent, locally spawned
+Python worker backed by pyatv. The module provides remote commands, power and
+playback control, application launching, swipe gestures, and optional Now
+Playing metadata.
 
-The owner confirmed the pilot controls, sleep/wake and pilot-session reconnect
-on September 9, 2026. Startup/login, broader network-loss behavior and rollback
-still need qualification. Samsung control and native keyboard routing are
-outside this module. New connections start disabled; pairing is handled by the
-separate interactive utility.
+The Python runtime is currently an explicit installation prerequisite. New
+connections start disabled, and pairing is handled by a separate interactive
+utility rather than by the runtime worker.
 
 ## Development
 
@@ -26,22 +24,19 @@ yarn lint
 yarn package
 ```
 
-## Pilot setup
+## Setup
 
 1. Load the module into Companion, leaving Enable Apple TV connection unchecked.
-2. Set the Python executable to the absolute path of this project's
-   `.venv/bin/python`. The Python runtime is a pilot prerequisite, not silently
-   downloaded on button presses.
+2. Run `uv sync --locked`, then set the Python executable to the absolute path
+   of this project's `.venv/bin/python`. Dependencies are not downloaded when
+   a Companion button is pressed.
 3. Select an explicitly prepared credential JSON file with `host`, `identifier`,
    and `credentials`. The file must be regular, owner-owned, mode 0600, and
-   outside any repository. Never export secrets from the MCR Keychain
-   automatically or reuse HA credentials.
-4. Only enable after the owner approves the exact physical pilot target. An
+   outside any repository. Do not reuse credentials from another integration.
+4. Confirm the exact physical target before enabling the connection. An
    existing pyatv storage file has a different schema and cannot be used
    directly. Run the separate interactive pairing utility described below; the
    runtime worker never pairs devices.
-5. Keep MCR available for rollback. Never run competing pilot button actions
-   simultaneously.
 
 One Remote command action exposes navigation, select, back, home, play/pause,
 previous/next, relative volume (one step), seek (ten or thirty seconds), and
@@ -87,8 +82,7 @@ playback or device power. `last_result` distinguishes dispatch acknowledgement
 from physical state confirmation. Readiness requires a successful app-list round
 trip. Disconnect notifications invalidate the session immediately; after 30
 seconds idle another app-list query detects a silent connection loss within a
-three-second request timeout. The local sleep/wake pilot passed; this does not
-establish behavior on other devices or during a network blackhole.
+three-second request timeout.
 
 Since 0.2.3, `last_result` replaces `unavailable or busy` with separate
 `not connected; not sent`, `unknown command; not sent`, and `busy; not sent`
@@ -110,34 +104,16 @@ any custom comparisons against the old strings when upgrading.
 
 ## Provenance
 
-`bridge/controller.py` adapts the protocol adapter from the MIT-licensed
-`cbusillo/media-control-relay` AppleCompanionHelper/helper.py. Its license is
-preserved in LICENSE-MCR. This is source reuse, not a dependency on the MCR
-installed runtime. The new worker excludes discovery/pairing operations from its
-public request surface. pyatv 0.18.0 is locked in uv.lock. Bitfocus's official
-TypeScript module template is retained in git history.
+`bridge/controller.py` adapts an Apple TV protocol adapter from the MIT-licensed
+Media Control Relay project. Its license is preserved in LICENSE-MCR. This is
+source reuse, not a runtime dependency. The worker excludes discovery and
+pairing operations from its public request surface. pyatv 0.18.0 is locked in
+uv.lock. Bitfocus's official TypeScript module template is retained in Git
+history.
 
-## Ownership and migration gate
+## Pairing utility
 
-MCR stays responsible for route-sensitive native keyboard volume/mute and its
-independent direct Samsung transport. Companion owns control-surface actions; HA
-owns device automation. This module replaces only Apple TV control-surface paths
-and must not grow a Mac keyboard observer or Samsung adapter.
-
-Before removing MCR's old Apple TV paths, inventory registered URL consumers,
-startup hooks and shutdown callers; qualify their replacement and rollback. Do
-not uninstall MCR. Host-specific profiles and credentials stay outside this
-repository, and owner layout edits must not be overwritten.
-
-The durable decision and remaining work are tracked in
-[MCR ownership plan #101](https://github.com/cbusillo/media-control-relay/issues/101)
-and
-[Apple TV qualification #102](https://github.com/cbusillo/media-control-relay/issues/102).
-
-## Pairing utility (owner-observed pilot)
-
-Run from an interactive terminal, with the exact host and stable identifier
-selected for the pilot:
+Run from an interactive terminal with the exact host and stable identifier:
 
 ```sh
 uv run python bridge/pair.py \

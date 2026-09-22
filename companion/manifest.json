@@ -2,7 +2,7 @@
 	"$schema": "../node_modules/@companion-module/base/assets/manifest.schema.json",
 	"type": "connection",
 	"id": "apple-tv-pyatv",
-	"name": "Apple TV (pyatv prototype)",
+	"name": "Apple TV (pyatv)",
 	"shortname": "Apple TV",
 	"description": "Persistent Apple TV control via a local pyatv worker",
 	"version": "0.0.0",
@@ -27,5 +27,5 @@
 	"legacyIds": [],
 	"manufacturer": "Apple",
 	"products": ["Apple TV"],
-	"keywords": ["media", "prototype"]
+	"keywords": ["media", "remote control", "tvOS"]
 }
