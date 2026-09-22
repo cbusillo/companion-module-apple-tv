@@ -6,6 +6,7 @@ package-lock.json
 DEBUG-*
 /.yarn
 /.vscode
+/.idea
 
 .venv/
 __pycache__/
