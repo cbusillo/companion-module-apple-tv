@@ -23,10 +23,10 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
         controller.connected = True
 
         expected = {
-            "up": (500, 800, 500, 200, 300),
-            "down": (500, 200, 500, 800, 300),
-            "left": (800, 500, 200, 500, 300),
-            "right": (200, 500, 800, 500, 300),
+            "up": (500, 900, 500, 100, 100),
+            "down": (500, 100, 500, 900, 100),
+            "left": (900, 500, 100, 500, 100),
+            "right": (100, 500, 900, 500, 100),
         }
         for direction, coordinates in expected.items():
             with self.subTest(direction=direction):

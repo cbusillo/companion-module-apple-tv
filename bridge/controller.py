@@ -58,12 +58,12 @@ CAPABILITY_FEATURES = {
 }
 
 SWIPE_COORDINATES = {
-    "up": (500, 800, 500, 200),
-    "down": (500, 200, 500, 800),
-    "left": (800, 500, 200, 500),
-    "right": (200, 500, 800, 500),
+    "up": (500, 900, 500, 100),
+    "down": (500, 100, 500, 900),
+    "left": (900, 500, 100, 500),
+    "right": (100, 500, 900, 500),
 }
-SWIPE_DURATION_MS = 300
+SWIPE_DURATION_MS = 100
 
 class HelperError(Exception):
     """A bounded, client-visible helper error category."""

@@ -1,6 +1,6 @@
 {
   "name": "companion-module-apple-tv",
-  "version": "0.4.0",
+	"version": "0.4.1",
   "main": "dist/main.js",
   "type": "module",
   "scripts": {

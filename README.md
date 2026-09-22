@@ -45,7 +45,7 @@ yarn package
 
 One Remote command action exposes navigation, select, back, home, play/pause,
 previous/next, relative volume (one step), seek (ten or thirty seconds), and
-fixed up/down/left/right touchpad swipes.
+fixed brisk up/down/left/right touchpad swipes.
 The worker checks the current pyatv capability immediately before each action.
 Cached availability never blocks a newly available action; unsupported commands
 are rejected without replay. Version 0.3 adds Control Center, App Switcher,
