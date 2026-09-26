@@ -217,8 +217,22 @@ The explicit `--mode remaining` sequence also requires reported volume between
 5 and 95 percent. It tests volume down/up before closing the app, then explicit
 sleep followed by explicit wake. Every power poll is recorded, including unknown
 or unchanged values. Uncertain state cannot become a reversed power toggle.
-Wake is not yet physically qualified; do not include this mode in the focused
-close-app repeat.
+The five-second sleep/wake cycle remains unresolved; use focused modes when
+qualifying individual controls.
+
+The focused `--mode volume` pilot requires an awake TV and reported volume
+between 5 and 95 percent. Start audible playback manually before the supervised
+run. It sends volume down once, waits five seconds, reads the reported level,
+then sends volume up once, waits five seconds, and reads the final level. The
+report retains the initial, intermediate, and final values separately from the
+owner's audible observation. It sends no app, playback, swipe, power, mute, or
+absolute-volume controls. A query error or connection change stops remaining
+input without a compensating command.
+
+```sh
+node dist/prototype/acceptance-live.js --mode volume
+node dist/prototype/acceptance-live.js --mode volume --run --credentials /private/directory/test.json --report /private/directory/volume.json
+```
 
 The focused `--mode power` pilot requires only an awake TV and tests sleep/wake
 without app or volume controls. Preview it offline before requesting observation:
@@ -329,10 +343,14 @@ to separate those cases. It passed at `11a1dda`: reported power changed
 from Off to On after about six seconds, remained On after the already-On check,
 and the owner confirmed the screen woke and then stayed unchanged. There were
 zero reconnects. Wake from the existing off state and already-On behavior are
-accepted on this TV. A twenty-second Sleep observation test is prepared to
-compare with the failed five-second cycle. No minimum safe interval or cause is
-established, and no command-layer timing change is claimed as a fix. The longer
-sleep/wake cycle and physical volume acceptance remain pending.
+accepted on this TV. The twenty-second Sleep observation test then passed at
+`6bf0565`: Sleep reported Off, Wake reported On about six seconds after its
+request, and the already-On check remained On, with zero reconnects. The owner
+confirmed the sequence worked and explicitly accepted waking to the Home screen
+instead of returning to the Twitch stream. Wake does not resume the previous
+stream. The earlier five-second cycle failure remains unresolved: no minimum
+safe interval or cause is established, and no command-layer timing change is
+claimed as a fix. Physical volume acceptance remains pending.
 No automatic control retry or installed-module change was made.
 
 This qualifies an initial developer pilot on that device. It does not qualify

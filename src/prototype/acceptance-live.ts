@@ -24,6 +24,7 @@ async function main(): Promise<void> {
   node dist/prototype/acceptance-live.js --mode power --run --credentials /private/test.json --report /private/power.json
   node dist/prototype/acceptance-live.js --mode power --sleep-seconds 20
   node dist/prototype/acceptance-live.js --mode wake --run --credentials /private/test.json --report /private/wake.json
+  node dist/prototype/acceptance-live.js --mode volume --run --credentials /private/test.json --report /private/volume.json
 
 Without --run: offline preview only; no credential access or network connection.
 Run only after the owner is watching. Wake mode requires an asleep TV; other modes require it awake.
@@ -37,14 +38,23 @@ Wake mode sends no Sleep, app, swipe, or volume control.
 Wake queries current power: Home once for Off, no button for On, stop for Unknown.
 The second Wake must leave the awake TV unchanged. No recovery retry is sent.
 Explicit --mode remaining also tests volume and sleep/wake; requires volume 5-95%.
-Power and remaining modes briefly blank the TV; the revised Wake needs qualification.
+Explicit --mode volume: volume down once, wait five seconds, then up once; report each stage.
+Volume mode requires an awake TV and reported volume 5-95%; start audible playback manually.
+It sends no app, playback, swipe, power, mute, or absolute-volume control.
+Power and remaining modes briefly blank the TV; rapid sleep/wake remains unqualified.
 Ctrl-C, error, or connection loss stops remaining controls; no command is retried.
 If the test stops after sleep, wake the TV with its normal remote.
 Reports are created privately and never overwrite an existing file.
 `)
 		return
 	}
-	if (values.mode !== 'close-app' && values.mode !== 'power' && values.mode !== 'wake' && values.mode !== 'remaining')
+	if (
+		values.mode !== 'close-app' &&
+		values.mode !== 'power' &&
+		values.mode !== 'wake' &&
+		values.mode !== 'volume' &&
+		values.mode !== 'remaining'
+	)
 		throw new Error('Invalid acceptance mode')
 	if ((values.mode === 'close-app' || values.mode === 'remaining') && !values.app.trim())
 		throw new Error('An app name is required')

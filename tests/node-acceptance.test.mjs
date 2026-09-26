@@ -74,6 +74,55 @@ test('default focused pilot closes the selected app and stops without volume or 
 	])
 })
 
+test('volume-only pilot records each level and sends just one down/up pair without an app prerequisite', async () => {
+	const { controller, options, actions, events, pauses } = fixture()
+	options.mode = 'volume'
+	options.appName = ''
+	controller.listApps = async () => assert.fail('Volume pilot must not require an app')
+	await runAcceptance(controller, options)
+	assert.deepEqual(actions, [
+		{ kind: 'button', button: 'volumeDown' },
+		{ kind: 'button', button: 'volumeUp' },
+	])
+	assert.deepEqual(pauses, [5000, 5000])
+	assert.deepEqual(
+		events.filter((event) => 'volume' in event).map((event) => event.volume),
+		[50, 49, 50],
+	)
+})
+
+test('volume-only preflight refuses sleeping/unknown power and unavailable or end-stop volume', async () => {
+	for (const state of ['Off', 'Unknown', 'unavailable', 0, 100, NaN]) {
+		const { controller, options, actions } = fixture()
+		options.mode = 'volume'
+		if (state === 'Off' || state === 'Unknown') controller.queryPower = async () => state
+		else
+			controller.queryVolume = async () => {
+				if (state === 'unavailable') throw new Error('Synthetic unavailable volume')
+				return state
+			}
+		await assert.rejects(runAcceptance(controller, options))
+		assert.equal(actions.length, 0)
+	}
+})
+
+test('volume query failure, cancellation, or reconnect after down prevents up or compensating controls', async () => {
+	for (const interruption of ['query failure', 'cancel', 'reconnect']) {
+		const { controller, options, actions, cancel } = fixture()
+		options.mode = 'volume'
+		controller.queryVolume = async () => {
+			if (actions.length) {
+				if (interruption === 'query failure') throw new Error('Synthetic volume response loss')
+				if (interruption === 'cancel') cancel.abort()
+				else controller.reconnects++
+			}
+			return 50
+		}
+		await assert.rejects(runAcceptance(controller, options))
+		assert.deepEqual(actions, [{ kind: 'button', button: 'volumeDown' }])
+	}
+})
+
 test('power pilot checks sleep, wake, and already-awake Wake without app or volume prerequisites', async () => {
 	const { controller, options, actions, pauses } = fixture()
 	options.mode = 'power'
@@ -120,6 +169,7 @@ test('invalid Sleep waits or modes fail before querying or controlling the TV', 
 		...[-1, 0, 4, 31, 20.5, NaN, Infinity].map((seconds) => ['power', seconds]),
 		['wake', 20],
 		['close-app', 20],
+		['volume', 20],
 	]) {
 		const { controller, options, actions } = fixture()
 		options.mode = mode
@@ -265,7 +315,7 @@ test('uncertain wake delivery stops without retry or Home compensation', async (
 	assert.equal(actions.length, 2)
 })
 
-for (const mode of ['power', 'wake'])
+for (const mode of ['power', 'wake', 'volume'])
 	test(`${mode} CLI previews offline with no app or credentials`, () => {
 		const result = spawnSync(
 			process.execPath,

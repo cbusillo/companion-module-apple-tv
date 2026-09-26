@@ -3,7 +3,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import type { NodeController, RemoteAction } from './controller.js'
 
 type Controller = Pick<NodeController, 'perform' | 'state' | 'reconnects' | 'queryPower' | 'queryVolume' | 'listApps'>
-export type AcceptanceMode = 'close-app' | 'power' | 'wake' | 'remaining'
+export type AcceptanceMode = 'close-app' | 'power' | 'wake' | 'volume' | 'remaining'
 type Event = {
 	stage: string
 	result: string
@@ -39,8 +39,12 @@ export function previewAcceptance(
 	const sleepMs = sleepWait(mode, sleepSeconds)
 	const powerOnly = mode === 'power' || mode === 'wake'
 	return [
-		...(mode === 'remaining' ? ['Volume down one step, then up one step'] : []),
-		...(!powerOnly ? [`Open ${appName}, open App Switcher, then swipe up to close the focused app`] : []),
+		...(mode === 'remaining' || mode === 'volume'
+			? ['Volume down one step, then up one step; report before and after each step']
+			: []),
+		...(mode === 'close-app' || mode === 'remaining'
+			? [`Open ${appName}, open App Switcher, then swipe up to close the focused app`]
+			: []),
 		...(mode === 'wake' ? ['Start with Apple TV already Off, request Wake, and verify On; no Sleep is sent'] : []),
 		...(mode === 'remaining' || mode === 'power'
 			? [`Put Apple TV to sleep, wait ${sleepMs / 1000} seconds, verify Off, then wake it and verify On`]
@@ -98,6 +102,22 @@ export async function runAcceptance(controller: Controller, options: Options): P
 		await expectPower('Off')
 		await wakeSequence()
 	}
+	const volumeSequence = async (): Promise<void> => {
+		check()
+		const volume = await controller.queryVolume()
+		check()
+		if (!Number.isFinite(volume) || volume < 5 || volume > 95)
+			throw new PilotStopped('Start with reported volume between 5 and 95 percent to avoid an end stop')
+		options.record({ stage: 'initial volume', result: 'reported', volume })
+		await step('volume down', { kind: 'button', button: 'volumeDown' })
+		const lower = await controller.queryVolume()
+		check()
+		options.record({ stage: 'volume after down', result: 'reported; physical result unverified', volume: lower })
+		await step('volume up', { kind: 'button', button: 'volumeUp' })
+		const after = await controller.queryVolume()
+		check()
+		options.record({ stage: 'final volume', result: 'reported; physical result unverified', volume: after })
+	}
 
 	check()
 	if (options.mode === 'power') return powerSequence()
@@ -108,22 +128,18 @@ export async function runAcceptance(controller: Controller, options: Options): P
 		if (current !== 'Off') throw new PilotStopped('Start with the Apple TV already asleep')
 		return wakeSequence()
 	}
+	if (options.mode === 'volume') {
+		if ((await controller.queryPower()) !== 'On') throw new PilotStopped('Start with the Apple TV awake')
+		check()
+		return volumeSequence()
+	}
 	if (!options.appName.trim()) throw new PilotStopped('Choose an app to close')
 	const apps = (await controller.listApps()).filter((app) => app.name === options.appName)
 	if (apps.length !== 1) throw new PilotStopped('App name must match exactly one installed app')
 	check()
 	if ((await controller.queryPower()) !== 'On') throw new PilotStopped('Start with the Apple TV awake')
 	check()
-	if (options.mode === 'remaining') {
-		const volume = await controller.queryVolume()
-		if (!Number.isFinite(volume) || volume < 5 || volume > 95)
-			throw new PilotStopped('Start with reported volume between 5 and 95 percent to avoid an end stop')
-		options.record({ stage: 'initial volume', result: 'reported', volume })
-		await step('volume down', { kind: 'button', button: 'volumeDown' })
-		await step('volume up', { kind: 'button', button: 'volumeUp' })
-		const after = await controller.queryVolume()
-		options.record({ stage: 'final volume', result: 'reported; physical result unverified', volume: after })
-	}
+	if (options.mode === 'remaining') await volumeSequence()
 	// Foreground the exact discovered app before entering the switcher.
 	await step('open selected app', { kind: 'launch', bundleId: apps[0].id })
 	await step('App Switcher', { kind: 'button', button: 'appSwitcher' })
