@@ -50,23 +50,23 @@ index 1fb65bc..cc1c76c 100644
      const decrypted = receiver.decrypt(header, encryptedPayload);
 diff --git a/src/companion/__tests__/framing-compatibility.test.ts b/src/companion/__tests__/framing-compatibility.test.ts
 new file mode 100644
-index 0000000..1f8908f
+index 0000000..ffeec55
 --- /dev/null
 +++ b/src/companion/__tests__/framing-compatibility.test.ts
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,73 @@
 +import { describe, expect, it } from 'vitest';
 +import { CompanionSession } from '../companion-session.js';
 +import { CompanionConnection } from '../connection.js';
 +import { FrameType } from '../framing.js';
 +import type { OpackDict } from '../opack.js';
 +
-+// pyatv 0.18.0 Chacha20Cipher, bytes(range(32)), counters 0 and 1.
++// pyatv 0.18.0 Chacha20Cipher(nonce_length=12), bytes(range(32)), counters 0 and 1.
 +// Public synthetic keys and payloads; no pairing or live device data.
 +const key = Buffer.from(Array.from({ length: 32 }, (_, i) => i));
 +const payload = Buffer.from('e3425f7409425f694c53797374656d537461747573425f63e14573746174650b', 'hex');
 +const frames = [
 +  '08000030fbfa1d45a4a4f9b85f322512db2623748cd0878092ef043f0dbd8f664b4110571c4015ebed81b6c162b40204067f16f7',
-+  '080000307c15ac2bbc68f07165e5d72f26f0f4d4b11c9f7b34293fce2221c62fec9cb8adf7b655d51570beed58d2a01f700e076e',
++  '08000030777d249acda1c3433b08aa80195ab00855d984ad5ebb865e7405842d76d574c49e0fde4f7f681f246d79893979ca6ee5',
 +].map(hex => Buffer.from(hex, 'hex'));
 +
 +function receiver() {
@@ -99,6 +99,14 @@ index 0000000..1f8908f
 +    parser.onData(frames[0]);
 +    expect(errors).toEqual([]);
 +    expect(states).toEqual([3]);
++  });
++
++  it('uses the Companion 96-bit little-endian nonce after the first packet', () => {
++    const sender = new CompanionSession(key, key);
++    sender.encrypt(FrameType.E_OPACK, payload);
++    const second = Buffer.from(payload);
++    second[second.length - 1] = 0x09; // State 1, rather than state 3.
++    expect(sender.encrypt(FrameType.E_OPACK, second)).toEqual(frames[1]);
 +  });
 +
 +  it('separates coalesced packets and preserves the receive counter', () => {
@@ -207,10 +215,10 @@ index 0000000..fb9a21e
 +  });
 +});
 diff --git a/src/companion/companion-session.ts b/src/companion/companion-session.ts
-index 9500d2e..570a6d1 100644
+index 9500d2e..5e3db8d 100644
 --- a/src/companion/companion-session.ts
 +++ b/src/companion/companion-session.ts
-@@ -1,7 +1,7 @@
+@@ -1,16 +1,24 @@
  /**
   * ChaCha20-Poly1305 encryption session for the Companion protocol.
   * Differs from HAPSession:
@@ -219,7 +227,32 @@ index 9500d2e..570a6d1 100644
   * - Encrypts whole messages (no 1024-byte chunking)
   * - Counter-based nonce, separate TX/RX counters
   */
-@@ -31,9 +31,7 @@ export class CompanionSession {
+
+-import { encryptChaCha20, decryptChaCha20, generateNonce } from '../util/crypto.js';
++import { encryptChaCha20, decryptChaCha20 } from '../util/crypto.js';
+ import { FrameType } from './framing.js';
+
+ const AUTH_TAG_LENGTH = 16;
+
++function companionNonce(counter: bigint): Buffer {
++  // Companion counts from byte zero of a 12-byte little-endian nonce.
++  // HAP/AirPlay instead put four zero bytes before their 8-byte counter.
++  const nonce = Buffer.alloc(12);
++  nonce.writeBigUInt64LE(counter, 0);
++  return nonce;
++}
++
+ export class CompanionSession {
+   private outCounter = 0n;
+   private inCounter = 0n;
+@@ -25,15 +33,13 @@ export class CompanionSession {
+    * Returns a complete frame: 4-byte header + ciphertext + 16-byte auth tag.
+    */
+   encrypt(frameType: FrameType, plaintext: Buffer): Buffer {
+-    const nonce = generateNonce(this.outCounter);
++    const nonce = companionNonce(this.outCounter);
+     this.outCounter++;
+
      // Build the frame header (used as AAD)
      const header = Buffer.alloc(4);
      header[0] = frameType;
@@ -230,6 +263,15 @@ index 9500d2e..570a6d1 100644
 
      const { ciphertext, tag } = encryptChaCha20(
        this.outKey,
+@@ -51,7 +57,7 @@ export class CompanionSession {
+    * The header bytes are needed as AAD.
+    */
+   decrypt(header: Buffer, encryptedPayload: Buffer): Buffer {
+-    const nonce = generateNonce(this.inCounter);
++    const nonce = companionNonce(this.inCounter);
+     this.inCounter++;
+
+     const ciphertext = encryptedPayload.subarray(0, encryptedPayload.length - AUTH_TAG_LENGTH);
 diff --git a/src/companion/connection.ts b/src/companion/connection.ts
 index 351e7fb..6fda777 100644
 --- a/src/companion/connection.ts

@@ -130,12 +130,12 @@ test('malformed or rejected replies are not presented as successful controls', a
 })
 
 test('patched npm package interoperates with independently generated encrypted Companion frames', () => {
-	// Synthetic pyatv 0.18.0 fixtures, key bytes(range(32)), counters 0 and 1.
+	// Synthetic pyatv 0.18.0 fixtures, nonce_length=12, key bytes(range(32)), counters 0 and 1.
 	const key = Buffer.from(Array.from({ length: 32 }, (_, i) => i))
 	const payload = Buffer.from('e3425f7409425f694c53797374656d537461747573425f63e14573746174650b', 'hex')
 	const frames = [
 		'08000030fbfa1d45a4a4f9b85f322512db2623748cd0878092ef043f0dbd8f664b4110571c4015ebed81b6c162b40204067f16f7',
-		'080000307c15ac2bbc68f07165e5d72f26f0f4d4b11c9f7b34293fce2221c62fec9cb8adf7b655d51570beed58d2a01f700e076e',
+		'08000030777d249acda1c3433b08aa80195ab00855d984ad5ebb865e7405842d76d574c49e0fde4f7f681f246d79893979ca6ee5',
 	].map((hex) => Buffer.from(hex, 'hex'))
 	assert.deepEqual(new CompanionSession(key, key).encrypt(FrameType.E_OPACK, payload), frames[0])
 	const connection = new CompanionConnection('unused.invalid', 1, {

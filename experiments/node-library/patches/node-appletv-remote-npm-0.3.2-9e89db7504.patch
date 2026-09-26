@@ -12,10 +12,10 @@ index 814de8adb8dc795eeaec7d55100e43e47108bf89..c0c958b6c4cafb5d921a776a651ce8ec
   * - Counter-based nonce, separate TX/RX counters
   */
 diff --git a/dist/companion/companion-session.js b/dist/companion/companion-session.js
-index 4afc08fd965ef8f0afa6b85f30987b64317a2f8d..b4f9a754ef9cbe50cf0c1ad842bd2309fd0cdd72 100644
+index 4afc08fd965ef8f0afa6b85f30987b64317a2f8d..096c5ea517fb9f618b75893f5fb1a4fa634fbe4f 100644
 --- a/dist/companion/companion-session.js
 +++ b/dist/companion/companion-session.js
-@@ -1,7 +1,7 @@
+@@ -1,12 +1,19 @@
  /**
   * ChaCha20-Poly1305 encryption session for the Companion protocol.
   * Differs from HAPSession:
@@ -24,7 +24,26 @@ index 4afc08fd965ef8f0afa6b85f30987b64317a2f8d..b4f9a754ef9cbe50cf0c1ad842bd2309
   * - Encrypts whole messages (no 1024-byte chunking)
   * - Counter-based nonce, separate TX/RX counters
   */
-@@ -26,9 +26,7 @@ export class CompanionSession {
+-import { encryptChaCha20, decryptChaCha20, generateNonce } from '../util/crypto.js';
++import { encryptChaCha20, decryptChaCha20 } from '../util/crypto.js';
+ const AUTH_TAG_LENGTH = 16;
++function companionNonce(counter) {
++    // Companion counts from byte zero of a 12-byte little-endian nonce.
++    // HAP/AirPlay instead put four zero bytes before their 8-byte counter.
++    const nonce = Buffer.alloc(12);
++    nonce.writeBigUInt64LE(counter, 0);
++    return nonce;
++}
+ export class CompanionSession {
+     outKey;
+     inKey;
+@@ -21,14 +28,12 @@ export class CompanionSession {
+      * Returns a complete frame: 4-byte header + ciphertext + 16-byte auth tag.
+      */
+     encrypt(frameType, plaintext) {
+-        const nonce = generateNonce(this.outCounter);
++        const nonce = companionNonce(this.outCounter);
+         this.outCounter++;
          // Build the frame header (used as AAD)
          const header = Buffer.alloc(4);
          header[0] = frameType;
@@ -35,14 +54,23 @@ index 4afc08fd965ef8f0afa6b85f30987b64317a2f8d..b4f9a754ef9cbe50cf0c1ad842bd2309
          const { ciphertext, tag } = encryptChaCha20(this.outKey, nonce, plaintext, header);
          return Buffer.concat([header, ciphertext, tag]);
      }
+@@ -38,7 +43,7 @@ export class CompanionSession {
+      * The header bytes are needed as AAD.
+      */
+     decrypt(header, encryptedPayload) {
+-        const nonce = generateNonce(this.inCounter);
++        const nonce = companionNonce(this.inCounter);
+         this.inCounter++;
+         const ciphertext = encryptedPayload.subarray(0, encryptedPayload.length - AUTH_TAG_LENGTH);
+         const tag = encryptedPayload.subarray(encryptedPayload.length - AUTH_TAG_LENGTH);
 diff --git a/dist/companion/companion-session.js.map b/dist/companion/companion-session.js.map
-index 575c28612cb0f3d24101f3244dda2ee28bdb39a9..3a45b96a290fb32377548f039a2ccf5901f9e29b 100644
+index 575c28612cb0f3d24101f3244dda2ee28bdb39a9..3f9b0bc21d4cacf0895017e31c16db27bc30d04c 100644
 --- a/dist/companion/companion-session.js.map
 +++ b/dist/companion/companion-session.js.map
 @@ -1 +1 @@
 -{"version":3,"file":"companion-session.js","sourceRoot":"","sources":["../../src/companion/companion-session.ts"],"names":[],"mappings":"AAAA;;;;;;GAMG;AAEH,OAAO,EAAE,eAAe,EAAE,eAAe,EAAE,aAAa,EAAE,MAAM,mBAAmB,CAAC;AAGpF,MAAM,eAAe,GAAG,EAAE,CAAC;AAE3B,MAAM,OAAO,gBAAgB;IAKjB;IACA;IALF,UAAU,GAAG,EAAE,CAAC;IAChB,SAAS,GAAG,EAAE,CAAC;IAEvB,YACU,MAAc,EACd,KAAa;QADb,WAAM,GAAN,MAAM,CAAQ;QACd,UAAK,GAAL,KAAK,CAAQ;IACpB,CAAC;IAEJ;;;OAGG;IACH,OAAO,CAAC,SAAoB,EAAE,SAAiB;QAC7C,MAAM,KAAK,GAAG,aAAa,CAAC,IAAI,CAAC,UAAU,CAAC,CAAC;QAC7C,IAAI,CAAC,UAAU,EAAE,CAAC;QAElB,uCAAuC;QACvC,MAAM,MAAM,GAAG,MAAM,CAAC,KAAK,CAAC,CAAC,CAAC,CAAC;QAC/B,MAAM,CAAC,CAAC,CAAC,GAAG,SAAS,CAAC;QACtB,MAAM,CAAC,CAAC,CAAC,GAAG,CAAC,SAAS,CAAC,MAAM,IAAI,EAAE,CAAC,GAAG,IAAI,CAAC;QAC5C,MAAM,CAAC,CAAC,CAAC,GAAG,CAAC,SAAS,CAAC,MAAM,IAAI,CAAC,CAAC,GAAG,IAAI,CAAC;QAC3C,MAAM,CAAC,CAAC,CAAC,GAAG,SAAS,CAAC,MAAM,GAAG,IAAI,CAAC;QAEpC,MAAM,EAAE,UAAU,EAAE,GAAG,EAAE,GAAG,eAAe,CACzC,IAAI,CAAC,MAAM,EACX,KAAK,EACL,SAAS,EACT,MAAM,CACP,CAAC;QAEF,OAAO,MAAM,CAAC,MAAM,CAAC,CAAC,MAAM,EAAE,UAAU,EAAE,GAAG,CAAC,CAAC,CAAC;IAClD,CAAC;IAED;;;;OAIG;IACH,OAAO,CAAC,MAAc,EAAE,gBAAwB;QAC9C,MAAM,KAAK,GAAG,aAAa,CAAC,IAAI,CAAC,SAAS,CAAC,CAAC;QAC5C,IAAI,CAAC,SAAS,EAAE,CAAC;QAEjB,MAAM,UAAU,GAAG,gBAAgB,CAAC,QAAQ,CAAC,CAAC,EAAE,gBAAgB,CAAC,MAAM,GAAG,eAAe,CAAC,CAAC;QAC3F,MAAM,GAAG,GAAG,gBAAgB,CAAC,QAAQ,CAAC,gBAAgB,CAAC,MAAM,GAAG,eAAe,CAAC,CAAC;QAEjF,OAAO,eAAe,CACpB,IAAI,CAAC,KAAK,EACV,KAAK,EACL,UAAU,EACV,GAAG,EACH,MAAM,CACP,CAAC;IACJ,CAAC;CACF"}
 \ No newline at end of file
-+{"version":3,"file":"companion-session.js","sourceRoot":"","sources":["../../src/companion/companion-session.ts"],"names":[],"mappings":"AAAA;;;;;;GAMG;AAEH,OAAO,EAAE,eAAe,EAAE,eAAe,EAAE,aAAa,EAAE,MAAM,mBAAmB,CAAC;AAGpF,MAAM,eAAe,GAAG,EAAE,CAAC;AAE3B,MAAM,OAAO,gBAAgB;IAKjB;IACA;IALF,UAAU,GAAG,EAAE,CAAC;IAChB,SAAS,GAAG,EAAE,CAAC;IAEvB,YACU,MAAc,EACd,KAAa;QADb,WAAM,GAAN,MAAM,CAAQ;QACd,UAAK,GAAL,KAAK,CAAQ;IACpB,CAAC;IAEJ;;;OAGG;IACH,OAAO,CAAC,SAAoB,EAAE,SAAiB;QAC7C,MAAM,KAAK,GAAG,aAAa,CAAC,IAAI,CAAC,UAAU,CAAC,CAAC;QAC7C,IAAI,CAAC,UAAU,EAAE,CAAC;QAElB,uCAAuC;QACvC,MAAM,MAAM,GAAG,MAAM,CAAC,KAAK,CAAC,CAAC,CAAC,CAAC;QAC/B,MAAM,CAAC,CAAC,CAAC,GAAG,SAAS,CAAC;QACtB,MAAM,CAAC,WAAW,CAAC,SAAS,CAAC,MAAM,GAAG,eAAe,EAAE,CAAC,EAAE,CAAC,CAAC,CAAC;QAE7D,MAAM,EAAE,UAAU,EAAE,GAAG,EAAE,GAAG,eAAe,CACzC,IAAI,CAAC,MAAM,EACX,KAAK,EACL,SAAS,EACT,MAAM,CACP,CAAC;QAEF,OAAO,MAAM,CAAC,MAAM,CAAC,CAAC,MAAM,EAAE,UAAU,EAAE,GAAG,CAAC,CAAC,CAAC;IAClD,CAAC;IAED;;;;OAIG;IACH,OAAO,CAAC,MAAc,EAAE,gBAAwB;QAC9C,MAAM,KAAK,GAAG,aAAa,CAAC,IAAI,CAAC,SAAS,CAAC,CAAC;QAC5C,IAAI,CAAC,SAAS,EAAE,CAAC;QAEjB,MAAM,UAAU,GAAG,gBAAgB,CAAC,QAAQ,CAAC,CAAC,EAAE,gBAAgB,CAAC,MAAM,GAAG,eAAe,CAAC,CAAC;QAC3F,MAAM,GAAG,GAAG,gBAAgB,CAAC,QAAQ,CAAC,gBAAgB,CAAC,MAAM,GAAG,eAAe,CAAC,CAAC;QAEjF,OAAO,eAAe,CACpB,IAAI,CAAC,KAAK,EACV,KAAK,EACL,UAAU,EACV,GAAG,EACH,MAAM,CACP,CAAC;IACJ,CAAC;CACF"}
++{"version":3,"file":"companion-session.js","sourceRoot":"","sources":["../../src/companion/companion-session.ts"],"names":[],"mappings":"AAAA;;;;;;GAMG;AAEH,OAAO,EAAE,eAAe,EAAE,eAAe,EAAE,MAAM,mBAAmB,CAAC;AAGrE,MAAM,eAAe,GAAG,EAAE,CAAC;AAE3B,SAAS,cAAc,CAAC,OAAe;IACrC,oEAAoE;IACpE,uEAAuE;IACvE,MAAM,KAAK,GAAG,MAAM,CAAC,KAAK,CAAC,EAAE,CAAC,CAAC;IAC/B,KAAK,CAAC,gBAAgB,CAAC,OAAO,EAAE,CAAC,CAAC,CAAC;IACnC,OAAO,KAAK,CAAC;AACf,CAAC;AAED,MAAM,OAAO,gBAAgB;IAKjB;IACA;IALF,UAAU,GAAG,EAAE,CAAC;IAChB,SAAS,GAAG,EAAE,CAAC;IAEvB,YACU,MAAc,EACd,KAAa;QADb,WAAM,GAAN,MAAM,CAAQ;QACd,UAAK,GAAL,KAAK,CAAQ;IACpB,CAAC;IAEJ;;;OAGG;IACH,OAAO,CAAC,SAAoB,EAAE,SAAiB;QAC7C,MAAM,KAAK,GAAG,cAAc,CAAC,IAAI,CAAC,UAAU,CAAC,CAAC;QAC9C,IAAI,CAAC,UAAU,EAAE,CAAC;QAElB,uCAAuC;QACvC,MAAM,MAAM,GAAG,MAAM,CAAC,KAAK,CAAC,CAAC,CAAC,CAAC;QAC/B,MAAM,CAAC,CAAC,CAAC,GAAG,SAAS,CAAC;QACtB,MAAM,CAAC,WAAW,CAAC,SAAS,CAAC,MAAM,GAAG,eAAe,EAAE,CAAC,EAAE,CAAC,CAAC,CAAC;QAE7D,MAAM,EAAE,UAAU,EAAE,GAAG,EAAE,GAAG,eAAe,CACzC,IAAI,CAAC,MAAM,EACX,KAAK,EACL,SAAS,EACT,MAAM,CACP,CAAC;QAEF,OAAO,MAAM,CAAC,MAAM,CAAC,CAAC,MAAM,EAAE,UAAU,EAAE,GAAG,CAAC,CAAC,CAAC;IAClD,CAAC;IAED;;;;OAIG;IACH,OAAO,CAAC,MAAc,EAAE,gBAAwB;QAC9C,MAAM,KAAK,GAAG,cAAc,CAAC,IAAI,CAAC,SAAS,CAAC,CAAC;QAC7C,IAAI,CAAC,SAAS,EAAE,CAAC;QAEjB,MAAM,UAAU,GAAG,gBAAgB,CAAC,QAAQ,CAAC,CAAC,EAAE,gBAAgB,CAAC,MAAM,GAAG,eAAe,CAAC,CAAC;QAC3F,MAAM,GAAG,GAAG,gBAAgB,CAAC,QAAQ,CAAC,gBAAgB,CAAC,MAAM,GAAG,eAAe,CAAC,CAAC;QAEjF,OAAO,eAAe,CACpB,IAAI,CAAC,KAAK,EACV,KAAK,EACL,UAAU,EACV,GAAG,EACH,MAAM,CACP,CAAC;IACJ,CAAC;CACF"}
 \ No newline at end of file
 diff --git a/dist/companion/connection.js b/dist/companion/connection.js
 index d2565bc91559836d2bedc1869f646e695879b909..6023ac2ba97ae7a5cffd7d0413118c6e82232545 100644

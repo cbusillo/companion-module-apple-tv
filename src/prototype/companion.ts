@@ -1,24 +1,34 @@
-/** Offline candidate: callers must establish and initialize a Companion session. */
+/** Candidate command layer: callers supply an initialized Companion session. */
 import { OpackFloat, type AppleTV, type OpackDict, type OpackValue } from 'node-appletv-remote'
 
 type Client = Pick<AppleTV, 'sendCompanionRequest'>
+
+export class CompanionRequestRejected extends Error {}
+
+export async function companionRequest(
+	client: Client,
+	identifier: string,
+	entries: [string, OpackValue][] = [],
+): Promise<OpackDict> {
+	const envelope: OpackDict = new Map<OpackValue, OpackValue>([
+		['_t', 2],
+		['_c', new Map<OpackValue, OpackValue>(entries)],
+	])
+	// One request, no retry: a timeout cannot prove a command was not delivered.
+	const reply = await client.sendCompanionRequest(identifier, envelope, 3000)
+	if (reply.has('_em') || reply.has('_ec')) throw new CompanionRequestRejected('Apple TV rejected the request')
+	if (reply.get('_t') !== 3) throw new Error('Invalid Companion response type')
+	const content = reply.get('_c')
+	if (!(content instanceof Map)) throw new Error('Missing Companion response content')
+	return content
+}
 
 /** High-level commands composed through the library's public messaging API. */
 export class CompanionPrototype {
 	constructor(private readonly client: Client) {}
 
 	private async request(identifier: string, entries: [string, OpackValue][] = []): Promise<OpackDict> {
-		const envelope: OpackDict = new Map<OpackValue, OpackValue>([
-			['_t', 2],
-			['_c', new Map<OpackValue, OpackValue>(entries)],
-		])
-		// One request, no retry: a timeout cannot prove a command was not delivered.
-		const reply = await this.client.sendCompanionRequest(identifier, envelope, 3000)
-		if (reply.has('_em') || reply.has('_ec')) throw new Error('Apple TV rejected the request')
-		if (reply.get('_t') !== 3) throw new Error('Invalid Companion response type')
-		const content = reply.get('_c')
-		if (!(content instanceof Map)) throw new Error('Missing Companion response content')
-		return content
+		return companionRequest(this.client, identifier, entries)
 	}
 
 	async listApps(): Promise<{ id: string; name: string }[]> {
