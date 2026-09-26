@@ -20,20 +20,25 @@ async function main(): Promise<void> {
 		process.stdout.write(`Prepared physical test (Node 22):
   node dist/prototype/acceptance-live.js --app YouTube
   node dist/prototype/acceptance-live.js --app YouTube --run --credentials /private/test.json --report /private/result.json
+  node dist/prototype/acceptance-live.js --mode power --run --credentials /private/test.json --report /private/power.json
 
 Without --run: offline preview only; no credential access or network connection.
-Run only after the owner is watching. Requires an awake TV and one exact app-name match.
+Run only after the owner is watching. All modes require an awake TV.
 Default --mode close-app: open the app, enter App Switcher, swipe up, then stop.
+Close-app and remaining modes require one exact app-name match.
+Explicit --mode power: sleep/wake only. If acknowledged wake still reports Off,
+recheck and send Home once to recover. Recovery does not pass the direct-wake test.
 Explicit --mode remaining also tests volume and sleep/wake; requires volume 5-95%.
-Playback will stop. Remaining mode briefly blanks the TV and wake is not yet qualified.
+Power and remaining modes briefly blank the TV; direct wake still needs qualification.
 Ctrl-C, error, or connection loss stops remaining controls; no command is retried.
 If the test stops after sleep, wake the TV with its normal remote.
 Reports are created privately and never overwrite an existing file.
 `)
 		return
 	}
-	if (!values.app.trim()) throw new Error('An app name is required')
-	if (values.mode !== 'close-app' && values.mode !== 'remaining') throw new Error('Invalid acceptance mode')
+	if (values.mode !== 'close-app' && values.mode !== 'power' && values.mode !== 'remaining')
+		throw new Error('Invalid acceptance mode')
+	if (values.mode !== 'power' && !values.app.trim()) throw new Error('An app name is required')
 	const mode: AcceptanceMode = values.mode
 	const plan = previewAcceptance(values.app, mode)
 	if (!values.run) {

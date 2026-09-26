@@ -1,9 +1,10 @@
 /** Prepared physical test. Call only after the owner is watching the TV. */
 import { setTimeout as delay } from 'node:timers/promises'
 import type { NodeController, RemoteAction } from './controller.js'
+import type { Power } from './companion.js'
 
 type Controller = Pick<NodeController, 'perform' | 'state' | 'reconnects' | 'queryPower' | 'queryVolume' | 'listApps'>
-export type AcceptanceMode = 'close-app' | 'remaining'
+export type AcceptanceMode = 'close-app' | 'power' | 'remaining'
 type Event = {
 	stage: string
 	result: string
@@ -22,11 +23,27 @@ type Options = {
 
 export class PilotStopped extends Error {}
 
+class PowerNotObserved extends PilotStopped {
+	constructor(
+		expected: Power,
+		readonly observed: Power,
+	) {
+		super(`Power did not report ${expected} within the observation window`)
+	}
+}
+
 export function previewAcceptance(appName: string, mode: AcceptanceMode = 'close-app'): string[] {
 	return [
 		...(mode === 'remaining' ? ['Volume down one step, then up one step'] : []),
-		`Open ${appName}, open App Switcher, then swipe up to close the focused app`,
-		...(mode === 'remaining' ? ['Put Apple TV to sleep, verify Off, then wake it and verify On'] : []),
+		...(mode !== 'power' ? [`Open ${appName}, open App Switcher, then swipe up to close the focused app`] : []),
+		...(mode === 'remaining' || mode === 'power'
+			? ['Put Apple TV to sleep, verify Off, then wake it and verify On']
+			: []),
+		...(mode === 'power'
+			? [
+					'If direct wake is acknowledged but still reports Off, recheck and send Home once to recover; wake remains failed',
+				]
+			: []),
 		'Five-second observation pauses; stop on error or connection loss; no command retries',
 	]
 }
@@ -51,17 +68,43 @@ export async function runAcceptance(controller: Controller, options: Options): P
 		await observe()
 	}
 	const expectPower = async (expected: 'On' | 'Off'): Promise<void> => {
+		let result: Power = 'Unknown'
 		for (let attempt = 0; attempt < 10; attempt++) {
 			check()
-			const result = await controller.queryPower()
+			result = await controller.queryPower()
+			check()
 			options.record({ stage: 'power report', result, expected, attempt: attempt + 1 })
 			if (result === expected) return
 			await pause(1000)
 		}
-		throw new PilotStopped(`Power did not report ${expected}; remaining controls were not sent`)
+		throw new PowerNotObserved(expected, result)
+	}
+	const powerSequence = async (): Promise<void> => {
+		check()
+		if ((await controller.queryPower()) !== 'On') throw new PilotStopped('Start with the Apple TV awake')
+		await step('sleep', { kind: 'power', state: 'Off' })
+		await expectPower('Off')
+		await step('wake', { kind: 'power', state: 'On' })
+		try {
+			await expectPower('On')
+		} catch (error) {
+			// Recovery is part of the explicit power pilot, never a command retry.
+			// Unknown state, request failure, cancellation, and reconnect all stop input.
+			if (options.mode !== 'power' || !(error instanceof PowerNotObserved) || error.observed !== 'Off') throw error
+			check()
+			const current = await controller.queryPower()
+			check()
+			options.record({ stage: 'Home recovery preflight', result: current })
+			if (current !== 'Off')
+				throw new PilotStopped(`Wake was not confirmed in time; now reports ${current}, so Home recovery was not sent`)
+			await step('Home recovery', { kind: 'button', button: 'home' })
+			await expectPower('On')
+			throw new PilotStopped('Direct wake failed; Home recovery reported On. The wake test did not pass')
+		}
 	}
 
 	check()
+	if (options.mode === 'power') return powerSequence()
 	if (!options.appName.trim()) throw new PilotStopped('Choose an app to close')
 	const apps = (await controller.listApps()).filter((app) => app.name === options.appName)
 	if (apps.length !== 1) throw new PilotStopped('App name must match exactly one installed app')
@@ -83,10 +126,5 @@ export async function runAcceptance(controller: Controller, options: Options): P
 	await step('App Switcher', { kind: 'button', button: 'appSwitcher' })
 	await step('close focused app', { kind: 'swipe', direction: 'up' })
 	if (options.mode !== 'remaining') return
-	check()
-	if ((await controller.queryPower()) !== 'On') throw new PilotStopped('Power changed before the sleep test')
-	await step('sleep', { kind: 'power', state: 'Off' })
-	await expectPower('Off')
-	await step('wake', { kind: 'power', state: 'On' })
-	await expectPower('On')
+	await powerSequence()
 }

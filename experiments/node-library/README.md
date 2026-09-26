@@ -48,13 +48,16 @@ release sequence. An independent test executes pyatv itself with controlled
 clocks and compares all four directions under normal, jittered, and stalled
 timers (12 traces); the old Node implementation fails this comparison. Companion
 TCP sockets also disable Nagle buffering, matching Python asyncio's low-latency
-socket behavior. These corrections still require a physical close-app repeat;
-the failed gesture's exact physical cause is not yet proven. The owner-observed
-repeat still left the YouTube card visible. The next correction registers the
+socket behavior. That owner-observed repeat still left the YouTube card visible.
+The subsequent correction registers the
 touch surface before starting tvremoteservices, following pyatv's session order,
 and preserves that timestamp origin until disconnect. Previously the first swipe
 registered touch lazily, after the remote session was already active. This
-startup correction is not yet physically qualified.
+startup correction passed a supervised comparison at `60234aa`: the owner
+confirmed that both the unchanged Python worker mapping and the Node candidate
+removed the YouTube card using the same separate test pairing. The Node round
+had zero reconnects. This qualifies closing on the tested TV; it does not isolate
+startup order from timestamp age as the precise reason for the earlier failure.
 
 Eight regression tests reproduced the numeric, reference, and framing failures
 before the changes. The extended library suite passes with the candidate.
@@ -213,6 +216,26 @@ or unchanged values. Uncertain state cannot become a reversed power toggle.
 Wake is not yet physically qualified; do not include this mode in the focused
 close-app repeat.
 
+The focused `--mode power` pilot requires only an awake TV and tests sleep/wake
+without app or volume controls. Preview it offline before requesting observation:
+
+```sh
+node dist/prototype/acceptance-live.js --mode power
+```
+
+After the owner is watching, run the prepared command with a new report:
+
+```sh
+node dist/prototype/acceptance-live.js --mode power --run --credentials /private/directory/test.json --report /private/directory/power.json
+```
+
+It sends sleep once, checks Off, sends wake once, and checks On. If wake was
+acknowledged but the observation window ends with reported Off, it rechecks the
+state and sends Home once only if it is still Off in the same ready connection.
+Unknown state, cancellation, connection change, or request failure stops input.
+Home recovery never turns a failed direct wake into a passing test; both outcomes
+remain visible in the report. This focused pilot has not yet run on the TV.
+
 Cancellation, a failed command, or connection loss stops remaining controls.
 Nothing is retried, including the wake command. If it stops after sleep, use the
 normal remote to wake the TV. The private report is created before controls and
@@ -260,9 +283,11 @@ Control Center/Back, Twitch Play/Pause, and YouTube -10/+10-second seeks. The
 remaining-controls run failed: the owner saw the YouTube card bounce instead of
 close, and the TV stayed off after the acknowledged wake. Volume was not
 physically confirmed. One separately requested Home press recovered reported
-power to On in fresh Node and installed-module checks; physical recovery remains
-an owner observation. The close-app corrections and direct wake remain
-unqualified. No automatic control retry or installed-module change was made.
+power to On in fresh Node and installed-module checks. The owner later reported
+YouTube playing. After the touch-startup correction, the owner separately
+confirmed Python and Node removed the YouTube card in the two-round comparison.
+Direct sleep/wake on that corrected session and physical volume acceptance remain
+pending. No automatic control retry or installed-module change was made.
 
 This qualifies an initial developer pilot on that device. It does not qualify
 all controls, tvOS versions, supported operating systems, or end-user installation.
