@@ -1,0 +1,530 @@
+diff --git a/README.md b/README.md
+index 1fc2eb1..7cde59a 100644
+--- a/README.md
++++ b/README.md
+@@ -277,6 +277,21 @@ src/
+
+ ## Development
+
++### OPACK values
++
++For low-level Companion requests, wrap integral values in `new OpackFloat(value)`
++when the protocol requires a floating-point value, such as skip seconds or the
++volume endpoints 0 and 1. Ordinary nonnegative safe integers keep their compact
++integer encoding. Negative numbers use float64; unsigned 64-bit identifiers
++must use `bigint` to preserve precision. The decoder accepts compact and extended
++object references in device replies.
++
++Encrypted Companion frame lengths include their authentication tag. Independent
++pyatv fixtures verify both encryption and streaming reception of these frames.
++
++The compatibility tests include independent fixtures from pyatv 0.18.0 and the
++[published OPACK protocol examples](https://pyatv.dev/documentation/protocols/#opack).
++
+ ```bash
+ # Install dependencies
+ npm install
+@@ -291,4 +306,4 @@ npm test
+ npm run test:watch
+ ```
+
+-Requires Node.js 18+ (ES2022 target, ESM modules).
+\ No newline at end of file
++Requires Node.js 18+ (ES2022 target, ESM modules).
+diff --git a/src/companion/__tests__/companion-session.test.ts b/src/companion/__tests__/companion-session.test.ts
+index 1fb65bc..cc1c76c 100644
+--- a/src/companion/__tests__/companion-session.test.ts
++++ b/src/companion/__tests__/companion-session.test.ts
+@@ -22,9 +22,9 @@ describe('CompanionSession', () => {
+     // Encrypted output: 4-byte header + ciphertext + 16-byte tag
+     const header = encrypted.subarray(0, 4);
+     expect(header[0]).toBe(FrameType.E_OPACK);
+-    // Length in header should be plaintext length
+-    const payloadLen = (header[1] << 16) | (header[2] << 8) | header[3];
+-    expect(payloadLen).toBe(plaintext.length);
++    // Header length describes the complete wire payload, including its tag.
++    const payloadLen = header.readUIntBE(1, 3);
++    expect(payloadLen).toBe(encrypted.length - header.length);
+
+     const encryptedPayload = encrypted.subarray(4);
+     const decrypted = receiver.decrypt(header, encryptedPayload);
+diff --git a/src/companion/__tests__/framing-compatibility.test.ts b/src/companion/__tests__/framing-compatibility.test.ts
+new file mode 100644
+index 0000000..ff480cb
+--- /dev/null
++++ b/src/companion/__tests__/framing-compatibility.test.ts
+@@ -0,0 +1,105 @@
++import { describe, expect, it } from 'vitest';
++import { CompanionSession } from '../companion-session.js';
++import { CompanionConnection } from '../connection.js';
++import { FrameType } from '../framing.js';
++import { opackDecode, opackEncode, type OpackDict, type OpackValue } from '../opack.js';
++
++// pyatv 0.18.0 Chacha20Cipher(nonce_length=12), bytes(range(32)), counters 0 and 1.
++// Public synthetic keys and payloads; no pairing or live device data.
++const key = Buffer.from(Array.from({ length: 32 }, (_, i) => i));
++const payload = Buffer.from('e3425f7409425f694c53797374656d537461747573425f63e14573746174650b', 'hex');
++const frames = [
++  '08000030fbfa1d45a4a4f9b85f322512db2623748cd0878092ef043f0dbd8f664b4110571c4015ebed81b6c162b40204067f16f7',
++  '08000030777d249acda1c3433b08aa80195ab00855d984ad5ebb865e7405842d76d574c49e0fde4f7f681f246d79893979ca6ee5',
++].map(hex => Buffer.from(hex, 'hex'));
++
++function receiver() {
++  const connection = new CompanionConnection('unused.invalid', 1, {
++    clientId: 'test', clientLTSK: key, clientLTPK: key,
++    serverLTPK: key, serverId: 'test',
++  });
++  // Enter the post-authentication parser without opening a socket.
++  const parser = connection as unknown as {
++    session: CompanionSession;
++    socket: { write(data: Buffer): void; destroy(): void };
++    onData(data: Buffer): void;
++  };
++  parser.session = new CompanionSession(key, key);
++  const states: unknown[] = [];
++  const errors: Error[] = [];
++  connection.on('event', ({ data }: { data: OpackDict }) =>
++    states.push((data.get('_c') as OpackDict).get('state')));
++  connection.on('error', error => errors.push(error));
++  return { connection, parser, states, errors };
++}
++
++describe('Companion encrypted framing compatibility', () => {
++  it('uses nonzero transaction IDs and correlates successive public requests', async () => {
++    const { connection, parser, errors } = receiver();
++    const peer = new CompanionSession(key, key);
++    const ids: number[] = [];
++    parser.socket = {
++      write(frame: Buffer): void {
++        const request = opackDecode(peer.decrypt(frame.subarray(0, 4), frame.subarray(4))) as OpackDict;
++        const id = request.get('_x') as number;
++        // Observed TV behavior: transaction zero is never acknowledged.
++        expect(id).toBeGreaterThan(0);
++        expect(ids).not.toContain(id);
++        ids.push(id);
++        const reply = new Map<OpackValue, OpackValue>([['_x', id], ['_t', 3], ['_c', new Map()]]);
++        queueMicrotask(() => parser.onData(peer.encrypt(FrameType.E_OPACK, opackEncode(reply))));
++      },
++      destroy(): void {},
++    };
++    try {
++      for (const identifier of ['_systemInfo', '_sessionStart']) {
++        const reply = await connection.sendRequest(identifier, new Map<OpackValue, OpackValue>([
++          ['_t', 2], ['_c', new Map()],
++        ]));
++        expect(reply.get('_t')).toBe(3);
++      }
++      expect(ids).toHaveLength(2);
++      expect(errors).toEqual([]);
++    } finally {
++      connection.close();
++    }
++  });
++
++  it('matches an independently encrypted packet including the tag in its header', () => {
++    const sender = new CompanionSession(key, key);
++    expect(sender.encrypt(FrameType.E_OPACK, payload)).toEqual(frames[0]);
++  });
++
++  it('accepts a single complete real-format packet without waiting for extra bytes', () => {
++    const { parser, states, errors } = receiver();
++    parser.onData(frames[0]);
++    expect(errors).toEqual([]);
++    expect(states).toEqual([3]);
++  });
++
++  it('uses the Companion 96-bit little-endian nonce after the first packet', () => {
++    const sender = new CompanionSession(key, key);
++    sender.encrypt(FrameType.E_OPACK, payload);
++    const second = Buffer.from(payload);
++    second[second.length - 1] = 0x09; // State 1, rather than state 3.
++    expect(sender.encrypt(FrameType.E_OPACK, second)).toEqual(frames[1]);
++  });
++
++  it('separates coalesced packets and preserves the receive counter', () => {
++    const { parser, states, errors } = receiver();
++    parser.onData(Buffer.concat(frames));
++    expect(errors).toEqual([]);
++    expect(states).toEqual([3, 1]);
++  });
++
++  it('waits for every possible split point in an encrypted packet', () => {
++    for (let split = 1; split < frames[0].length; split++) {
++      const { parser, states, errors } = receiver();
++      parser.onData(frames[0].subarray(0, split));
++      expect(states).toEqual([]);
++      parser.onData(frames[0].subarray(split));
++      expect(errors).toEqual([]);
++      expect(states).toEqual([3]);
++    }
++  });
++});
+diff --git a/src/companion/__tests__/opack-compatibility.test.ts b/src/companion/__tests__/opack-compatibility.test.ts
+new file mode 100644
+index 0000000..fb9a21e
+--- /dev/null
++++ b/src/companion/__tests__/opack-compatibility.test.ts
+@@ -0,0 +1,81 @@
++import { describe, expect, it } from 'vitest';
++import { opackDecode, opackEncode, OpackFloat } from '../opack.js';
++
++// Independent wire fixtures: pyatv 0.18.0 and its published OPACK examples.
++// These test protocol compatibility, rather than just this codec's round trips.
++describe('Companion OPACK compatibility', () => {
++  it('preserves a backward seek instead of decoding it as a huge positive integer', () => {
++    expect(opackEncode(-10).toString('hex')).toBe('3600000000000024c0');
++    expect(opackDecode(opackEncode(-10))).toBe(-10);
++  });
++
++  it('supports a combined session identifier with its top bit set', () => {
++    const sessionId = 0x8000000000000001n;
++    expect(opackEncode(sessionId).toString('hex')).toBe('330100000000000080');
++    expect(opackDecode(opackEncode(sessionId))).toBe(sessionId);
++  });
++
++  it('decodes an app-list reply containing a repeated app-name reference', () => {
++    const packet = Buffer.from(
++      'e2425f740b425f63e24f636f6d2e6578616d706c652e6f6e654b4578616d706c65204170704f636f6d2e6578616d706c652e74776fa3',
++      'hex',
++    );
++    expect(opackDecode(packet)).toEqual(new Map<string, unknown>([
++      ['_t', 3],
++      ['_c', new Map([
++        ['com.example.one', 'Example App'],
++        ['com.example.two', 'Example App'],
++      ])],
++    ]));
++  });
++
++  it('decodes the documented pointer example without indexing the boolean', () =>
++    expect(opackDecode(Buffer.from('e3416102416244746573744163a2', 'hex')))
++      .toEqual(new Map<string, unknown>([['a', false], ['b', 'test'], ['c', 'test']])));
++
++  it.each([
++    [30, '360000000000003e40'],
++    [0, '360000000000000000'],
++    [1, '36000000000000f03f'],
++    [-10, '3600000000000024c0'],
++  ])('preserves an explicit float wire type for %s', (value, hex) => {
++    const encoded = opackEncode(new OpackFloat(value));
++    expect(encoded.toString('hex')).toBe(hex);
++    expect(opackDecode(encoded)).toBe(value);
++  });
++
++  it('keeps ordinary positive integers and negative zero distinct', () => {
++    expect(opackEncode(30)).toEqual(Buffer.from([0x26]));
++    expect(Object.is(opackDecode(opackEncode(-0)), -0)).toBe(true);
++  });
++
++  it('rejects unsigned overflow, negative bigint and imprecise integer input', () => {
++    expect(() => opackEncode(1n << 64n)).toThrow(RangeError);
++    expect(() => opackEncode(-1n)).toThrow(RangeError);
++    expect(() => opackEncode(Number.MAX_SAFE_INTEGER + 1)).toThrow(RangeError);
++    expect(opackDecode(opackEncode((1n << 64n) - 1n))).toBe((1n << 64n) - 1n);
++  });
++
++  it('shares the object table across nested containers without indexing containers', () =>
++    expect(opackDecode(Buffer.from('d343666f6fd1426261a1', 'hex')))
++      .toEqual(['foo', ['ba'], 'ba']));
++
++  it('does not add duplicate literals or references to the object table', () =>
++    expect(opackDecode(Buffer.from('d543666f6f43666f6fa043626172a1', 'hex')))
++      .toEqual(['foo', 'foo', 'foo', 'bar', 'bar']));
++
++  it.each([1, 2, 3, 4])('decodes an extended reference with %s index bytes', width => {
++    const pointer = Buffer.alloc(1 + width);
++    pointer[0] = 0xc0 + width;
++    pointer.writeUIntLE(1, 1, width);
++    expect(opackDecode(Buffer.concat([Buffer.from('d343666f6f43626172', 'hex'), pointer])))
++      .toEqual(['foo', 'bar', 'bar']);
++  });
++
++  it('resets references between messages and rejects missing or truncated references', () => {
++    expect(opackDecode(Buffer.from('d243666f6fa0', 'hex'))).toEqual(['foo', 'foo']);
++    expect(() => opackDecode(Buffer.from('a0', 'hex'))).toThrow(/reference/);
++    expect(() => opackDecode(Buffer.from('d243666f6fa1', 'hex'))).toThrow(/reference/);
++    expect(() => opackDecode(Buffer.from('d243666f6fc2', 'hex'))).toThrow();
++  });
++});
+diff --git a/src/companion/companion-session.ts b/src/companion/companion-session.ts
+index 9500d2e..5e3db8d 100644
+--- a/src/companion/companion-session.ts
++++ b/src/companion/companion-session.ts
+@@ -1,16 +1,24 @@
+ /**
+  * ChaCha20-Poly1305 encryption session for the Companion protocol.
+  * Differs from HAPSession:
+- * - AAD = the 4-byte frame header (type + 3-byte length of plaintext)
++ * - AAD = the 4-byte frame header (type + 3-byte ciphertext-and-tag length)
+  * - Encrypts whole messages (no 1024-byte chunking)
+  * - Counter-based nonce, separate TX/RX counters
+  */
+
+-import { encryptChaCha20, decryptChaCha20, generateNonce } from '../util/crypto.js';
++import { encryptChaCha20, decryptChaCha20 } from '../util/crypto.js';
+ import { FrameType } from './framing.js';
+
+ const AUTH_TAG_LENGTH = 16;
+
++function companionNonce(counter: bigint): Buffer {
++  // Companion counts from byte zero of a 12-byte little-endian nonce.
++  // HAP/AirPlay instead put four zero bytes before their 8-byte counter.
++  const nonce = Buffer.alloc(12);
++  nonce.writeBigUInt64LE(counter, 0);
++  return nonce;
++}
++
+ export class CompanionSession {
+   private outCounter = 0n;
+   private inCounter = 0n;
+@@ -25,15 +33,13 @@ export class CompanionSession {
+    * Returns a complete frame: 4-byte header + ciphertext + 16-byte auth tag.
+    */
+   encrypt(frameType: FrameType, plaintext: Buffer): Buffer {
+-    const nonce = generateNonce(this.outCounter);
++    const nonce = companionNonce(this.outCounter);
+     this.outCounter++;
+
+     // Build the frame header (used as AAD)
+     const header = Buffer.alloc(4);
+     header[0] = frameType;
+-    header[1] = (plaintext.length >> 16) & 0xff;
+-    header[2] = (plaintext.length >> 8) & 0xff;
+-    header[3] = plaintext.length & 0xff;
++    header.writeUIntBE(plaintext.length + AUTH_TAG_LENGTH, 1, 3);
+
+     const { ciphertext, tag } = encryptChaCha20(
+       this.outKey,
+@@ -51,7 +57,7 @@ export class CompanionSession {
+    * The header bytes are needed as AAD.
+    */
+   decrypt(header: Buffer, encryptedPayload: Buffer): Buffer {
+-    const nonce = generateNonce(this.inCounter);
++    const nonce = companionNonce(this.inCounter);
+     this.inCounter++;
+
+     const ciphertext = encryptedPayload.subarray(0, encryptedPayload.length - AUTH_TAG_LENGTH);
+diff --git a/src/companion/connection.ts b/src/companion/connection.ts
+index 351e7fb..80bb340 100644
+--- a/src/companion/connection.ts
++++ b/src/companion/connection.ts
+@@ -57,7 +57,8 @@ export class CompanionConnection extends EventEmitter {
+   private socket: Socket | undefined;
+   private session: CompanionSession | undefined;
+   private buffer: Buffer = Buffer.alloc(0);
+-  private transferId = 0;
++  // A real TV may treat transaction zero as unacknowledged traffic.
++  private transferId = 1;
+   private pendingRequests = new Map<number, {
+     resolve: (value: OpackDict) => void;
+     reject: (error: Error) => void;
+@@ -365,11 +366,10 @@ export class CompanionConnection extends EventEmitter {
+
+   private processEncryptedFrames(): void {
+     // Encrypted frames: 4-byte header + ciphertext + 16-byte tag
+-    // The header contains the plaintext length, so total = 4 + plaintextLen + 16
++    // The header length already includes the authentication tag.
+     while (this.buffer.length >= 4) {
+-      const plaintextLen =
+-        (this.buffer[1] << 16) | (this.buffer[2] << 8) | this.buffer[3];
+-      const totalLen = 4 + plaintextLen + 16;
++      const payloadLen = this.buffer.readUIntBE(1, 3);
++      const totalLen = 4 + payloadLen;
+
+       if (this.buffer.length < totalLen) break;
+
+diff --git a/src/companion/opack.ts b/src/companion/opack.ts
+index 7641ce2..0918c4b 100644
+--- a/src/companion/opack.ts
++++ b/src/companion/opack.ts
+@@ -11,11 +11,17 @@ export type OpackValue =
+   | bigint
+   | string
+   | Buffer
++  | OpackFloat
+   | OpackValue[]
+   | OpackDict;
+
+ export type OpackDict = Map<OpackValue, OpackValue>;
+
++/** Preserve a floating-point wire type for integral seconds and volume limits. */
++export class OpackFloat {
++  constructor(readonly value: number) {}
++}
++
+ // --- Type tags (matched to pyatv) ---
+ const TAG_NULL = 0x04;
+ const TAG_TRUE = 0x01;
+@@ -85,7 +91,11 @@ function encodeValue(value: OpackValue, parts: Buffer[]): void {
+   }
+
+   if (typeof value === 'number') {
+-    if (Number.isInteger(value)) {
++    // OPACK integers are unsigned. Negative numbers must use a float.
++    if (Number.isInteger(value) && value >= 0 && !Object.is(value, -0)) {
++      if (!Number.isSafeInteger(value)) {
++        throw new RangeError('Use bigint for OPACK integers above Number.MAX_SAFE_INTEGER');
++      }
+       encodeInteger(value, parts);
+     } else {
+       encodeFloat(value, parts);
+@@ -93,6 +103,11 @@ function encodeValue(value: OpackValue, parts: Buffer[]): void {
+     return;
+   }
+
++  if (value instanceof OpackFloat) {
++    encodeFloat(value.value, parts);
++    return;
++  }
++
+   if (typeof value === 'string') {
+     encodeString(value, parts);
+     return;
+@@ -150,14 +165,14 @@ function encodeInteger(value: number, parts: Buffer[]): void {
+   // Fall through to int64
+   const buf = Buffer.alloc(9);
+   buf[0] = TAG_INT64;
+-  buf.writeBigInt64LE(BigInt(value), 1);
++  buf.writeBigUInt64LE(BigInt(value), 1);
+   parts.push(buf);
+ }
+
+ function encodeBigInt(value: bigint, parts: Buffer[]): void {
+   const buf = Buffer.alloc(9);
+   buf[0] = TAG_INT64;
+-  buf.writeBigInt64LE(value, 1);
++  buf.writeBigUInt64LE(value, 1);
+   parts.push(buf);
+ }
+
+@@ -242,7 +257,7 @@ function encodeDict(value: OpackDict, parts: Buffer[]): void {
+ // --- Decoder ---
+
+ export function opackDecode(buffer: Buffer): OpackValue {
+-  const result = decodeValue(buffer, 0);
++  const result = decodeValue(buffer, 0, []);
+   return result.value;
+ }
+
+@@ -251,7 +266,29 @@ interface DecodeResult {
+   offset: number;
+ }
+
+-function decodeValue(buf: Buffer, offset: number): DecodeResult {
++function decodeValue(buf: Buffer, offset: number, objects: OpackValue[]): DecodeResult {
++  const tag = buf[offset];
++  if (tag >= 0xa0 && tag <= 0xc4) {
++    const width = tag <= 0xc0 ? 0 : tag - 0xc0;
++    const index = width === 0 ? tag - 0xa0 : buf.readUIntLE(offset + 1, width);
++    if (index >= objects.length) {
++      throw new Error(`OPACK: invalid object reference ${index}`);
++    }
++    return { value: objects[index], offset: offset + 1 + width };
++  }
++
++  const result = decodeLiteral(buf, offset, objects);
++  const value = result.value;
++  // Containers, single-byte objects and existing values do not add table entries.
++  if (result.offset - offset > 1 && !Array.isArray(value) && !(value instanceof Map)
++      && !objects.some(item => Buffer.isBuffer(item) && Buffer.isBuffer(value)
++        ? item.equals(value) : Object.is(item, value))) {
++    objects.push(value);
++  }
++  return result;
++}
++
++function decodeLiteral(buf: Buffer, offset: number, objects: OpackValue[]): DecodeResult {
+   if (offset >= buf.length) {
+     throw new Error('OPACK: unexpected end of buffer');
+   }
+@@ -359,38 +396,38 @@ function decodeValue(buf: Buffer, offset: number): DecodeResult {
+   // Arrays: 0xD0..0xDE inline count, 0xDF = terminated
+   if (tag >= TAG_ARRAY_BASE && tag < TAG_ARRAY_BASE + TAG_ARRAY_OVERFLOW) {
+     const count = tag - TAG_ARRAY_BASE;
+-    return decodeArrayN(buf, offset + 1, count);
++    return decodeArrayN(buf, offset + 1, count, objects);
+   }
+   if (tag === TAG_ARRAY_BASE + TAG_ARRAY_OVERFLOW) {
+-    return decodeArrayTerminated(buf, offset + 1);
++    return decodeArrayTerminated(buf, offset + 1, objects);
+   }
+
+   // Dicts: 0xE0..0xEE inline count, 0xEF = terminated
+   if (tag >= TAG_DICT_BASE && tag < TAG_DICT_BASE + TAG_DICT_OVERFLOW) {
+     const count = tag - TAG_DICT_BASE;
+-    return decodeDictN(buf, offset + 1, count);
++    return decodeDictN(buf, offset + 1, count, objects);
+   }
+   if (tag === TAG_DICT_BASE + TAG_DICT_OVERFLOW) {
+-    return decodeDictTerminated(buf, offset + 1);
++    return decodeDictTerminated(buf, offset + 1, objects);
+   }
+
+   throw new Error(`OPACK: unknown tag 0x${tag.toString(16)} at offset ${offset}`);
+ }
+
+-function decodeArrayN(buf: Buffer, offset: number, count: number): DecodeResult {
++function decodeArrayN(buf: Buffer, offset: number, count: number, objects: OpackValue[]): DecodeResult {
+   const arr: OpackValue[] = [];
+   for (let i = 0; i < count; i++) {
+-    const item = decodeValue(buf, offset);
++    const item = decodeValue(buf, offset, objects);
+     arr.push(item.value);
+     offset = item.offset;
+   }
+   return { value: arr, offset };
+ }
+
+-function decodeArrayTerminated(buf: Buffer, offset: number): DecodeResult {
++function decodeArrayTerminated(buf: Buffer, offset: number, objects: OpackValue[]): DecodeResult {
+   const arr: OpackValue[] = [];
+   while (offset < buf.length && buf[offset] !== TAG_TERMINATOR) {
+-    const item = decodeValue(buf, offset);
++    const item = decodeValue(buf, offset, objects);
+     arr.push(item.value);
+     offset = item.offset;
+   }
+@@ -400,24 +437,24 @@ function decodeArrayTerminated(buf: Buffer, offset: number): DecodeResult {
+   return { value: arr, offset };
+ }
+
+-function decodeDictN(buf: Buffer, offset: number, count: number): DecodeResult {
++function decodeDictN(buf: Buffer, offset: number, count: number, objects: OpackValue[]): DecodeResult {
+   const dict: OpackDict = new Map();
+   for (let i = 0; i < count; i++) {
+-    const key = decodeValue(buf, offset);
++    const key = decodeValue(buf, offset, objects);
+     offset = key.offset;
+-    const val = decodeValue(buf, offset);
++    const val = decodeValue(buf, offset, objects);
+     offset = val.offset;
+     dict.set(key.value, val.value);
+   }
+   return { value: dict, offset };
+ }
+
+-function decodeDictTerminated(buf: Buffer, offset: number): DecodeResult {
++function decodeDictTerminated(buf: Buffer, offset: number, objects: OpackValue[]): DecodeResult {
+   const dict: OpackDict = new Map();
+   while (offset < buf.length && buf[offset] !== TAG_TERMINATOR) {
+-    const key = decodeValue(buf, offset);
++    const key = decodeValue(buf, offset, objects);
+     offset = key.offset;
+-    const val = decodeValue(buf, offset);
++    const val = decodeValue(buf, offset, objects);
+     offset = val.offset;
+     dict.set(key.value, val.value);
+   }
+diff --git a/src/index.ts b/src/index.ts
+index 8466eac..448f1c8 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -4,7 +4,7 @@ export type { KeyboardInfo, TextInputEvent, CompanionEvent } from './appletv.js'
+ export { CompanionConnection } from './companion/connection.js';
+ export { CompanionPairSetup } from './companion/pair-setup.js';
+ export { CompanionSession } from './companion/companion-session.js';
+-export { opackEncode, opackDecode } from './companion/opack.js';
++export { opackEncode, opackDecode, OpackFloat } from './companion/opack.js';
+ export type { OpackValue, OpackDict } from './companion/opack.js';
+ export { FrameType, encodeFrame, parseFrames } from './companion/framing.js';
+ export type { Frame } from './companion/framing.js';
