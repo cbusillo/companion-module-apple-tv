@@ -1,8 +1,8 @@
 diff --git a/README.md b/README.md
-index 1fc2eb1..7cde59a 100644
+index 1fc2eb1..9c1de24 100644
 --- a/README.md
 +++ b/README.md
-@@ -277,6 +277,21 @@ src/
+@@ -277,6 +277,41 @@ src/
 
  ## Development
 
@@ -21,16 +21,88 @@ index 1fc2eb1..7cde59a 100644
 +The compatibility tests include independent fixtures from pyatv 0.18.0 and the
 +[published OPACK protocol examples](https://pyatv.dev/documentation/protocols/#opack).
 +
++### AirPlay metadata compatibility
++
++DataStream frames can carry several length-prefixed protobufs. The receive path
++delivers all of them in wire order, including across encrypted TCP fragments.
++`parseDataStreamFrame` retains the first message as `protobufData` for compatibility
++and exposes the complete `protobufMessages` array. Malformed lengths fail instead
++of silently truncating packets or preventing parser progress.
++
++The metadata schema includes volume/capability updates, active player selection,
++client/player removal, grouped outputs and cluster identity. `MRPMessage` and
++`MessageType` are public exports for decoded-message consumers and codec tests.
++Untyped acknowledgements have type zero rather than appearing as media commands.
++The metadata fixtures come from locked pyatv encoders using synthetic data only.
++The receive-path regression verifies a fragmented encrypted pair of batches.
++
++These extensions do not provide a complete player-state reducer or qualify the
++long-lived AirPlay transport. Consumers must track explicit active player/output
++selection and invalidate feedback on connection loss. Data/event socket loss is
++forwarded through the connection's existing error/close events.
++
  ```bash
  # Install dependencies
  npm install
-@@ -291,4 +306,4 @@ npm test
+@@ -291,4 +326,4 @@ npm test
  npm run test:watch
  ```
 
 -Requires Node.js 18+ (ES2022 target, ESM modules).
 \ No newline at end of file
 +Requires Node.js 18+ (ES2022 target, ESM modules).
+diff --git a/src/__tests__/connection.test.ts b/src/__tests__/connection.test.ts
+index bf59292..ca09b7e 100644
+--- a/src/__tests__/connection.test.ts
++++ b/src/__tests__/connection.test.ts
+@@ -1,8 +1,47 @@
+ import { describe, it, expect } from 'vitest';
+ import { AirPlayConnection } from '../connection.js';
+ import { randomBytes } from 'node:crypto';
++import { readFileSync } from 'node:fs';
++import { HAPSession } from '../util/hap-session.js';
++import { parseDataStreamFrame } from '../util/data-stream.js';
++import { Message } from '../message.js';
+
+ describe('AirPlayConnection', () => {
++  it('delivers a fragmented encrypted batch without losing or reordering messages', async () => {
++    const fixture = JSON.parse(readFileSync(new URL('../mrp/__tests__/metadata-fixtures.json', import.meta.url), 'utf8'));
++    const incoming = Buffer.alloc(32, 1);
++    const outgoing = Buffer.alloc(32, 2);
++    const conn = new AirPlayConnection('127.0.0.1', 1, {
++      clientId: 'synthetic', clientLTSK: Buffer.alloc(32), clientLTPK: Buffer.alloc(32),
++      serverLTPK: Buffer.alloc(32), serverId: 'synthetic-server',
++    });
++    // Exercise the actual receive path while replacing only the socket and keys.
++    const transport = conn as unknown as {
++      dataSession: HAPSession;
++      dataSocket: { write(data: Buffer): boolean; destroy(): void };
++      onDataChannelData(data: Buffer): void;
++    };
++    const replies: Buffer[] = [];
++    transport.dataSession = new HAPSession(outgoing, incoming);
++    transport.dataSocket = { write(data) { replies.push(data); return true; }, destroy() {} };
++    const peer = new HAPSession(incoming, outgoing);
++    const received: number[] = [];
++    conn.on('mrp-message', message => received.push(new Message(message).type));
++    const batch = Buffer.from(fixture.batch, 'hex');
++    const encrypted = peer.encrypt(Buffer.concat([batch, batch]));
++    for (let offset = 0; offset < encrypted.length; offset += 31) {
++      transport.onDataChannelData(encrypted.subarray(offset, offset + 31));
++    }
++    await expect.poll(() => received.length).toBe(24);
++    expect(received).toEqual([15, 17, 64, 52, 46, 47, 4, 56, 54, 53, 0, 0,
++      15, 17, 64, 52, 46, 47, 4, 56, 54, 53, 0, 0]);
++    expect(replies).toHaveLength(2);
++    for (const reply of replies) {
++      expect(parseDataStreamFrame(peer.decrypt(reply))).toMatchObject({ messageType: 'rply', seqno: 0x123456789n });
++    }
++    conn.close();
++  });
++
+   it('constructs with host, port, and credentials', () => {
+     const conn = new AirPlayConnection('192.168.1.100', 7000, {
+       clientId: 'test',
 diff --git a/src/__tests__/discovery-order.test.ts b/src/__tests__/discovery-order.test.ts
 new file mode 100644
 index 0000000..b9d5319
@@ -676,6 +748,87 @@ index 7641ce2..0918c4b 100644
      offset = val.offset;
      dict.set(key.value, val.value);
    }
+diff --git a/src/connection.ts b/src/connection.ts
+index 8851355..b31edb0 100644
+--- a/src/connection.ts
++++ b/src/connection.ts
+@@ -390,8 +390,8 @@ export class AirPlayConnection extends EventEmitter {
+       this.eventSocket = await connectSocket(this.host, eventPort);
+       this.log('event socket connected');
+       this.eventSocket.on('data', (data) => this.onEventChannelData(Buffer.from(data)));
+-      this.eventSocket.on('error', (err) => this.log(`event channel error: ${err.message}`));
+-      this.eventSocket.on('close', () => this.log('event channel closed'));
++      this.eventSocket.on('error', (err) => this.emit('error', err));
++      this.eventSocket.on('close', () => this.emit('close'));
+     }
+   }
+
+@@ -455,8 +455,8 @@ export class AirPlayConnection extends EventEmitter {
+     this.log('data socket connected');
+
+     this.dataSocket.on('data', (data) => this.onDataChannelData(Buffer.from(data)));
+-    this.dataSocket.on('error', (err) => this.log(`data channel error: ${err.message}`));
+-    this.dataSocket.on('close', () => this.log('data channel closed by remote'));
++    this.dataSocket.on('error', (err) => this.emit('error', err));
++    this.dataSocket.on('close', () => this.emit('close'));
+     this.dataSocket.on('end', () => this.log('data channel ended by remote'));
+
+     // Initialize MRP protocol on data channel
+@@ -471,10 +471,8 @@ export class AirPlayConnection extends EventEmitter {
+       uniqueIdentifier: this.credentials.clientId,
+       name: 'Node ATV Remote',
+     });
+-    await this.sendMRPMessage(deviceInfo);
+-
+     // Wait for DeviceInfo response from Apple TV
+-    await this.waitForMRPMessage(MessageType.DeviceInfo, 5000);
++    await this.sendMRPMessageAndWait(deviceInfo, MessageType.DeviceInfo, 5000);
+     this.log('DeviceInfo exchange complete');
+
+     // 2. CryptoPairing is NOT performed over AirPlay transport.
+@@ -492,6 +490,7 @@ export class AirPlayConnection extends EventEmitter {
+       nowPlayingUpdates: true,
+       volumeUpdates: true,
+       keyboardUpdates: true,
++      outputDeviceUpdates: true,
+     });
+     await this.sendMRPMessage(updatesConfig);
+
+@@ -749,13 +748,22 @@ export class AirPlayConnection extends EventEmitter {
+         this.dataDecBuffer = Buffer.concat([this.dataDecBuffer, decrypted]);
+       } catch (e) {
+         this.log(`data channel decrypt error: ${e}`);
++        this.close();
++        this.emit('error', new Error('Invalid AirPlay data encryption'));
+         return;
+       }
+     }
+
+     // Parse complete DataStream frames from the decrypted buffer
+     while (this.dataDecBuffer.length >= 32) {
+-      const frame = parseDataStreamFrame(this.dataDecBuffer, 0);
++      let frame;
++      try {
++        frame = parseDataStreamFrame(this.dataDecBuffer, 0);
++      } catch {
++        this.close();
++        this.emit('error', new Error('Invalid AirPlay data frame'));
++        return;
++      }
+       if (!frame) break;
+
+       // Send rply for sync frames from the Apple TV
+@@ -765,8 +773,8 @@ export class AirPlayConnection extends EventEmitter {
+         this.dataSocket?.write(encrypted);
+       }
+
+-      if (frame.protobufData) {
+-        this.handleMRPResponse(frame.protobufData);
++      for (const protobufData of frame.protobufMessages) {
++        void this.handleMRPResponse(protobufData);
+       }
+
+       // Advance buffer past this frame
 diff --git a/src/discovery.ts b/src/discovery.ts
 index 3f67678..46f633b 100644
 --- a/src/discovery.ts
@@ -706,7 +859,7 @@ index 3f67678..46f633b 100644
            if (device.address === address) {
              device.companionPort = service.port;
 diff --git a/src/index.ts b/src/index.ts
-index 8466eac..448f1c8 100644
+index 8466eac..b1b7ac8 100644
 --- a/src/index.ts
 +++ b/src/index.ts
 @@ -4,7 +4,7 @@ export type { KeyboardInfo, TextInputEvent, CompanionEvent } from './appletv.js'
@@ -718,3 +871,458 @@ index 8466eac..448f1c8 100644
  export type { OpackValue, OpackDict } from './companion/opack.js';
  export { FrameType, encodeFrame, parseFrames } from './companion/framing.js';
  export type { Frame } from './companion/framing.js';
+@@ -12,6 +12,7 @@ export { Credentials, parseCredentials } from './credentials.js';
+ export { NowPlayingInfo, PlaybackState } from './now-playing-info.js';
+ export { SupportedCommand, Command } from './supported-command.js';
+ export { Message } from './message.js';
++export { MRPMessage, MessageType } from './mrp/messages.js';
+ export { AirPlayConnection } from './connection.js';
+ export type { HAPCredentials } from './auth/types.js';
+ export type { ScanOptions, DiscoveredDevice } from './discovery.js';
+diff --git a/src/message.ts b/src/message.ts
+index ba91c37..25abaaa 100644
+--- a/src/message.ts
++++ b/src/message.ts
+@@ -8,7 +8,9 @@ export class Message {
+   readonly payload: Record<string, unknown>;
+
+   constructor(decoded: Record<string, unknown>) {
+-    this.type = (decoded.type as MessageType) ?? 0;
++    // protobufjs supplies the first enum member for an absent proto2 field.
++    // An untyped acknowledgement must not appear to be a SendCommand.
++    this.type = Object.hasOwn(decoded, 'type') ? decoded.type as MessageType : 0;
+     this.identifier = (decoded.identifier as string) ?? '';
+     this.payload = decoded;
+   }
+diff --git a/src/mrp/__tests__/metadata-fixtures.json b/src/mrp/__tests__/metadata-fixtures.json
+new file mode 100644
+index 0000000..ebc9e1b
+--- /dev/null
++++ b/src/mrp/__tests__/metadata-fixtures.json
+@@ -0,0 +1,18 @@
++{
++  "source": "Locked pyatv protobuf and AirPlay DataStream encoders; all data synthetic",
++  "messages": {
++    "device": "080fa2015f0a0574762d6964120c53796e7468657469632054569a010974762d6f7574707574c00100e20124121153796e74686574696320737065616b65729a010e737065616b65722d6f7574707574e801019a020e636c75737465722d6f7574707574",
++    "availability": "0811b2010408011003",
++    "capabilities": "0840a204160a0408011003220e636c75737465722d6f7574707574",
++    "volume": "0834c203150d9a99993e1a0e636c75737465722d6f7574707574",
++    "client": "082e9203210a1f120b746573742e706c617965723a1053796e74686574696320706c61796572",
++    "player": "082f9a032b0a29121f120b746573742e706c617965723a1053796e74686574696320706c617965721a060a046d61696e",
++    "state": "08044a83011a54080012500a066974656d2d3112460a0f53796e746865746963207469746c653a1053796e7468657469632061727469737471000000000080664099020000000000002840bd020000803fd1040000000084d7c74130014a29121f120b746573742e706c617965723a1053796e74686574696320706c617965721a060a046d61696e",
++    "content": "0838e203410a140a066974656d2d31120a990200000000000038401229121f120b746573742e706c617965723a1053796e74686574696320706c617965721a060a046d61696e",
++    "removePlayer": "0836d2032b0a29121f120b746573742e706c617965723a1053796e74686574696320706c617965721a060a046d61696e",
++    "removeClient": "0835ca03210a1f120b746573742e706c617965723a1053796e74686574696320706c61796572",
++    "ack": "1209726571756573742d31",
++    "error": "1209726571756573742d322006f2041353796e7468657469632072656a656374696f6e"
++  },
++  "batch": "000002bf73796e630000000000000000636f6d6d00000001234567890000000062706c6973743030d1010256706172616d73d1030454646174614f11025764080fa2015f0a0574762d6964120c53796e7468657469632054569a010974762d6f7574707574c00100e20124121153796e74686574696320737065616b65729a010e737065616b65722d6f7574707574e801019a020e636c75737465722d6f7574707574090811b20104080110031b0840a204160a0408011003220e636c75737465722d6f75747075741a0834c203150d9a99993e1a0e636c75737465722d6f757470757426082e9203210a1f120b746573742e706c617965723a1053796e74686574696320706c6179657230082f9a032b0a29121f120b746573742e706c617965723a1053796e74686574696320706c617965721a060a046d61696e880108044a83011a54080012500a066974656d2d3112460a0f53796e746865746963207469746c653a1053796e7468657469632061727469737471000000000080664099020000000000002840bd020000803fd1040000000084d7c74130014a29121f120b746573742e706c617965723a1053796e74686574696320706c617965721a060a046d61696e460838e203410a140a066974656d2d31120a990200000000000038401229121f120b746573742e706c617965723a1053796e74686574696320706c617965721a060a046d61696e300836d2032b0a29121f120b746573742e706c617965723a1053796e74686574696320706c617965721a060a046d61696e260835ca03210a1f120b746573742e706c617965723a1053796e74686574696320706c617965720b1209726571756573742d31231209726571756573742d322006f2041353796e7468657469632072656a656374696f6e0008000b00120015001a0000000000000201000000000000000500000000000000000000000000000275"
++}
+diff --git a/src/mrp/__tests__/metadata.test.ts b/src/mrp/__tests__/metadata.test.ts
+new file mode 100644
+index 0000000..ba93f12
+--- /dev/null
++++ b/src/mrp/__tests__/metadata.test.ts
+@@ -0,0 +1,54 @@
++import { readFileSync } from 'node:fs';
++import { describe, it, expect } from 'vitest';
++import { MRPMessage } from '../messages.js';
++import { Message } from '../../message.js';
++import { parseDataStreamFrame } from '../../util/data-stream.js';
++
++// Generated by companion-module-apple-tv's locked pyatv mrp_fixtures.py.
++// The independent encoder uses synthetic identifiers and content only.
++const reference = JSON.parse(readFileSync(new URL('./metadata-fixtures.json', import.meta.url), 'utf8'));
++const decode = (name: string) => MRPMessage.decode(Buffer.from(reference.messages[name], 'hex'));
++
++describe('independent pyatv metadata packets', () => {
++  it('decodes every message in an independently encoded batch', async () => {
++    const frame = parseDataStreamFrame(Buffer.from(reference.batch, 'hex'))!;
++    const messages = await Promise.all(frame.protobufMessages.map(data => MRPMessage.decode(data)));
++    expect(messages.map(message => new Message(message).type)).toEqual([15, 17, 64, 52, 46, 47, 4, 56, 54, 53, 0, 0]);
++  });
++
++  it('retains volume, capabilities and authenticated output identities', async () => {
++    expect((await decode('device'))['.deviceInfoMessage']).toMatchObject({
++      deviceUID: 'tv-output', clusterID: 'cluster-output', isGroupLeader: true,
++      groupedDevices: [{ name: 'Synthetic speaker', deviceUID: 'speaker-output' }],
++    });
++    expect((await decode('capabilities'))['.volumeControlCapabilitiesDidChangeMessage']).toMatchObject({
++      outputDeviceUID: 'cluster-output', capabilities: { volumeControlAvailable: true, volumeCapabilities: 3 },
++    });
++    const volume = (await decode('volume'))['.volumeDidChangeMessage'] as Record<string, unknown>;
++    expect(volume.outputDeviceUID).toBe('cluster-output');
++    expect(volume.volume).toBeCloseTo(0.3);
++  });
++
++  it('retains active player selection, queue metadata and removals', async () => {
++    expect((await decode('player'))['.setNowPlayingPlayerMessage']).toMatchObject({
++      playerPath: { client: { bundleIdentifier: 'test.player' }, player: { identifier: 'main' } },
++    });
++    expect((await decode('state'))['.setStateMessage']).toMatchObject({
++      playbackState: 1,
++      playbackQueue: { location: 0, contentItems: [{ identifier: 'item-1', metadata: { title: 'Synthetic title', elapsedTime: 12 } }] },
++    });
++    expect((await decode('removePlayer'))['.removePlayerMessage']).toMatchObject({
++      playerPath: { player: { identifier: 'main' } },
++    });
++    expect((await decode('removeClient'))['.removeClientMessage']).toMatchObject({
++      client: { bundleIdentifier: 'test.player' },
++    });
++  });
++
++  it('preserves protocol errors and does not turn acknowledgements into commands', async () => {
++    const ack = await decode('ack');
++    expect(Object.hasOwn(ack, 'type')).toBe(false);
++    expect(new Message(ack).type).toBe(0);
++    expect(await decode('error')).toMatchObject({ errorCode: 6, errorDescription: 'Synthetic rejection' });
++  });
++});
+diff --git a/src/mrp/messages.ts b/src/mrp/messages.ts
+index 499a60a..984914b 100644
+--- a/src/mrp/messages.ts
++++ b/src/mrp/messages.ts
+@@ -7,6 +7,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
+ const PROTO_DIR = join(__dirname, '..', 'proto');
+
+ export enum MessageType {
++  Unknown = 0,
+   SendCommand = 1,
+   SendCommandResult = 2,
+   GetState = 3,
+@@ -47,8 +48,13 @@ export enum MessageType {
+   GenericMessage = 42,
+   SendButtonEvent = 43,
+   SetNowPlayingClient = 46,
++  SetNowPlayingPlayer = 47,
++  VolumeDidChange = 52,
++  RemoveClient = 53,
++  RemovePlayer = 54,
+   UpdateClient = 55,
+   UpdateContentItem = 56,
++  VolumeControlCapabilitiesDidChange = 64,
+ }
+
+ let rootPromise: Promise<protobuf.Root> | null = null;
+@@ -74,6 +80,11 @@ const PROTO_FILES = [
+   'SetConnectionStateMessage.proto',
+   'SetHiliteModeMessage.proto',
+   'SetNowPlayingClientMessage.proto',
++  'SetNowPlayingPlayerMessage.proto',
++  'VolumeDidChangeMessage.proto',
++  'VolumeControlCapabilitiesDidChangeMessage.proto',
++  'RemoveClientMessage.proto',
++  'RemovePlayerMessage.proto',
+   'PlaybackQueueRequestMessage.proto',
+   'TransactionMessage.proto',
+   'UpdateClientMessage.proto',
+diff --git a/src/proto/DeviceInfoMessage.proto b/src/proto/DeviceInfoMessage.proto
+index 923aca0..086513e 100644
+--- a/src/proto/DeviceInfoMessage.proto
++++ b/src/proto/DeviceInfoMessage.proto
+@@ -7,13 +7,13 @@ extend ProtocolMessage {
+ }
+
+ message DeviceInfoMessage {
+-  required string uniqueIdentifier = 1; // Example: B8D8678C-9DA9-4D29-9338-5D6B827B8063
++  optional string uniqueIdentifier = 1;
+   required string name = 2; // Example: Jean's iPhone
+   optional string localizedModelName = 3; // Example: iPhone
+-  required string systemBuildVersion = 4; // Example: 13F69
+-  required string applicationBundleIdentifier = 5; // Example: com.example.myremote
++  optional string systemBuildVersion = 4;
++  optional string applicationBundleIdentifier = 5;
+   optional string applicationBundleVersion = 6; // Example: 107
+-  required int32 protocolVersion = 7; // Example: 1
++  optional int32 protocolVersion = 7;
+   optional uint32 lastSupportedMessageType = 8;
+   optional bool supportsSystemPairing = 9;
+   optional bool allowsPairing = 10;
+@@ -33,11 +33,12 @@ message DeviceInfoMessage {
+   optional string tightSyncUID = 25;
+   optional string groupUID = 26;
+   optional string groupName = 27;
+-  // optional <> groupedDevices = 28;
++  repeated DeviceInfoMessage groupedDevices = 28;
+   optional bool isGroupLeader = 29;
+   optional bool isAirplayActive = 30;
+   optional string systemPodcastApplication = 31;
+   optional string enderDefaultGroupUID = 32;
+   repeated string airplayReceivers = 33;
+   optional string linkAgent = 34;
++  optional string clusterID = 35;
+ }
+diff --git a/src/proto/ProtocolMessage.proto b/src/proto/ProtocolMessage.proto
+index d1e937e..1afa51a 100644
+--- a/src/proto/ProtocolMessage.proto
++++ b/src/proto/ProtocolMessage.proto
+@@ -4,6 +4,7 @@ message ProtocolMessage {
+   extensions 6 to max;
+
+   enum Type { 
++    UNKNOWN_MESSAGE = 0;
+     SEND_COMMAND_MESSAGE = 1;
+     SEND_COMMAND_RESULT_MESSAGE = 2;
+     GET_STATE_MESSAGE = 3;
+@@ -41,14 +42,21 @@ message ProtocolMessage {
+     SET_CONNECTION_STATE_MESSAGE = 38;
+     SET_HILITE_MODE_MESSAGE = 40;
+     WAKE_DEVICE_MESSAGE = 41;
++    GENERIC_MESSAGE = 42;
+     SEND_PACKED_VIRTUAL_TOUCH_EVENT_MESSAGE = 43;
+     SET_NOW_PLAYING_CLIENT_MESSAGE = 46;
++    SET_NOW_PLAYING_PLAYER_MESSAGE = 47;
++    VOLUME_DID_CHANGE_MESSAGE = 52;
++    REMOVE_CLIENT_MESSAGE = 53;
++    REMOVE_PLAYER_MESSAGE = 54;
+     UPDATE_CLIENT_MESSAGE = 55;
+     UPDATE_CONTENT_ITEM_MESSAGE = 56;
++    VOLUME_CONTROL_CAPABILITIES_DID_CHANGE_MESSAGE = 64;
+   }
+
+   optional Type type = 1; // Identifies which underlying message is filled in.
+   optional string identifier = 2;
+-  optional int32 priority = 4;
++  optional int32 errorCode = 4;
+   optional uint64 timestamp = 5;
++  optional string errorDescription = 78;
+ }
+diff --git a/src/proto/RemoveClientMessage.proto b/src/proto/RemoveClientMessage.proto
+new file mode 100644
+index 0000000..69738db
+--- /dev/null
++++ b/src/proto/RemoveClientMessage.proto
+@@ -0,0 +1,12 @@
++syntax = "proto2";
++
++import "ProtocolMessage.proto";
++import "NowPlayingClient.proto";
++
++extend ProtocolMessage {
++  optional RemoveClientMessage removeClientMessage = 57;
++}
++
++message RemoveClientMessage {
++  optional NowPlayingClient client = 1;
++}
+diff --git a/src/proto/RemovePlayerMessage.proto b/src/proto/RemovePlayerMessage.proto
+new file mode 100644
+index 0000000..90dec60
+--- /dev/null
++++ b/src/proto/RemovePlayerMessage.proto
+@@ -0,0 +1,12 @@
++syntax = "proto2";
++
++import "ProtocolMessage.proto";
++import "PlayerPath.proto";
++
++extend ProtocolMessage {
++  optional RemovePlayerMessage removePlayerMessage = 58;
++}
++
++message RemovePlayerMessage {
++  optional PlayerPath playerPath = 1;
++}
+diff --git a/src/proto/SetNowPlayingPlayerMessage.proto b/src/proto/SetNowPlayingPlayerMessage.proto
+new file mode 100644
+index 0000000..fe5fcc5
+--- /dev/null
++++ b/src/proto/SetNowPlayingPlayerMessage.proto
+@@ -0,0 +1,12 @@
++syntax = "proto2";
++
++import "ProtocolMessage.proto";
++import "PlayerPath.proto";
++
++extend ProtocolMessage {
++  optional SetNowPlayingPlayerMessage setNowPlayingPlayerMessage = 51;
++}
++
++message SetNowPlayingPlayerMessage {
++  optional PlayerPath playerPath = 1;
++}
+diff --git a/src/proto/VolumeControlCapabilitiesDidChangeMessage.proto b/src/proto/VolumeControlCapabilitiesDidChangeMessage.proto
+new file mode 100644
+index 0000000..69dff3a
+--- /dev/null
++++ b/src/proto/VolumeControlCapabilitiesDidChangeMessage.proto
+@@ -0,0 +1,14 @@
++syntax = "proto2";
++
++import "ProtocolMessage.proto";
++import "VolumeControlAvailabilityMessage.proto";
++
++extend ProtocolMessage {
++  optional VolumeControlCapabilitiesDidChangeMessage volumeControlCapabilitiesDidChangeMessage = 68;
++}
++
++message VolumeControlCapabilitiesDidChangeMessage {
++  optional VolumeControlAvailabilityMessage capabilities = 1;
++  optional string endpointUID = 3;
++  optional string outputDeviceUID = 4;
++}
+diff --git a/src/proto/VolumeDidChangeMessage.proto b/src/proto/VolumeDidChangeMessage.proto
+new file mode 100644
+index 0000000..33bb40b
+--- /dev/null
++++ b/src/proto/VolumeDidChangeMessage.proto
+@@ -0,0 +1,13 @@
++syntax = "proto2";
++
++import "ProtocolMessage.proto";
++
++extend ProtocolMessage {
++  optional VolumeDidChangeMessage volumeDidChangeMessage = 56;
++}
++
++message VolumeDidChangeMessage {
++  optional float volume = 1;
++  optional string endpointUID = 2;
++  optional string outputDeviceUID = 3;
++}
+diff --git a/src/util/__tests__/data-stream.test.ts b/src/util/__tests__/data-stream.test.ts
+index edfa6f3..d182e46 100644
+--- a/src/util/__tests__/data-stream.test.ts
++++ b/src/util/__tests__/data-stream.test.ts
+@@ -1,4 +1,5 @@
+ import { describe, it, expect } from 'vitest';
++import bplistCreator from 'bplist-creator';
+ import { encodeVarint, decodeVarint, buildDataStreamFrame, parseDataStreamFrame } from '../data-stream.js';
+
+ describe('varint encoding', () => {
+@@ -31,6 +32,45 @@ describe('varint encoding', () => {
+ });
+
+ describe('DataStream framing', () => {
++  function batchFrame(messages: Buffer[]): Buffer {
++    const payload = bplistCreator({ params: { data: Buffer.concat(messages.map(message =>
++      Buffer.concat([encodeVarint(message.length), message]),
++    )) } });
++    const header = buildDataStreamFrame(Buffer.alloc(0)).subarray(0, 32);
++    header.writeUInt32BE(32 + payload.length);
++    return Buffer.concat([header, payload]);
++  }
++
++  it('preserves every protobuf in a batch, in order', () => {
++    const messages = [Buffer.from([8, 15]), Buffer.from([8, 17]), Buffer.from([8, 4])];
++    const frame = batchFrame(messages);
++    expect(parseDataStreamFrame(frame)?.protobufMessages).toEqual(messages);
++    expect(parseDataStreamFrame(frame)?.protobufData).toEqual(messages[0]);
++  });
++
++  it('waits for the complete frame without dropping a fragmented batch', () => {
++    const frame = batchFrame([Buffer.from([8, 15]), Buffer.from([8, 17])]);
++    for (let length = 0; length < frame.length; length++) {
++      expect(parseDataStreamFrame(frame.subarray(0, length))).toBeNull();
++    }
++    expect(parseDataStreamFrame(frame)?.protobufMessages).toHaveLength(2);
++  });
++
++  it('rejects impossible frame sizes instead of making no forward progress', () => {
++    const frame = buildDataStreamFrame(Buffer.from([8, 15]));
++    frame.writeUInt32BE(0);
++    expect(() => parseDataStreamFrame(frame)).toThrow(/size/i);
++  });
++
++  it('rejects truncated protobufs and unterminated length prefixes', () => {
++    for (const data of [Buffer.from([3, 8, 15]), Buffer.from([0x80])]) {
++      const payload = bplistCreator({ params: { data } });
++      const header = buildDataStreamFrame(Buffer.alloc(0)).subarray(0, 32);
++      header.writeUInt32BE(32 + payload.length);
++      expect(() => parseDataStreamFrame(Buffer.concat([header, payload]))).toThrow();
++    }
++  });
++
+   it('builds a frame with a 32-byte header', () => {
+     const data = Buffer.from([0x08, 0x01]); // minimal protobuf
+     const frame = buildDataStreamFrame(data);
+diff --git a/src/util/data-stream.ts b/src/util/data-stream.ts
+index f797944..fe9fbfa 100644
+--- a/src/util/data-stream.ts
++++ b/src/util/data-stream.ts
+@@ -15,18 +15,13 @@ export function encodeVarint(value: number): Buffer {
+
+ export function decodeVarint(buf: Buffer, offset = 0): { value: number; bytesRead: number } {
+   let value = 0;
+-  let shift = 0;
+-  let bytesRead = 0;
+-
+-  while (offset + bytesRead < buf.length) {
++  for (let bytesRead = 0; bytesRead < 5 && offset + bytesRead < buf.length; bytesRead++) {
+     const byte = buf[offset + bytesRead];
+-    value |= (byte & 0x7f) << shift;
+-    bytesRead++;
+-    if ((byte & 0x80) === 0) break;
+-    shift += 7;
++    value += (byte & 0x7f) * 2 ** (7 * bytesRead);
++    if (value > 0xffffffff) throw new Error('DataStream length overflow');
++    if ((byte & 0x80) === 0) return { value, bytesRead: bytesRead + 1 };
+   }
+-
+-  return { value, bytesRead };
++  throw new Error('Incomplete DataStream length');
+ }
+
+ // --- DataStream 32-byte header framing ---
+@@ -77,6 +72,8 @@ export function buildDataStreamFrame(protobufData: Buffer): Buffer {
+ export interface ParsedDataStreamFrame {
+   messageType: 'sync' | 'rply';
+   protobufData: Buffer | null;  // null for rply frames with no data
++  /** Every message in wire order; protobufData retains the first for compatibility. */
++  protobufMessages: Buffer[];
+   seqno: bigint;
+   totalSize: number;
+ }
+@@ -85,6 +82,7 @@ export function parseDataStreamFrame(buf: Buffer, offset = 0): ParsedDataStreamF
+   if (buf.length - offset < HEADER_SIZE) return null;
+
+   const totalSize = buf.readUInt32BE(offset);
++  if (totalSize < HEADER_SIZE) throw new Error('Invalid DataStream frame size');
+   if (buf.length - offset < totalSize) return null;
+
+   const messageTypeStr = buf.subarray(offset + 4, offset + 8).toString('ascii');
+@@ -92,28 +90,28 @@ export function parseDataStreamFrame(buf: Buffer, offset = 0): ParsedDataStreamF
+   const seqno = buf.readBigUInt64BE(offset + 20);
+
+   if (totalSize <= HEADER_SIZE) {
+-    return { messageType, protobufData: null, seqno, totalSize };
++    return { messageType, protobufData: null, protobufMessages: [], seqno, totalSize };
+   }
+
+   const plistBuf = buf.subarray(offset + HEADER_SIZE, offset + totalSize);
+
+-  try {
+-    const parsed = parseBuffer(plistBuf);
+-    const payload = parsed[0] as Record<string, unknown>;
+-    const params = payload?.params as Record<string, unknown> | undefined;
+-    const data = params?.data as Buffer | undefined;
+-
+-    if (!data) {
+-      // Empty payload (e.g., rply with just {})
+-      return { messageType, protobufData: null, seqno, totalSize };
++  const parsed = parseBuffer(plistBuf);
++  const payload = parsed[0] as Record<string, unknown>;
++  const params = payload?.params as Record<string, unknown> | undefined;
++  const data = params?.data;
++  const protobufMessages: Buffer[] = [];
++  if (data !== undefined) {
++    if (!Buffer.isBuffer(data)) throw new Error('Invalid DataStream protobuf payload');
++    let cursor = 0;
++    while (cursor < data.length) {
++      const { value: length, bytesRead } = decodeVarint(data, cursor);
++      cursor += bytesRead;
++      if (length > data.length - cursor) throw new Error('Truncated DataStream protobuf');
++      protobufMessages.push(data.subarray(cursor, cursor + length));
++      cursor += length;
+     }
+-
+-    const { value: protoLength, bytesRead } = decodeVarint(data, 0);
+-    const protobufData = data.subarray(bytesRead, bytesRead + protoLength);
+-    return { messageType, protobufData, seqno, totalSize };
+-  } catch {
+-    return { messageType, protobufData: null, seqno, totalSize };
+   }
++  return { messageType, protobufData: protobufMessages[0] ?? null, protobufMessages, seqno, totalSize };
+ }
+
+ /** Build a "rply" frame to acknowledge a received sync frame */
