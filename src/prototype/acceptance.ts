@@ -1,7 +1,6 @@
 /** Prepared physical test. Call only after the owner is watching the TV. */
 import { setTimeout as delay } from 'node:timers/promises'
 import type { NodeController, RemoteAction } from './controller.js'
-import type { Power } from './companion.js'
 
 type Controller = Pick<NodeController, 'perform' | 'state' | 'reconnects' | 'queryPower' | 'queryVolume' | 'listApps'>
 export type AcceptanceMode = 'close-app' | 'power' | 'remaining'
@@ -23,15 +22,6 @@ type Options = {
 
 export class PilotStopped extends Error {}
 
-class PowerNotObserved extends PilotStopped {
-	constructor(
-		expected: Power,
-		readonly observed: Power,
-	) {
-		super(`Power did not report ${expected} within the observation window`)
-	}
-}
-
 export function previewAcceptance(appName: string, mode: AcceptanceMode = 'close-app'): string[] {
 	return [
 		...(mode === 'remaining' ? ['Volume down one step, then up one step'] : []),
@@ -41,7 +31,8 @@ export function previewAcceptance(appName: string, mode: AcceptanceMode = 'close
 			: []),
 		...(mode === 'power'
 			? [
-					'If direct wake is acknowledged but still reports Off, recheck and send Home once to recover; wake remains failed',
+					'Wake queries current power and sends Home once only when Off; there is no recovery retry',
+					'After On is confirmed, request Wake again; an already-awake TV must receive no button and stay unchanged',
 				]
 			: []),
 		'Five-second observation pauses; stop on error or connection loss; no command retries',
@@ -64,20 +55,19 @@ export async function runAcceptance(controller: Controller, options: Options): P
 		check()
 		options.record({ stage, action, result: 'sending' })
 		await controller.perform(action)
-		options.record({ stage, action, result: 'dispatched; physical result unverified' })
+		options.record({ stage, action, result: 'action completed; physical result unverified' })
 		await observe()
 	}
 	const expectPower = async (expected: 'On' | 'Off'): Promise<void> => {
-		let result: Power = 'Unknown'
 		for (let attempt = 0; attempt < 10; attempt++) {
 			check()
-			result = await controller.queryPower()
+			const result = await controller.queryPower()
 			check()
 			options.record({ stage: 'power report', result, expected, attempt: attempt + 1 })
 			if (result === expected) return
 			await pause(1000)
 		}
-		throw new PowerNotObserved(expected, result)
+		throw new PilotStopped(`Power did not report ${expected} within the observation window`)
 	}
 	const powerSequence = async (): Promise<void> => {
 		check()
@@ -85,21 +75,10 @@ export async function runAcceptance(controller: Controller, options: Options): P
 		await step('sleep', { kind: 'power', state: 'Off' })
 		await expectPower('Off')
 		await step('wake', { kind: 'power', state: 'On' })
-		try {
+		await expectPower('On')
+		if (options.mode === 'power') {
+			await step('wake while already On', { kind: 'power', state: 'On' })
 			await expectPower('On')
-		} catch (error) {
-			// Recovery is part of the explicit power pilot, never a command retry.
-			// Unknown state, request failure, cancellation, and reconnect all stop input.
-			if (options.mode !== 'power' || !(error instanceof PowerNotObserved) || error.observed !== 'Off') throw error
-			check()
-			const current = await controller.queryPower()
-			check()
-			options.record({ stage: 'Home recovery preflight', result: current })
-			if (current !== 'Off')
-				throw new PilotStopped(`Wake was not confirmed in time; now reports ${current}, so Home recovery was not sent`)
-			await step('Home recovery', { kind: 'button', button: 'home' })
-			await expectPower('On')
-			throw new PilotStopped('Direct wake failed; Home recovery reported On. The wake test did not pass')
 		}
 	}
 

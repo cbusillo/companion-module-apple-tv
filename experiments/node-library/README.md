@@ -161,9 +161,13 @@ The command layer supports navigation, Select, Back, Home, Home hold, App Switch
 Control Center, play/pause, play, pause, next/previous, relative and absolute volume,
 explicit seek intervals, reported-state power toggling, and 100 ms cardinal swipes.
 Power events remain subscribed when the initial power query is rejected. Unknown
-power never becomes a guessed toggle; pushed state used as fallback expires after
-30 seconds. Playback capability updates can reject unavailable media commands
-before transmission.
+power never becomes a guessed toggle. Status display may fall back to pushed
+state for up to 30 seconds, but Wake and Toggle require a successful current
+query. Wake sends one Home down/up pair only when the TV reports Off. It sends no
+button when already On and stops for Unknown or a failed query. Explicit sleep
+retains its dedicated command. Acknowledgements never set power to On; a later
+query or pushed event must confirm it. Playback capability updates can reject
+unavailable media commands before transmission.
 
 Use the existing separate pairing for a read-only status pilot:
 
@@ -229,12 +233,12 @@ After the owner is watching, run the prepared command with a new report:
 node dist/prototype/acceptance-live.js --mode power --run --credentials /private/directory/test.json --report /private/directory/power.json
 ```
 
-It sends sleep once, checks Off, sends wake once, and checks On. If wake was
-acknowledged but the observation window ends with reported Off, it rechecks the
-state and sends Home once only if it is still Off in the same ready connection.
-Unknown state, cancellation, connection change, or request failure stops input.
-Home recovery never turns a failed direct wake into a passing test; both outcomes
-remain visible in the report. This focused pilot has not yet run on the TV.
+It sends sleep once, checks Off, requests Wake once, and checks On. Wake now uses
+one Home press gated by a successful current query showing Off. After On is
+confirmed, the pilot requests Wake again to check that an already-awake TV stays
+unchanged; this second request must send no button. There is no extra Home
+recovery. Unknown state, cancellation, connection change, or request failure
+stops input. The revised pilot is prepared offline and awaits owner observation.
 
 Cancellation, a failed command, or connection loss stops remaining controls.
 Nothing is retried, including the wake command. If it stops after sleep, use the
@@ -286,8 +290,14 @@ physically confirmed. One separately requested Home press recovered reported
 power to On in fresh Node and installed-module checks. The owner later reported
 YouTube playing. After the touch-startup correction, the owner separately
 confirmed Python and Node removed the YouTube card in the two-round comparison.
-Direct sleep/wake on that corrected session and physical volume acceptance remain
-pending. No automatic control retry or installed-module change was made.
+The focused power test at `00b8eec` then reproduced the direct-Wake failure:
+the acknowledged command left power Off through all ten polls. A fresh Off check
+gated one Home recovery, which reported On. The owner confirmed that the screen
+turned off and came back on. Sleep and Home recovery are accepted on this TV;
+the direct-Wake test remains failed. There were zero reconnects. The replacement
+Wake now uses the observed Home behavior with an Off-state guard, but that
+integrated action and physical volume acceptance still need qualification.
+No automatic control retry or installed-module change was made.
 
 This qualifies an initial developer pilot on that device. It does not qualify
 all controls, tvOS versions, supported operating systems, or end-user installation.

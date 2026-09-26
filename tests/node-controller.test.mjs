@@ -268,8 +268,12 @@ test('status queries share the gesture queue and reject offline calls', async ()
 		assert.equal(peers[0].requests.at(-1).id, '_mcc')
 		assert.equal(await controller.queryPower(), 'On')
 		assert.equal((await controller.listApps())[0].id, 'com.example.app')
+		const beforeWake = peers[0].requests.length
 		await controller.perform({ kind: 'power', state: 'On' })
-		assert.equal(peers[0].requests.at(-1).content.get('_hidC'), 13)
+		assert.deepEqual(
+			peers[0].requests.slice(beforeWake).map(({ id }) => id),
+			['FetchAttentionState'],
+		)
 	} finally {
 		await controller.stop()
 	}

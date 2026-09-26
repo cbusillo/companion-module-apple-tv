@@ -26,10 +26,11 @@ Without --run: offline preview only; no credential access or network connection.
 Run only after the owner is watching. All modes require an awake TV.
 Default --mode close-app: open the app, enter App Switcher, swipe up, then stop.
 Close-app and remaining modes require one exact app-name match.
-Explicit --mode power: sleep/wake only. If acknowledged wake still reports Off,
-recheck and send Home once to recover. Recovery does not pass the direct-wake test.
+Explicit --mode power: sleep, wake, then request Wake again while already On.
+Wake queries current power: Home once for Off, no button for On, stop for Unknown.
+The second Wake must leave the awake TV unchanged. No recovery retry is sent.
 Explicit --mode remaining also tests volume and sleep/wake; requires volume 5-95%.
-Power and remaining modes briefly blank the TV; direct wake still needs qualification.
+Power and remaining modes briefly blank the TV; the revised Wake needs qualification.
 Ctrl-C, error, or connection loss stops remaining controls; no command is retried.
 If the test stops after sleep, wake the TV with its normal remote.
 Reports are created privately and never overwrite an existing file.

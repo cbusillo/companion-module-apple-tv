@@ -16,7 +16,7 @@ const event = (identifier, entries) => ({
 	]),
 })
 
-function fixture() {
+function fixture(options = {}) {
 	let time = 0n
 	let volume = 0.4
 	let power = 3
@@ -42,6 +42,7 @@ function fixture() {
 			pauses.push(ms)
 			time += BigInt(Math.round(ms * 1e6))
 		},
+		...options,
 	})
 	return {
 		controls,
@@ -165,7 +166,13 @@ test('power toggles use an actual query and never guess from Unknown', async () 
 	assert.equal(controls.state.power, 'Unknown')
 	setPower(1)
 	await controls.togglePower()
-	assert.equal(requests.at(-1).content.get('_hidC'), 13)
+	assert.deepEqual(
+		requests.slice(-2).map(({ content }) => [content.get('_hidC'), content.get('_hBtS')]),
+		[
+			[7, 1],
+			[7, 2],
+		],
+	)
 	setPower(99)
 	requests.length = 0
 	await assert.rejects(controls.togglePower(), /Unknown power state/)
@@ -175,21 +182,156 @@ test('power toggles use an actual query and never guess from Unknown', async () 
 	)
 })
 
-test('explicit sleep and wake preserve their requested direction regardless of cached power', async () => {
+test('explicit sleep retains its direction without requiring known power', async () => {
 	const { controls, requests } = fixture()
-	controls.receiveEvent(event('SystemStatus', [['state', 3]]))
-	await controls.setPower('On')
-	controls.receiveEvent(event('SystemStatus', [['state', 1]]))
 	await controls.setPower('Off')
 	assert.deepEqual(
 		requests.map(({ id, content }) => [id, content.get('_hidC'), content.get('_hBtS')]),
-		[
-			['_hidC', 13, 2],
-			['_hidC', 12, 2],
-		],
+		[['_hidC', 12, 2]],
 	)
 	await assert.rejects(controls.setPower('Unknown'), RangeError)
-	assert.equal(requests.length, 2)
+	assert.equal(requests.length, 1)
+})
+
+test('wake queries current power and sends exactly one Home pair only when Off', async () => {
+	const { controls, requests, setPower } = fixture()
+	controls.receiveEvent(event('SystemStatus', [['state', 3]]))
+	setPower(1)
+	await controls.setPower('On')
+	assert.deepEqual(
+		requests.map(({ id, content }) => [id, content.get('_hidC'), content.get('_hBtS')]),
+		[
+			['FetchAttentionState', undefined, undefined],
+			['_hidC', 7, 1],
+			['_hidC', 7, 2],
+		],
+	)
+	assert.equal(controls.state.power, 'Unknown', 'An acknowledgement must not claim the TV woke')
+})
+
+test('repeated wake while already On sends no button even with cached Off feedback', async () => {
+	for (const state of [2, 3, 4]) {
+		const { controls, requests, setPower } = fixture()
+		controls.receiveEvent(event('SystemStatus', [['state', 1]]))
+		setPower(state)
+		await controls.setPower('On')
+		await controls.setPower('On')
+		assert.deepEqual(
+			requests.map(({ id }) => id),
+			['FetchAttentionState', 'FetchAttentionState'],
+		)
+		assert.equal(controls.state.power, 'On')
+	}
+})
+
+test('unknown, rejected, or failed power queries never wake using cached Off feedback', async () => {
+	for (const result of ['unknown', 'rejected', 'timeout']) {
+		const { controls, requests, client, setPower } = fixture()
+		controls.receiveEvent(event('SystemStatus', [['state', 1]]))
+		setPower(99)
+		const original = client.sendCompanionRequest
+		client.sendCompanionRequest = async (id, body) => {
+			const response = await original(id, body)
+			if (result === 'timeout') throw new Error('Synthetic status timeout')
+			return result === 'rejected' ? new Map([['_ec', 58822]]) : response
+		}
+		await assert.rejects(controls.setPower('On'))
+		assert.deepEqual(
+			requests.map(({ id }) => id),
+			['FetchAttentionState'],
+		)
+	}
+})
+
+test('toggle cannot act on cached power when its current query is rejected', async () => {
+	for (const state of [1, 3]) {
+		const { controls, client, requests } = fixture()
+		controls.receiveEvent(event('SystemStatus', [['state', state]]))
+		const original = client.sendCompanionRequest
+		client.sendCompanionRequest = async (id, body) => {
+			await original(id, body)
+			return new Map([['_ec', 58822]])
+		}
+		await assert.rejects(controls.togglePower())
+		assert.deepEqual(
+			requests.map(({ id }) => id),
+			['FetchAttentionState'],
+		)
+	}
+})
+
+test('newer On or Unknown feedback prevents a late Off query from sending Home', async () => {
+	for (const state of [3, 99]) {
+		const { controls, client, requests, setPower } = fixture()
+		setPower(1)
+		const original = client.sendCompanionRequest
+		client.sendCompanionRequest = async (id, body) => {
+			const response = await original(id, body)
+			if (id === 'FetchAttentionState') controls.receiveEvent(event('SystemStatus', [['state', state]]))
+			return response
+		}
+		if (state === 3) await controls.setPower('On')
+		else await assert.rejects(controls.setPower('On'), UnsupportedCommand)
+		assert.deepEqual(
+			requests.map(({ id }) => id),
+			['FetchAttentionState'],
+		)
+	}
+})
+
+test('cancellation or invalidation during the wake query prevents Home', async () => {
+	for (const interruption of ['cancel', 'invalidate']) {
+		const cancel = new AbortController()
+		const { controls, client, requests, setPower } = fixture({ signal: cancel.signal })
+		setPower(1)
+		const original = client.sendCompanionRequest
+		client.sendCompanionRequest = async (id, body) => {
+			const response = await original(id, body)
+			if (id === 'FetchAttentionState') {
+				if (interruption === 'cancel') cancel.abort()
+				else controls.invalidate()
+			}
+			return response
+		}
+		await assert.rejects(controls.setPower('On'))
+		assert.deepEqual(
+			requests.map(({ id }) => id),
+			['FetchAttentionState'],
+		)
+	}
+})
+
+test('wake preserves a power event received during the Home press', async () => {
+	const { controls, client, requests, setPower } = fixture()
+	setPower(1)
+	const original = client.sendCompanionRequest
+	client.sendCompanionRequest = async (id, body) => {
+		const response = await original(id, body)
+		if (id === '_hidC') controls.receiveEvent(event('SystemStatus', [['state', 3]]))
+		return response
+	}
+	await controls.setPower('On')
+	assert.equal(controls.state.power, 'On')
+	assert.equal(requests.length, 3)
+})
+
+test('uncertain Home-down delivery during wake releases once without retrying or using direct Wake', async () => {
+	const { controls, client, requests, setPower } = fixture()
+	setPower(1)
+	const original = client.sendCompanionRequest
+	client.sendCompanionRequest = async (id, body) => {
+		const response = await original(id, body)
+		if (body.get('_c').get('_hBtS') === 1) throw new Error('Synthetic Home response loss')
+		return response
+	}
+	await assert.rejects(controls.setPower('On'), /Synthetic Home response loss/)
+	assert.deepEqual(
+		requests.filter(({ id }) => id === '_hidC').map(({ content }) => [content.get('_hidC'), content.get('_hBtS')]),
+		[
+			[7, 1],
+			[7, 2],
+		],
+	)
 })
 
 test('fresh pushed power can replace an unsupported query, but expires and accepts Unknown', async () => {

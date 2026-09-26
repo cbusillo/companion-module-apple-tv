@@ -126,10 +126,14 @@ class Peer(CompanionServerAuth, asyncio.Protocol):
                 self.buttons.add(button)
             elif button in (12, 13):
                 assert phase == 2
-                self.power = 1 if button == 12 else 3
+                # Reproduce the observed TV: direct Wake acknowledges but stays asleep.
+                if button == 12:
+                    self.power = 1
             else:
                 assert phase == 2 and button in self.buttons
                 self.buttons.remove(button)
+                if button == 7 and self.power == 1:
+                    self.power = 3
         elif identifier == "_touchStart":
             assert self.session_id is None and not self.touch_started
             assert isinstance(args["_width"], float) and args["_width"] == 1000

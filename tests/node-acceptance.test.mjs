@@ -74,7 +74,7 @@ test('default focused pilot closes the selected app and stops without volume or 
 	])
 })
 
-test('power pilot sends only explicit sleep and wake, without app or volume prerequisites', async () => {
+test('power pilot checks sleep, wake, and already-awake Wake without app or volume prerequisites', async () => {
 	const { controller, options, actions, pauses } = fixture()
 	options.mode = 'power'
 	options.appName = ''
@@ -84,69 +84,39 @@ test('power pilot sends only explicit sleep and wake, without app or volume prer
 	assert.deepEqual(actions, [
 		{ kind: 'power', state: 'Off' },
 		{ kind: 'power', state: 'On' },
+		{ kind: 'power', state: 'On' },
 	])
-	assert.deepEqual(pauses, [5000, 5000])
+	assert.deepEqual(pauses, [5000, 5000, 5000])
 })
 
-test('power pilot makes one Home recovery for confirmed Off, but never passes a failed direct wake', async () => {
-	for (const recovered of [true, false]) {
+test('unconfirmed wake stops without a repeated Wake or extra Home recovery', async () => {
+	for (const observed of ['Off', 'Unknown']) {
 		const { controller, options, actions, events } = fixture()
 		options.mode = 'power'
 		controller.queryPower = async () => {
-			if (recovered && actions.some((action) => action.button === 'home')) return 'On'
-			return actions.some((action) => action.kind === 'power') ? 'Off' : 'On'
+			const last = actions.at(-1)
+			return last?.state === 'On' ? observed : (last?.state ?? 'On')
 		}
-		await assert.rejects(
-			runAcceptance(controller, options),
-			recovered ? /Home recovery reported On/ : /Power did not report On/,
-		)
+		await assert.rejects(runAcceptance(controller, options), /Power did not report On/)
 		assert.deepEqual(actions, [
 			{ kind: 'power', state: 'Off' },
 			{ kind: 'power', state: 'On' },
-			{ kind: 'button', button: 'home' },
 		])
-		assert.equal(events.find((event) => event.stage === 'Home recovery preflight').result, 'Off')
+		assert.equal(events.filter((event) => event.expected === 'On').length, 10)
 	}
 })
 
-test('unknown wake feedback does not authorize Home recovery', async () => {
-	const { controller, options, actions } = fixture()
-	options.mode = 'power'
-	controller.queryPower = async () => {
-		const last = actions.at(-1)
-		return last?.state === 'On' ? 'Unknown' : (last?.state ?? 'On')
-	}
-	await assert.rejects(runAcceptance(controller, options), /Power did not report On/)
-	assert.equal(actions.length, 2)
-})
-
-test('a fresh On or Unknown result prevents stale Off feedback from triggering Home', async () => {
-	for (const current of ['On', 'Unknown']) {
-		const { controller, options, actions } = fixture()
-		options.mode = 'power'
-		let polls = 0
-		controller.queryPower = async () => {
-			const last = actions.at(-1)
-			if (last?.state === 'On') return ++polls <= 10 ? 'Off' : current
-			return last?.state ?? 'On'
-		}
-		await assert.rejects(runAcceptance(controller, options), /Home recovery was not sent/)
-		assert.equal(actions.length, 2)
-	}
-})
-
-test('cancellation or reconnect during recovery preflight prevents Home', async () => {
+test('cancellation or reconnect during wake confirmation prevents the already-awake check', async () => {
 	for (const interruption of ['cancel', 'reconnect']) {
 		const { controller, options, actions, cancel } = fixture()
 		options.mode = 'power'
-		let polls = 0
 		controller.queryPower = async () => {
 			const last = actions.at(-1)
-			if (last?.state === 'On' && ++polls === 11) {
+			if (last?.state === 'On') {
 				if (interruption === 'cancel') cancel.abort()
 				else controller.reconnects++
 			}
-			return last ? 'Off' : 'On'
+			return last?.state ?? 'On'
 		}
 		await assert.rejects(runAcceptance(controller, options))
 		assert.equal(actions.length, 2)

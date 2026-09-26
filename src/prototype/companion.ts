@@ -238,7 +238,7 @@ export class CompanionPrototype {
 		])
 	}
 
-	async readPower(): Promise<Power> {
+	async readPower({ allowCached = true }: { allowCached?: boolean } = {}): Promise<Power> {
 		const revision = this.powerRevision
 		try {
 			const content = await this.request('FetchAttentionState')
@@ -247,7 +247,7 @@ export class CompanionPrototype {
 				this.powerAt = this.now()
 			}
 		} catch (error) {
-			if (!(error instanceof CompanionRequestRejected)) throw error
+			if (!(error instanceof CompanionRequestRejected) || !allowCached) throw error
 			if (this.now() - this.powerAt > 30_000_000_000n) this.power = 'Unknown'
 		}
 		this.changed()
@@ -255,19 +255,30 @@ export class CompanionPrototype {
 	}
 
 	async togglePower(): Promise<void> {
-		const state = await this.readPower()
+		const state = await this.readPower({ allowCached: false })
 		if (state === 'Unknown') throw new UnsupportedCommand('Unknown power state; no power command sent')
 		await this.setPower(state === 'On' ? 'Off' : 'On')
 	}
 
-	/** Explicit sleep/wake cannot turn into the opposite command if state changes. */
+	/** Home wakes this TV; query first so an already-awake TV never navigates Home. */
 	async setPower(state: 'On' | 'Off'): Promise<void> {
 		if (state !== 'On' && state !== 'Off') throw new RangeError('Power target must be On or Off')
+		if (!this.active) throw new UnsupportedCommand('Session inactive; no power command sent')
+		if (state === 'On') {
+			await this.readPower({ allowCached: false })
+			this.options.signal?.throwIfAborted()
+			const current = this.power
+			if (!this.active || current === 'Unknown')
+				throw new UnsupportedCommand('Unknown power state; no power command sent')
+			if (current === 'On') return
+		}
 		const revision = this.powerRevision
-		await this.request('_hidC', [
-			['_hBtS', 2],
-			['_hidC', state === 'Off' ? 12 : 13],
-		])
+		if (state === 'On') await this.press('home')
+		else
+			await this.request('_hidC', [
+				['_hBtS', 2],
+				['_hidC', 12],
+			])
 		if (revision === this.powerRevision) this.power = 'Unknown'
 		this.changed()
 	}
