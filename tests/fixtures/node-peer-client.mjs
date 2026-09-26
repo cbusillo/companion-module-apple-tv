@@ -20,6 +20,27 @@ for (let i = 0; i < 2; i++) {
 			{ id: 'com.example.two', name: 'Player' },
 		])
 		assert.equal(await commands.readPower(), 'On')
+		if (i === 0) {
+			await commands.press('select')
+			await commands.press('appSwitcher')
+			await commands.press('homeHold')
+			await commands.press('controlCenter')
+			for (const media of ['play', 'pause', 'next', 'previous']) await commands.media(media)
+			for (const seconds of [-30, -10, 10, 30]) await commands.seek(seconds)
+			for (const direction of ['up', 'down', 'left', 'right']) await commands.swipe(direction)
+			assert.equal(await commands.readVolume(), 40)
+			await commands.setVolume(25)
+			assert.equal(await commands.readVolume(), 25)
+			commands.observeOutput(['synthetic-output'])
+			await commands.toggleMute()
+			assert.equal(await commands.readVolume(), 0)
+			await commands.toggleMute()
+			assert.equal(await commands.readVolume(), 25)
+			await commands.togglePower()
+			assert.equal(await commands.readPower(), 'Off')
+			await commands.togglePower()
+			assert.equal(await commands.readPower(), 'On')
+		}
 	})
 }
-console.log('Independent pyatv peer: pairing, two encrypted sessions, app discovery and teardown passed.')
+console.log('Independent pyatv peer: pairing, encrypted sessions, controls, events, gestures and teardown passed.')

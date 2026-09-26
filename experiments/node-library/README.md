@@ -36,6 +36,11 @@ starts request IDs at one; a regression exercises successive request correlation
 The harness keeps its client session ID within the positive signed-32-bit range:
 high-bit client IDs were accepted at startup but rejected at teardown by the TV.
 The remote half still preserves all 32 bits in the combined unsigned-64-bit ID.
+The controls stage also fixes three reproduced library failures: an unsolicited
+event could consume a pending request with the same transaction ID; outbound
+events omitted transaction IDs; and discovery lost the Companion port when that
+mDNS advertisement arrived before AirPlay. Regression tests cover both service
+orders and event/request collisions.
 
 Eight regression tests reproduced the numeric, reference, and framing failures
 before the changes. The extended library suite passes with the candidate.
@@ -68,9 +73,17 @@ uv run --python 3.13 --locked python experiments/node-library/loopback-peer.py
 ```
 
 The last command runs a synthetic, loopback-only pyatv peer against the Node
-library's real TCP pairing and encryption path. It checks pairing and two fresh
-sessions with app discovery, power reads, and teardown. Python is the independent
+library's real TCP pairing and encryption path. It checks pairing, fresh sessions,
+navigation/media commands, power, exact seeks, volume, mute restoration with a
+synthetic output identity, all four swipes, events, and teardown. A second client
+has TCP dropped after a button-down reaches the peer; it reconnects, never replays
+that action, and accepts new input. Python is the independent
 test oracle here; the live Node harness does not invoke it. CI runs this check.
+
+Queue regressions also cover a response timeout while TCP stays open: pending
+input is invalidated before the queue advances after control, volume, or health
+failures. A failed release cannot mask uncertain delivery of a button-down, and
+stopping a controller prevents already-scheduled volume refreshes.
 
 To verify the library source patch in a separate checkout of the exact upstream
 commit, apply `upstream-opack.patch`, then run the upstream `npm install`,
@@ -119,13 +132,54 @@ file does not revoke that registration; remove only the test controller in the
 TV's paired-device settings when retiring the experiment. Preserve existing
 controller registrations and the production credentials.
 
+## Controls and persistent-session pilot
+
+`controller.ts` serializes complete gestures, bounds the queue to eight operations,
+and expires input after 500 ms waiting in the queue. A failed or lost session
+invalidates queued input and feedback. Reconnection rediscovers the selected TV
+with bounded backoff; it never repeats a control. Idle health checks share the
+queue, so they cannot interrupt a button-down/up pair or swipe.
+
+The command layer supports navigation, Select, Back, Home, Home hold, App Switcher,
+Control Center, play/pause, play, pause, next/previous, relative and absolute volume,
+explicit seek intervals, reported-state power toggling, and 100 ms cardinal swipes.
+Power events remain subscribed when the initial power query is rejected. Unknown
+power never becomes a guessed toggle; pushed state used as fallback expires after
+30 seconds. Playback capability updates can reject unavailable media commands
+before transmission.
+
+Use the existing separate pairing for a read-only status pilot:
+
+```sh
+node dist/prototype/controls-live.js --credentials /private/directory/test.json --seconds 10
+```
+
+For a supervised test, add exactly one explicit action, for example `--button up`,
+`--button appSwitcher`, `--swipe left`, or `--seek 10`. `--help` lists the actions.
+The output distinguishes completed dispatch from unverified physical effect.
+
+Mute restoration is implemented and tested against synthetic outputs, including
+output changes, external volume changes, and disconnects. It is deliberately
+unavailable in the live pilot until a separate authenticated metadata connection
+identifies the current audio output. The Companion-only volume reply does not
+establish that identity. Now Playing and that metadata connection are not yet
+wired into this pilot.
+
+The normal Companion entry point still uses Python. The new controller and CLI
+are development tools, not an installed replacement or the final pairing UI.
+
 ### Pilot evidence (September 26, 2026)
 
 Separate PIN pairing completed on one Apple TV. Fresh Node sessions discovered
 22 apps, reported power as `On`, and received session-teardown acknowledgements.
 One Plex launch request was acknowledged and its session closed cleanly; physical
-screen confirmation is tracked separately in the draft PR. The normal Companion
+screen confirmation was provided by the owner and recorded in the draft PR. The normal Companion
 module, its credentials, and its packaged artifact were not replaced.
+
+The controls-stage read-only pilot received live power, capability, and volume
+updates without reconnects. Closing only that test client's socket then exercised
+rediscovery and automatic reconnection to the real TV. No control was sent during
+those checks. The newly added controls still need supervised screen acceptance.
 
 This qualifies an initial developer pilot on that device. It does not qualify
 all controls, tvOS versions, supported operating systems, or end-user installation.
@@ -140,12 +194,9 @@ A returned request acknowledgement is not physical confirmation.
 Before this can replace the worker, it still needs:
 
 - Discovery and PIN pairing inside Companion, using its connection secret store.
-- Production session lifecycle beyond the single-session harness: event
-  subscriptions, capability updates, bounded queues, and reconnect behavior.
-- Touch/swipe behavior and gesture timing, plus volume restore that remains tied
-  to the same output and is invalidated when output or session state changes.
-- Power events when newer tvOS versions reject `FetchAttentionState`; an unknown
-  power value must never be guessed into a toggle.
+- Integration of the persistent controller into Companion, extended lifecycle
+  qualification, and supervised acceptance of navigation, swipes, media, and power.
+- Authenticated audio-output tracking before enabling live volume restoration.
 - Now Playing integration through the library's AirPlay/MRP connection.
 - Packaged installation tests on the intended operating systems, followed by
   supervised Apple TV acceptance with separate pairing and preserved rollback.
