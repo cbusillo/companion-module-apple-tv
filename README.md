@@ -9,6 +9,9 @@ The Python runtime is currently an explicit installation prerequisite. New
 connections start disabled, and pairing is handled by a separate interactive
 utility rather than by the runtime worker.
 
+An [offline Node library prototype](experiments/node-library/README.md) evaluates
+a possible future backend. It is not part of the installed connection.
+
 ## Development
 
 Use Node 22 and Yarn 4 (`npx --yes --package=@yarnpkg/cli-dist@4.17.0 yarn` is
