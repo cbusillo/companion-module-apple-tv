@@ -238,7 +238,18 @@ one Home press gated by a successful current query showing Off. After On is
 confirmed, the pilot requests Wake again to check that an already-awake TV stays
 unchanged; this second request must send no button. There is no extra Home
 recovery. Unknown state, cancellation, connection change, or request failure
-stops input. The revised pilot is prepared offline and awaits owner observation.
+stops input. This power cycle failed its first physical run; see the evidence below.
+
+The separate `--mode wake` pilot starts with the TV already Off. It sends no Sleep,
+app, swipe, or volume control: request Wake, require reported On, then request
+Wake while already On and check that the screen stays unchanged. It stops after
+one unsuccessful wake. This isolates the wake action from a preceding sleep
+transition; it does not add a delay or retry to the command layer.
+
+```sh
+node dist/prototype/acceptance-live.js --mode wake
+node dist/prototype/acceptance-live.js --mode wake --run --credentials /private/directory/test.json --report /private/directory/wake.json
+```
 
 Cancellation, a failed command, or connection loss stops remaining controls.
 Nothing is retried, including the wake command. If it stops after sleep, use the
@@ -296,7 +307,14 @@ gated one Home recovery, which reported On. The owner confirmed that the screen
 turned off and came back on. Sleep and Home recovery are accepted on this TV;
 the direct-Wake test remains failed. There were zero reconnects. The replacement
 Wake now uses the observed Home behavior with an Off-state guard, but that
-integrated action and physical volume acceptance still need qualification.
+integrated action failed the next power cycle at `73cf295`: it ran five seconds
+after Sleep, all ten polls stayed Off, and the owner confirmed the TV remained
+off. The already-On check was not sent. The possible brief screen flicker was
+uncertain and is not accepted as a wake. The earlier successful Home recovery
+ran about twenty seconds after Sleep. This timing difference is a hypothesis,
+not an established cause. A wake-only test from an already-asleep TV is prepared
+to separate those cases; no command-layer timing change is claimed as a fix.
+Wake and physical volume acceptance remain pending.
 No automatic control retry or installed-module change was made.
 
 This qualifies an initial developer pilot on that device. It does not qualify

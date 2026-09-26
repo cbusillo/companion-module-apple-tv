@@ -3,12 +3,12 @@ import { spawnSync } from 'node:child_process'
 import test from 'node:test'
 import { runAcceptance } from '../dist/prototype/acceptance.js'
 
-function fixture() {
+function fixture(initialPower = 'On') {
 	const actions = []
 	const events = []
 	const pauses = []
 	const cancel = new AbortController()
-	let power = 'On'
+	let power = initialPower
 	let volume = 50
 	const controller = {
 		state: 'ready',
@@ -89,6 +89,53 @@ test('power pilot checks sleep, wake, and already-awake Wake without app or volu
 	assert.deepEqual(pauses, [5000, 5000, 5000])
 })
 
+test('wake-only pilot starts from Off and checks already-On Wake without sending Sleep or other controls', async () => {
+	const { controller, options, actions, events, pauses } = fixture('Off')
+	options.mode = 'wake'
+	options.appName = ''
+	controller.listApps = async () => assert.fail('Wake pilot must not require an app')
+	controller.queryVolume = async () => assert.fail('Wake pilot must not require volume support')
+	await runAcceptance(controller, options)
+	assert.deepEqual(actions, [
+		{ kind: 'power', state: 'On' },
+		{ kind: 'power', state: 'On' },
+	])
+	assert.deepEqual(pauses, [5000, 5000])
+	assert.deepEqual(
+		events.filter((event) => event.stage === 'initial power').map((event) => event.result),
+		['Off'],
+	)
+})
+
+test('wake-only preflight rejects On, Unknown, failed queries, cancellation, and reconnect without a control', async () => {
+	for (const state of ['On', 'Unknown', 'query failure', 'cancel', 'reconnect']) {
+		const { controller, options, actions, cancel } = fixture('Off')
+		options.mode = 'wake'
+		controller.queryPower = async () => {
+			if (state === 'query failure') throw new Error('Synthetic status failure')
+			if (state === 'cancel') cancel.abort()
+			if (state === 'reconnect') controller.reconnects++
+			return state === 'On' || state === 'Unknown' ? state : 'Off'
+		}
+		await assert.rejects(runAcceptance(controller, options))
+		assert.equal(actions.length, 0)
+	}
+})
+
+test('failed wake-only observation stops after one Wake without a retry or second check', async () => {
+	for (const result of ['Off', 'Unknown', 'query failure']) {
+		const { controller, options, actions } = fixture('Off')
+		options.mode = 'wake'
+		controller.queryPower = async () => {
+			if (!actions.length) return 'Off'
+			if (result === 'query failure') throw new Error('Synthetic status failure')
+			return result
+		}
+		await assert.rejects(runAcceptance(controller, options))
+		assert.deepEqual(actions, [{ kind: 'power', state: 'On' }])
+	}
+})
+
 test('unconfirmed wake stops without a repeated Wake or extra Home recovery', async () => {
 	for (const observed of ['Off', 'Unknown']) {
 		const { controller, options, actions, events } = fixture()
@@ -135,23 +182,24 @@ test('uncertain wake delivery stops without retry or Home compensation', async (
 	assert.equal(actions.length, 2)
 })
 
-test('power CLI previews offline with no app or credentials', () => {
-	const result = spawnSync(
-		process.execPath,
-		[
-			'dist/prototype/acceptance-live.js',
-			'--mode',
-			'power',
-			'--app',
-			'',
-			'--credentials',
-			'/nonexistent/preview-only.json',
-		],
-		{ encoding: 'utf8', timeout: 2000 },
-	)
-	assert.equal(result.status, 0, result.stderr)
-	assert.equal(JSON.parse(result.stdout).mode, 'offline preview')
-})
+for (const mode of ['power', 'wake'])
+	test(`${mode} CLI previews offline with no app or credentials`, () => {
+		const result = spawnSync(
+			process.execPath,
+			[
+				'dist/prototype/acceptance-live.js',
+				'--mode',
+				mode,
+				'--app',
+				'',
+				'--credentials',
+				'/nonexistent/preview-only.json',
+			],
+			{ encoding: 'utf8', timeout: 2000 },
+		)
+		assert.equal(result.status, 0, result.stderr)
+		assert.equal(JSON.parse(result.stdout).mode, 'offline preview')
+	})
 
 test('preflight refuses an absent or ambiguous app before any control', async () => {
 	for (const apps of [

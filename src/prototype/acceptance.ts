@@ -3,7 +3,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import type { NodeController, RemoteAction } from './controller.js'
 
 type Controller = Pick<NodeController, 'perform' | 'state' | 'reconnects' | 'queryPower' | 'queryVolume' | 'listApps'>
-export type AcceptanceMode = 'close-app' | 'power' | 'remaining'
+export type AcceptanceMode = 'close-app' | 'power' | 'wake' | 'remaining'
 type Event = {
 	stage: string
 	result: string
@@ -23,13 +23,15 @@ type Options = {
 export class PilotStopped extends Error {}
 
 export function previewAcceptance(appName: string, mode: AcceptanceMode = 'close-app'): string[] {
+	const powerOnly = mode === 'power' || mode === 'wake'
 	return [
 		...(mode === 'remaining' ? ['Volume down one step, then up one step'] : []),
-		...(mode !== 'power' ? [`Open ${appName}, open App Switcher, then swipe up to close the focused app`] : []),
+		...(!powerOnly ? [`Open ${appName}, open App Switcher, then swipe up to close the focused app`] : []),
+		...(mode === 'wake' ? ['Start with Apple TV already Off, request Wake, and verify On; no Sleep is sent'] : []),
 		...(mode === 'remaining' || mode === 'power'
 			? ['Put Apple TV to sleep, verify Off, then wake it and verify On']
 			: []),
-		...(mode === 'power'
+		...(powerOnly
 			? [
 					'Wake queries current power and sends Home once only when Off; there is no recovery retry',
 					'After On is confirmed, request Wake again; an already-awake TV must receive no button and stay unchanged',
@@ -69,21 +71,31 @@ export async function runAcceptance(controller: Controller, options: Options): P
 		}
 		throw new PilotStopped(`Power did not report ${expected} within the observation window`)
 	}
+	const wakeSequence = async (): Promise<void> => {
+		await step('wake', { kind: 'power', state: 'On' })
+		await expectPower('On')
+		if (options.mode === 'power' || options.mode === 'wake') {
+			await step('wake while already On', { kind: 'power', state: 'On' })
+			await expectPower('On')
+		}
+	}
 	const powerSequence = async (): Promise<void> => {
 		check()
 		if ((await controller.queryPower()) !== 'On') throw new PilotStopped('Start with the Apple TV awake')
 		await step('sleep', { kind: 'power', state: 'Off' })
 		await expectPower('Off')
-		await step('wake', { kind: 'power', state: 'On' })
-		await expectPower('On')
-		if (options.mode === 'power') {
-			await step('wake while already On', { kind: 'power', state: 'On' })
-			await expectPower('On')
-		}
+		await wakeSequence()
 	}
 
 	check()
 	if (options.mode === 'power') return powerSequence()
+	if (options.mode === 'wake') {
+		const current = await controller.queryPower()
+		check()
+		options.record({ stage: 'initial power', result: current })
+		if (current !== 'Off') throw new PilotStopped('Start with the Apple TV already asleep')
+		return wakeSequence()
+	}
 	if (!options.appName.trim()) throw new PilotStopped('Choose an app to close')
 	const apps = (await controller.listApps()).filter((app) => app.name === options.appName)
 	if (apps.length !== 1) throw new PilotStopped('App name must match exactly one installed app')

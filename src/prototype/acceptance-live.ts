@@ -21,12 +21,15 @@ async function main(): Promise<void> {
   node dist/prototype/acceptance-live.js --app YouTube
   node dist/prototype/acceptance-live.js --app YouTube --run --credentials /private/test.json --report /private/result.json
   node dist/prototype/acceptance-live.js --mode power --run --credentials /private/test.json --report /private/power.json
+  node dist/prototype/acceptance-live.js --mode wake --run --credentials /private/test.json --report /private/wake.json
 
 Without --run: offline preview only; no credential access or network connection.
-Run only after the owner is watching. All modes require an awake TV.
+Run only after the owner is watching. Wake mode requires an asleep TV; other modes require it awake.
 Default --mode close-app: open the app, enter App Switcher, swipe up, then stop.
 Close-app and remaining modes require one exact app-name match.
 Explicit --mode power: sleep, wake, then request Wake again while already On.
+Explicit --mode wake: start from Off, wake, then request Wake again while already On.
+Wake mode sends no Sleep, app, swipe, or volume control.
 Wake queries current power: Home once for Off, no button for On, stop for Unknown.
 The second Wake must leave the awake TV unchanged. No recovery retry is sent.
 Explicit --mode remaining also tests volume and sleep/wake; requires volume 5-95%.
@@ -37,9 +40,10 @@ Reports are created privately and never overwrite an existing file.
 `)
 		return
 	}
-	if (values.mode !== 'close-app' && values.mode !== 'power' && values.mode !== 'remaining')
+	if (values.mode !== 'close-app' && values.mode !== 'power' && values.mode !== 'wake' && values.mode !== 'remaining')
 		throw new Error('Invalid acceptance mode')
-	if (values.mode !== 'power' && !values.app.trim()) throw new Error('An app name is required')
+	if ((values.mode === 'close-app' || values.mode === 'remaining') && !values.app.trim())
+		throw new Error('An app name is required')
 	const mode: AcceptanceMode = values.mode
 	const plan = previewAcceptance(values.app, mode)
 	if (!values.run) {
