@@ -1,8 +1,8 @@
 diff --git a/README.md b/README.md
-index 1fc2eb1..9c1de24 100644
+index 1fc2eb1..c97b4fc 100644
 --- a/README.md
 +++ b/README.md
-@@ -277,6 +277,41 @@ src/
+@@ -277,6 +277,62 @@ src/
 
  ## Development
 
@@ -36,21 +36,321 @@ index 1fc2eb1..9c1de24 100644
 +The metadata fixtures come from locked pyatv encoders using synthetic data only.
 +The receive-path regression verifies a fragmented encrypted pair of batches.
 +
-+These extensions do not provide a complete player-state reducer or qualify the
-+long-lived AirPlay transport. Consumers must track explicit active player/output
-+selection and invalidate feedback on connection loss. Data/event socket loss is
-+forwarded through the connection's existing error/close events.
++Consumers must track explicit active player/output selection and invalidate
++feedback on connection loss; these extensions do not provide a complete reducer.
++
++### AirPlay connection lifetime
++
++Each `AirPlayConnection` owns one lifetime. Pass an optional fourth constructor
++argument `{ timeoutMs, logger }` to set the socket/HTTP/write deadline (default
++10 seconds) and replace debug logging. `connect({ signal })` accepts cancellation
++throughout setup and the connected lifetime. Use a new instance after close or
++failure. `scan({ signal })` also cancels its mDNS browsers and deadline.
++
++Closing settles pending connects, writes, HTTP/RTSP and MRP requests, destroys all
++owned sockets, clears heartbeat timers, and emits one close event. Errors also
++reach registered error listeners. No connection or request is retried. Complete
++encrypted frames are consumed separately from partial plaintext HTTP replies;
++all coalesced replies are processed. RTSP replies match CSeq and MRP replies match
++the request identifier. Untyped MRP acknowledgements are supported when no response
++type is required; errors and wrong response types reject instead of accepting an
++unrelated state push. Only one heartbeat can be outstanding.
++
++Regression tests cover fragmented/reordered replies, immediate replies during
++write, failures, concurrent requests, cancellation, and real loopback TCP cleanup.
++Two read-only sessions against one TV also connected, observed metadata, closed,
++and exited naturally without remaining TCP sockets. Longer outage/soak coverage
++and integration into a persistent application controller remain separate work.
 +
  ```bash
  # Install dependencies
  npm install
-@@ -291,4 +326,4 @@ npm test
+@@ -291,4 +347,4 @@ npm test
  npm run test:watch
  ```
 
 -Requires Node.js 18+ (ES2022 target, ESM modules).
 \ No newline at end of file
 +Requires Node.js 18+ (ES2022 target, ESM modules).
+diff --git a/src/__tests__/airplay-lifecycle.test.ts b/src/__tests__/airplay-lifecycle.test.ts
+new file mode 100644
+index 0000000..405b459
+--- /dev/null
++++ b/src/__tests__/airplay-lifecycle.test.ts
+@@ -0,0 +1,273 @@
++import { createServer, type AddressInfo, type Socket } from 'node:net';
++import { setTimeout as delay } from 'node:timers/promises';
++import { describe, expect, it, vi } from 'vitest';
++import { AirPlayConnection } from '../connection.js';
++import { HAPSession } from '../util/hap-session.js';
++import { MRPMessage, MessageType } from '../mrp/messages.js';
++import { buildDataStreamFrame } from '../util/data-stream.js';
++
++const credentials = {
++  clientId: 'synthetic-client', serverId: 'synthetic-server',
++  clientLTSK: Buffer.alloc(32, 1), clientLTPK: Buffer.alloc(32, 2), serverLTPK: Buffer.alloc(32, 3),
++};
++type Reply = { headers: Record<string, string>; body: Buffer };
++type Harness = {
++  socket: { write(data: Buffer, callback?: (error?: Error) => void): boolean; destroy(): void };
++  dataSocket: Harness['socket'];
++  session: HAPSession;
++  dataSession: HAPSession;
++  onEncryptedData(data: Buffer): void;
++  onDataChannelData(data: Buffer): void;
++  sendRTSP(method: string, uri: string): Promise<Reply>;
++  startFeedbackHeartbeat(): void;
++};
++
++function fixture(timeoutMs = 500) {
++  const connection = new AirPlayConnection('127.0.0.1', 1, credentials, { timeoutMs, logger: () => {} });
++  const transport = connection as unknown as Harness;
++  const peer = new HAPSession(Buffer.alloc(32, 4), Buffer.alloc(32, 5));
++  const writes: Buffer[] = [];
++  let destroyed = 0;
++  transport.session = new HAPSession(Buffer.alloc(32, 5), Buffer.alloc(32, 4));
++  transport.dataSession = new HAPSession(Buffer.alloc(32, 5), Buffer.alloc(32, 4));
++  transport.socket = { write(data, callback) { writes.push(data); callback?.(); return true; }, destroy() { destroyed++; } };
++  transport.dataSocket = transport.socket;
++  const errors: Error[] = [];
++  connection.on('error', error => errors.push(error));
++  return { connection, transport, peer, writes, errors, destroyed: () => destroyed };
++}
++
++function response(sequence: number, body = '', status = 200): Buffer {
++  return Buffer.from(`RTSP/1.0 ${status} Test\r\nCSeq: ${sequence}\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
++}
++
++async function outcome<T>(promise: Promise<T>): Promise<{ value?: T; error?: Error; timeout?: true }> {
++  let timer: ReturnType<typeof setTimeout> | undefined;
++  try {
++    return await Promise.race([
++      promise.then(value => ({ value }), error => ({ error })),
++      new Promise<{ timeout: true }>(resolve => { timer = setTimeout(() => resolve({ timeout: true }), 1000); }),
++    ]);
++  } finally { clearTimeout(timer); }
++}
++
++describe('AirPlay response transport', () => {
++  it('keeps only one heartbeat pending and clears its timers on close', async () => {
++    vi.useFakeTimers();
++    const f = fixture(10000);
++    try {
++      f.transport.startFeedbackHeartbeat();
++      await vi.advanceTimersByTimeAsync(4500);
++      expect(f.writes).toHaveLength(1);
++      f.transport.onEncryptedData(f.peer.encrypt(response(1)));
++      await vi.advanceTimersByTimeAsync(2000);
++      expect(f.writes).toHaveLength(2);
++      f.connection.close();
++      await vi.advanceTimersByTimeAsync(0);
++      expect(vi.getTimerCount()).toBe(0);
++    } finally {
++      f.connection.close();
++      vi.useRealTimers();
++    }
++  });
++  it('keeps decrypted partial replies separate from encrypted TCP fragments', async () => {
++    const f = fixture();
++    const pending = outcome(f.transport.sendRTSP('POST', '/feedback'));
++    const reply = response(1, 'fragmented reply');
++    f.transport.onEncryptedData(f.peer.encrypt(reply.subarray(0, 17)));
++    const rest = f.peer.encrypt(reply.subarray(17));
++    for (let offset = 0; offset < rest.length; offset += 7) f.transport.onEncryptedData(rest.subarray(offset, offset + 7));
++    const result = await pending;
++    f.connection.close();
++    expect(result.value?.body.toString()).toBe('fragmented reply');
++    expect(f.errors).toEqual([]);
++  });
++
++  it('consumes a complete encrypted frame even when the next one is incomplete', () => {
++    const f = fixture();
++    const received: Reply[] = [];
++    f.connection.on('rtsp-response', reply => received.push(reply));
++    const first = f.peer.encrypt(response(10));
++    const next = f.peer.encrypt(response(11));
++    f.transport.onEncryptedData(Buffer.concat([first, next.subarray(0, 5)]));
++    expect(received.map(reply => reply.headers.cseq)).toEqual(['10']);
++    f.transport.onEncryptedData(next.subarray(5));
++    expect(received.map(reply => reply.headers.cseq)).toEqual(['10', '11']);
++    f.connection.close();
++  });
++
++  it('correlates coalesced replies in reverse order and ignores unrelated sequences', async () => {
++    const f = fixture();
++    const first = outcome(f.transport.sendRTSP('SETUP', '/one'));
++    const second = outcome(f.transport.sendRTSP('POST', '/two'));
++    f.transport.onEncryptedData(f.peer.encrypt(Buffer.concat([response(99, 'unsolicited'), response(2, 'second'), response(1, 'first')])));
++    const results = await Promise.all([first, second]);
++    f.connection.close();
++    expect(results.map(result => result.value?.body.toString())).toEqual(['first', 'second']);
++  });
++
++  it('registers a waiter before a synchronous response arrives during write', async () => {
++    const f = fixture();
++    f.transport.socket.write = (_data, callback) => {
++      f.transport.onEncryptedData(f.peer.encrypt(response(1, 'immediate')));
++      callback?.();
++      return true;
++    };
++    const result = await outcome(f.transport.sendRTSP('POST', '/feedback'));
++    f.connection.close();
++    expect(result.value?.body.toString()).toBe('immediate');
++  });
++
++  it('rejects non-success status and times out missing responses', async () => {
++    const rejected = fixture();
++    const pending = outcome(rejected.transport.sendRTSP('SETUP', '/setup'));
++    rejected.transport.onEncryptedData(rejected.peer.encrypt(response(1, '', 403)));
++    expect((await pending).error?.message).toMatch(/403/);
++    rejected.connection.close();
++    const timeout = fixture(20);
++    expect((await outcome(timeout.transport.sendRTSP('POST', '/feedback'))).error?.message).toMatch(/timed out/i);
++    expect(timeout.destroyed()).toBeGreaterThan(0);
++    timeout.connection.close();
++  });
++
++  it('settles pending response and write work immediately on close', async () => {
++    const f = fixture();
++    f.transport.socket.write = () => true; // Simulate backpressure with a pending write callback.
++    const pending = outcome(f.transport.sendRTSP('POST', '/feedback'));
++    f.connection.close();
++    expect((await pending).error?.message).toMatch(/closed/i);
++  });
++
++  it('matches MRP identifiers without consuming unrelated state pushes', async () => {
++    const f = fixture();
++    const request = await MRPMessage.sendCommand(MessageType.GetState);
++    const decoded = await MRPMessage.decode(request);
++    const pending = outcome(f.connection.sendMRPMessageAndWait(request, MessageType.SetState, 100));
++    await delay(0);
++    const identifier = Buffer.from(decoded.identifier as string);
++    // Independent wire encoding: type=4, identifier field=2.
++    const reply = Buffer.concat([Buffer.from([8, 4, 18, identifier.length]), identifier]);
++    const unsolicited = Buffer.from([8, 4]);
++    f.transport.onDataChannelData(f.peer.encrypt(buildDataStreamFrame(unsolicited)));
++    f.transport.onDataChannelData(f.peer.encrypt(buildDataStreamFrame(reply)));
++    const result = await pending;
++    f.connection.close();
++    expect(result.value?.identifier).toBe(decoded.identifier);
++  });
++
++  it('rejects an MRP protocol error without waiting for the expected type', async () => {
++    const f = fixture();
++    const request = await MRPMessage.sendCommand(MessageType.GetState);
++    const decoded = await MRPMessage.decode(request);
++    const pending = outcome(f.connection.sendMRPMessageAndWait(request, MessageType.SetState, 100));
++    await delay(0);
++    const id = Buffer.from(decoded.identifier as string);
++    const reply = Buffer.concat([Buffer.from([18, id.length]), id, Buffer.from([32, 6])]);
++    f.transport.onDataChannelData(f.peer.encrypt(buildDataStreamFrame(reply)));
++    const result = await pending;
++    f.connection.close();
++    expect(result.error?.message).toMatch(/MRP.*6/);
++  });
++
++  it('keeps simultaneous same-type MRP requests separate', async () => {
++    const f = fixture();
++    const requests = await Promise.all([MRPMessage.sendCommand(MessageType.GetState), MRPMessage.sendCommand(MessageType.GetState)]);
++    const ids = await Promise.all(requests.map(async request => (await MRPMessage.decode(request)).identifier as string));
++    const pending = requests.map(request => outcome(f.connection.sendMRPMessageAndWait(request, MessageType.SetState, 500)));
++    await delay(0);
++    for (const value of [...ids].reverse()) {
++      const id = Buffer.from(value);
++      f.transport.onDataChannelData(f.peer.encrypt(buildDataStreamFrame(Buffer.concat([Buffer.from([8, 4, 18, id.length]), id]))));
++    }
++    const results = await Promise.all(pending);
++    f.connection.close();
++    expect(results.map(result => result.value?.identifier)).toEqual(ids);
++  });
++
++  it('rejects MRP work on close and ignores late messages', async () => {
++    const f = fixture();
++    const request = await MRPMessage.sendCommand(MessageType.GetState);
++    const pending = outcome(f.connection.sendMRPMessageAndWait(request, MessageType.SetState, 500));
++    await delay(0);
++    let messages = 0;
++    let closes = 0;
++    f.connection.on('mrp-message', () => messages++);
++    f.connection.on('close', () => closes++);
++    f.connection.close();
++    f.connection.close();
++    f.transport.onDataChannelData(f.peer.encrypt(buildDataStreamFrame(Buffer.from([8, 4]))));
++    expect((await pending).error?.message).toMatch(/closed/i);
++    expect(messages).toBe(0);
++    expect(closes).toBe(1);
++    await expect(f.connection.sendMRPMessage(request)).rejects.toThrow(/closed/i);
++  });
++});
++
++describe('real TCP cancellation', () => {
++  async function stalledPeer(run: (port: number, sockets: Set<Socket>) => Promise<void>) {
++    const sockets = new Set<Socket>();
++    const server = createServer(socket => {
++      sockets.add(socket);
++      socket.on('close', () => sockets.delete(socket));
++      socket.on('data', () => {}); // Accept pair-verify but deliberately never reply.
++      socket.on('error', () => {});
++    });
++    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
++    try { await run((server.address() as AddressInfo).port, sockets); }
++    finally {
++      for (const socket of sockets) socket.destroy();
++      await new Promise<void>(resolve => server.close(() => resolve()));
++    }
++  }
++
++  it('aborts pairing promptly and closes the real socket', async () => {
++    await stalledPeer(async (port, sockets) => {
++      const connection = new AirPlayConnection('127.0.0.1', port, credentials, { timeoutMs: 1000, logger: () => {} });
++      const controller = new AbortController();
++      const pending = outcome(connection.connect({ signal: controller.signal }));
++      await expect.poll(() => sockets.size).toBe(1);
++      controller.abort();
++      const result = await pending;
++      connection.close();
++      expect(result.error?.message).toMatch(/abort|cancel/i);
++      await expect.poll(() => sockets.size).toBe(0);
++    });
++  });
++
++  it('times out a stalled handshake and never leaves an orphan socket', async () => {
++    await stalledPeer(async (port, sockets) => {
++      const connection = new AirPlayConnection('127.0.0.1', port, credentials, { timeoutMs: 20, logger: () => {} });
++      const result = await outcome(connection.connect());
++      connection.close();
++      expect(result.error?.message).toMatch(/timed out/i);
++      await expect.poll(() => sockets.size).toBe(0);
++    });
++  });
++
++  it('honors cancellation before connecting and while TCP is still opening', async () => {
++    await stalledPeer(async (port, sockets) => {
++      for (const alreadyAborted of [true, false]) {
++        const connection = new AirPlayConnection('127.0.0.1', port, credentials, { logger: () => {} });
++        const controller = new AbortController();
++        if (alreadyAborted) controller.abort();
++        const pending = outcome(connection.connect({ signal: controller.signal }));
++        controller.abort();
++        expect((await pending).error?.message).toMatch(/cancel/i);
++        await delay(20);
++        expect(sockets.size).toBe(0);
++        await expect(connection.connect()).rejects.toThrow(/closed/i);
++      }
++    });
++  });
++
++  it('rejects a stalled handshake when the peer closes', async () => {
++    await stalledPeer(async (port, sockets) => {
++      const connection = new AirPlayConnection('127.0.0.1', port, credentials, { logger: () => {} });
++      const pending = outcome(connection.connect());
++      await expect.poll(() => sockets.size).toBe(1);
++      for (const socket of sockets) socket.destroy();
++      expect((await pending).error?.message).toMatch(/closed|ECONNRESET|EPIPE/i);
++      connection.close();
++    });
++  });
++});
 diff --git a/src/__tests__/connection.test.ts b/src/__tests__/connection.test.ts
 index bf59292..ca09b7e 100644
 --- a/src/__tests__/connection.test.ts
@@ -105,10 +405,10 @@ index bf59292..ca09b7e 100644
        clientId: 'test',
 diff --git a/src/__tests__/discovery-order.test.ts b/src/__tests__/discovery-order.test.ts
 new file mode 100644
-index 0000000..b9d5319
+index 0000000..6d24eb5
 --- /dev/null
 +++ b/src/__tests__/discovery-order.test.ts
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,52 @@
 +import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 +import { scan } from '../discovery.js';
 +
@@ -127,6 +427,23 @@ index 0000000..b9d5319
 +afterEach(() => vi.useRealTimers());
 +
 +describe('mDNS service ordering', () => {
++  it('does not start discovery when already cancelled', async () => {
++    await expect(scan({ signal: AbortSignal.abort() })).rejects.toThrow();
++    expect(mock.callbacks.size).toBe(0);
++    expect(vi.getTimerCount()).toBe(0);
++  });
++
++  it('cancels both browsers and the deadline without returning partial discovery', async () => {
++    const controller = new AbortController();
++    const pending = scan({ timeout: 5000, signal: controller.signal });
++    const rejected = expect(pending).rejects.toThrow();
++    controller.abort();
++    await rejected;
++    expect(mock.stopped).toHaveBeenCalledTimes(2);
++    expect(mock.destroyed).toHaveBeenCalledOnce();
++    expect(vi.getTimerCount()).toBe(0);
++  });
++
 +  for (const order of [['airplay', 'companion-link'], ['companion-link', 'airplay']]) {
 +    it(`finds the Companion port when ${order[0]} arrives first`, async () => {
 +      const services: Record<string, Record<string, unknown>> = {
@@ -749,32 +1066,414 @@ index 7641ce2..0918c4b 100644
      dict.set(key.value, val.value);
    }
 diff --git a/src/connection.ts b/src/connection.ts
-index 8851355..b31edb0 100644
+index 8851355..deb04dc 100644
 --- a/src/connection.ts
 +++ b/src/connection.ts
-@@ -390,8 +390,8 @@ export class AirPlayConnection extends EventEmitter {
-       this.eventSocket = await connectSocket(this.host, eventPort);
+@@ -18,6 +18,7 @@ import { TlvTag, tlvEncode, tlvDecode } from './util/tlv.js';
+ import { MRPMessage, MessageType } from './mrp/messages.js';
+ import { buildDataStreamFrame, buildDataStreamReply, parseDataStreamFrame } from './util/data-stream.js';
+ import type { HAPCredentials } from './auth/types.js';
++import { PendingRequests } from './util/pending-requests.js';
+
+ const DATA_CHANNEL_TYPE_UUID = '1910A70F-DBC0-4242-AF95-115DB30604E1';
+ const X25519_SPKI_PREFIX = Buffer.from('302a300506032b656e032100', 'hex');
+@@ -28,17 +29,19 @@ interface ParsedHTTP {
+   headers: Record<string, string>;
+   body: Buffer;
+   totalSize: number;
++  statusCode?: number;
+ }
+
+ /** Parse an HTTP message (request or response) from a buffer. Returns null if incomplete. */
+ function parseHTTPMessage(buf: Buffer): ParsedHTTP | null {
+-  const text = buf.toString('utf-8');
+-  const headerEnd = text.indexOf('\r\n\r\n');
++  const headerEnd = buf.indexOf('\r\n\r\n');
+   if (headerEnd === -1) return null;
+
+-  const headerSection = text.substring(0, headerEnd);
++  const headerSection = buf.subarray(0, headerEnd).toString('utf8');
+   const headers: Record<string, string> = {};
+   const lines = headerSection.split('\r\n');
++  const status = /^(?:HTTP|RTSP)\/1\.[01] (\d{3})(?: |$)/.exec(lines[0]);
++  if (!status && !/^[A-Z]+ \S+ (?:HTTP|RTSP)\/1\.[01]$/.test(lines[0])) throw new Error('Invalid AirPlay HTTP header');
+   for (let i = 1; i < lines.length; i++) {
+     const colonIdx = lines[i].indexOf(':');
+     if (colonIdx > 0) {
+@@ -48,21 +51,19 @@ function parseHTTPMessage(buf: Buffer): ParsedHTTP | null {
+   }
+
+   const bodyStart = headerEnd + 4;
+-  const contentLength = parseInt(headers['content-length'] ?? '0', 10);
++  const length = headers['content-length'] ?? '0';
++  if (!/^\d+$/.test(length) || !Number.isSafeInteger(Number(length))) throw new Error('Invalid AirPlay content length');
++  const contentLength = Number(length);
+   const totalSize = bodyStart + contentLength;
+   if (buf.length < totalSize) return null;
+
+   const body = buf.subarray(bodyStart, bodyStart + contentLength);
+-  return { headers, body: Buffer.from(body), totalSize };
++  return { headers, body: Buffer.from(body), totalSize, statusCode: status ? Number(status[1]) : undefined };
+ }
+
+-/** Connect a socket to host:port and return it once connected. */
+-function connectSocket(host: string, port: number): Promise<Socket> {
+-  return new Promise((resolve, reject) => {
+-    const sock = new Socket();
+-    sock.connect(port, host, () => resolve(sock));
+-    sock.once('error', reject);
+-  });
++export interface AirPlayConnectionOptions {
++  timeoutMs?: number;
++  logger?: (message: string) => void;
+ }
+
+ export class AirPlayConnection extends EventEmitter {
+@@ -79,69 +80,133 @@ export class AirPlayConnection extends EventEmitter {
+   private dacpId = randomBytes(8).toString('hex');
+   private activeRemote = String(Math.floor(Math.random() * 0xffffffff));
+   private localAddress?: string;
+-  private pendingRawResponse?: {
+-    resolve: (buf: Buffer) => void;
+-    reject: (err: Error) => void;
+-  };
++  private pending = new PendingRequests(error => this.fail(error));
++  private sockets = new Set<Socket>();
++  private nextOperation = 0;
++  private closed = false;
++  private started = false;
++  private removeAbortListener?: () => void;
+   private feedbackInterval?: ReturnType<typeof setInterval>;
+   private dataDecBuffer = Buffer.alloc(0);
+-  private pendingMRPResolvers: Array<{
+-    type?: number;
+-    resolve: (msg: Record<string, unknown>) => void;
+-  }> = [];
++  private mrpResponseTypes = new Map<string, number | undefined>();
++  private incomingMRP = Promise.resolve();
+
+   constructor(
+     private host: string,
+     private port: number,
+     private credentials: HAPCredentials,
++    private options: AirPlayConnectionOptions = {},
+   ) {
+     super();
++    if (!Number.isFinite(this.timeoutMs) || this.timeoutMs <= 0) throw new RangeError('Invalid AirPlay timeout');
+   }
+
+-  async connect(): Promise<void> {
+-    // Step 1: Open TCP connection
+-    this.log('opening TCP connection...');
+-    this.socket = await connectSocket(this.host, this.port);
+-    this.localAddress = this.socket.localAddress;
+-    this.log(`TCP connected (local ${this.localAddress})`);
+-
+-    // Initially handle raw (unencrypted) data for pair-verify
+-    this.socket.on('data', (data) => this.onRawData(Buffer.from(data)));
+-    this.socket.on('close', () => this.emit('close'));
+-    this.socket.on('error', (err) => this.emit('error', err));
+-
+-    // Step 2: Pair-verify on this connection
+-    this.log('pair-verify...');
+-    const { outputKey, inputKey, sharedSecret } = await this.pairVerifyOnSocket();
+-    this.session = new HAPSession(outputKey, inputKey);
+-    this.sharedSecret = sharedSecret;
+-    this.log('pair-verify OK');
+-
+-    // Switch from raw mode to encrypted RTSP mode
+-    this.socket.removeAllListeners('data');
+-    this.socket.on('data', (data) => this.onEncryptedData(Buffer.from(data)));
+-
+-    // Step 3: Set up event channel via RTSP SETUP
+-    this.log('SETUP event channel...');
+-    await this.setupEventChannel();
+-    this.log('event channel OK');
+-
+-    // Step 4: RECORD
+-    this.log('RECORD...');
+-    await this.sendRTSP('RECORD', this.rtspUri);
+-    this.log('RECORD OK');
+-
+-    // Step 5: Start FEEDBACK heartbeat (every 2 seconds)
+-    this.startFeedbackHeartbeat();
+-
+-    // Step 6: Set up data channel (MRP tunnel)
+-    this.log('SETUP data channel...');
+-    await this.setupDataChannel();
+-    this.log('data channel OK');
++  private get timeoutMs(): number { return this.options.timeoutMs ?? 10000; }
++
++  private assertOpen(): void {
++    if (this.closed) throw new Error('AirPlay connection closed');
++  }
++
++  private async openSocket(port: number): Promise<Socket> {
++    this.assertOpen();
++    const socket = new Socket();
++    this.sockets.add(socket); // Own the socket before connect can settle or be cancelled.
++    const key = `connect:${++this.nextOperation}`;
++    const connected = this.pending.create<Socket>(key, this.timeoutMs);
++    socket.once('connect', () => this.pending.resolve(key, socket));
++    socket.on('error', error => this.fail(error));
++    socket.once('close', () => {
++      this.sockets.delete(socket);
++      if (!this.closed) this.fail(new Error('AirPlay connection closed by peer'));
++    });
++    socket.setNoDelay(true);
++    try { socket.connect(port, this.host); }
++    catch (error) { this.fail(error instanceof Error ? error : new Error('AirPlay connection failed')); }
++    const result = await connected;
++    this.assertOpen();
++    return result;
++  }
++
++  private async write(socket: Socket | undefined, data: Buffer): Promise<void> {
++    this.assertOpen();
++    if (!socket || socket.destroyed) throw new Error('AirPlay socket not connected');
++    const key = `write:${++this.nextOperation}`;
++    const written = this.pending.create<void>(key, this.timeoutMs);
++    try {
++      socket.write(data, error => {
++        if (error) this.fail(error);
++        else this.pending.resolve(key, undefined);
++      });
++    } catch (error) { this.fail(error instanceof Error ? error : new Error('AirPlay write failed')); }
++    return written;
++  }
++
++  /** One connection lifetime; use a new instance after close or failure. */
++  async connect({ signal }: { signal?: AbortSignal } = {}): Promise<void> {
++    this.assertOpen();
++    if (this.started) throw new Error('AirPlay connection already started');
++    this.started = true;
++    const onAbort = () => this.fail(new Error('AirPlay connection cancelled'));
++    if (signal?.aborted) {
++      onAbort();
++      throw new Error('AirPlay connection cancelled');
++    }
++    signal?.addEventListener('abort', onAbort, { once: true });
++    this.removeAbortListener = () => signal?.removeEventListener('abort', onAbort);
++    try {
++      // Step 1: Open TCP connection
++      this.log('opening TCP connection...');
++      this.socket = await this.openSocket(this.port);
++      this.localAddress = this.socket.localAddress;
++      this.log(`TCP connected (local ${this.localAddress})`);
++
++      // Initially handle raw (unencrypted) data for pair-verify
++      this.socket.on('data', (data) => this.onRawData(Buffer.from(data)));
++
++      // Step 2: Pair-verify on this connection
++      this.log('pair-verify...');
++      const { outputKey, inputKey, sharedSecret } = await this.pairVerifyOnSocket();
++      this.assertOpen();
++      this.session = new HAPSession(outputKey, inputKey);
++      this.sharedSecret = sharedSecret;
++      this.log('pair-verify OK');
++
++      // Switch from raw mode to encrypted RTSP mode
++      this.socket.removeAllListeners('data');
++      this.socket.on('data', (data) => this.onEncryptedData(Buffer.from(data)));
++      if (this.rawBuffer.length) {
++        const remaining = this.rawBuffer;
++        this.rawBuffer = Buffer.alloc(0);
++        this.onEncryptedData(remaining);
++      }
++
++      // Step 3: Set up event channel via RTSP SETUP
++      this.log('SETUP event channel...');
++      await this.setupEventChannel();
++      this.log('event channel OK');
++
++      // Step 4: RECORD
++      this.log('RECORD...');
++      await this.sendRTSP('RECORD', this.rtspUri);
++      this.log('RECORD OK');
++
++      // Step 5: Start FEEDBACK heartbeat (every 2 seconds)
++      this.startFeedbackHeartbeat();
++
++      // Step 6: Set up data channel (MRP tunnel)
++      this.log('SETUP data channel...');
++      await this.setupDataChannel();
++      this.assertOpen();
++      this.log('data channel OK');
++    } catch (error) {
++      this.fail(error instanceof Error ? error : new Error('AirPlay connection failed'));
++      throw error;
++    }
+   }
+
+   private log(msg: string): void {
+-    console.error(`[AirPlay] ${msg}`);
++    if (this.options.logger) this.options.logger(msg);
++    else console.error(`[AirPlay] ${msg}`);
+   }
+
+   // --- Pair-verify directly on the RTSP socket ---
+@@ -257,49 +322,52 @@ export class AirPlayConnection extends EventEmitter {
+   }
+
+   /** Send a plain HTTP POST on the raw socket and read the response */
+-  private httpPostOnSocket(path: string, body: Buffer): Promise<Buffer> {
+-    return new Promise((resolve, reject) => {
+-      const headers = [
+-        `POST ${path} HTTP/1.1`,
+-        `Host: ${this.host}:${this.port}`,
+-        'User-Agent: AirPlay/320.20',
+-        'Connection: keep-alive',
+-        'X-Apple-HKP: 3',
+-        'Content-Type: application/octet-stream',
+-        `Content-Length: ${body.length}`,
+-        '',
+-        '',
+-      ].join('\r\n');
+-
+-      this.pendingRawResponse = { resolve, reject };
+-      this.socket!.write(Buffer.concat([Buffer.from(headers), body]), (err) => {
+-        if (err) {
+-          this.pendingRawResponse = undefined;
+-          reject(err);
+-        }
+-      });
+-    });
++  private async httpPostOnSocket(path: string, body: Buffer): Promise<Buffer> {
++    this.assertOpen();
++    const headers = [
++      `POST ${path} HTTP/1.1`,
++      `Host: ${this.host}:${this.port}`,
++      'User-Agent: AirPlay/320.20',
++      'Connection: keep-alive',
++      'X-Apple-HKP: 3',
++      'Content-Type: application/octet-stream',
++      `Content-Length: ${body.length}`,
++      '',
++      '',
++    ].join('\r\n');
++
++    const response = this.pending.create<Buffer>('raw', this.timeoutMs);
++    try {
++      const [, result] = await Promise.all([this.write(this.socket, Buffer.concat([Buffer.from(headers), body])), response]);
++      return result;
++    } catch (error) {
++      this.pending.reject('raw', error instanceof Error ? error : new Error('AirPlay request failed'));
++      throw error;
++    }
+   }
+
+   /** Handle raw (unencrypted) data during pair-verify phase */
+   private onRawData(data: Buffer): void {
++    if (this.closed) return;
+     this.rawBuffer = Buffer.concat([this.rawBuffer, data]);
+-
+-    const parsed = parseHTTPMessage(this.rawBuffer);
+-    if (!parsed) return;
+-
+-    this.rawBuffer = this.rawBuffer.subarray(parsed.totalSize);
+-
+-    if (this.pendingRawResponse) {
+-      const { resolve } = this.pendingRawResponse;
+-      this.pendingRawResponse = undefined;
+-      resolve(parsed.body);
++    if (!this.pending.has('raw')) return;
++    try {
++      const parsed = parseHTTPMessage(this.rawBuffer);
++      if (!parsed) return;
++      this.rawBuffer = this.rawBuffer.subarray(parsed.totalSize);
++      if (parsed.statusCode === undefined) throw new Error('Invalid AirPlay pairing response');
++      if (parsed.statusCode < 200 || parsed.statusCode >= 300) {
++        this.pending.reject('raw', new Error(`AirPlay HTTP status ${parsed.statusCode}`));
++      } else this.pending.resolve('raw', parsed.body);
++    } catch (error) {
++      this.fail(error instanceof Error ? error : new Error('Invalid AirPlay pairing response'));
+     }
+   }
+
+   // --- Encrypted RTSP ---
+
+   private encryptedBuffer = Buffer.alloc(0);
++  private rtspBuffer = Buffer.alloc(0);
+
+   private async sendRTSP(
+     method: string,
+@@ -307,14 +375,16 @@ export class AirPlayConnection extends EventEmitter {
+     headers: Record<string, string> = {},
+     body?: Buffer,
+   ): Promise<{ headers: Record<string, string>; body: Buffer }> {
++    this.assertOpen();
++    if (!this.session) throw new Error('AirPlay encryption not available');
+     this.cseq++;
+     const allHeaders: Record<string, string> = {
++      ...headers,
+       CSeq: String(this.cseq),
+       'User-Agent': 'AirPlay/620.14.6',
+       'DACP-ID': this.dacpId,
+       'Active-Remote': this.activeRemote,
+       'Client-Instance': this.dacpId,
+-      ...headers,
+     };
+
+     let request = `${method} ${uri} RTSP/1.0\r\n`;
+@@ -333,12 +403,15 @@ export class AirPlayConnection extends EventEmitter {
+       data = Buffer.from(this.session.encrypt(data));
+     }
+
+-    return new Promise((resolve, reject) => {
+-      this.socket!.write(data, (err) => {
+-        if (err) reject(err);
+-      });
+-      this.once('rtsp-response', resolve);
+-    });
++    const key = `rtsp:${this.cseq}`;
++    const response = this.pending.create<ParsedHTTP>(key, this.timeoutMs);
++    try {
++      const [, result] = await Promise.all([this.write(this.socket, data), response]);
++      return result;
++    } catch (error) {
++      this.pending.reject(key, error instanceof Error ? error : new Error('AirPlay RTSP request failed'));
++      throw error;
++    }
+   }
+
+   private get rtspUri(): string {
+@@ -384,14 +457,13 @@ export class AirPlayConnection extends EventEmitter {
+       const eventInputKey = await hkdfSha512(
+         this.sharedSecret!, 'Events-Salt', 'Events-Write-Encryption-Key', 32,
+       );
++      this.assertOpen();
+       this.eventSession = new HAPSession(eventOutputKey, eventInputKey);
+
+       this.log(`connecting to event port ${eventPort}...`);
+-      this.eventSocket = await connectSocket(this.host, eventPort);
++      this.eventSocket = await this.openSocket(eventPort);
        this.log('event socket connected');
        this.eventSocket.on('data', (data) => this.onEventChannelData(Buffer.from(data)));
 -      this.eventSocket.on('error', (err) => this.log(`event channel error: ${err.message}`));
 -      this.eventSocket.on('close', () => this.log('event channel closed'));
-+      this.eventSocket.on('error', (err) => this.emit('error', err));
-+      this.eventSocket.on('close', () => this.emit('close'));
      }
    }
 
-@@ -455,8 +455,8 @@ export class AirPlayConnection extends EventEmitter {
+@@ -447,16 +519,15 @@ export class AirPlayConnection extends EventEmitter {
+       'DataStream-Input-Encryption-Key',
+       32,
+     );
++    this.assertOpen();
+     this.dataSession = new HAPSession(dataOutputKey, dataInputKey);
+
+     this.log(`connecting data channel to ${this.host}:${dataPort}...`);
+
+-    this.dataSocket = await connectSocket(this.host, dataPort);
++    this.dataSocket = await this.openSocket(dataPort);
      this.log('data socket connected');
 
      this.dataSocket.on('data', (data) => this.onDataChannelData(Buffer.from(data)));
 -    this.dataSocket.on('error', (err) => this.log(`data channel error: ${err.message}`));
 -    this.dataSocket.on('close', () => this.log('data channel closed by remote'));
-+    this.dataSocket.on('error', (err) => this.emit('error', err));
-+    this.dataSocket.on('close', () => this.emit('close'));
      this.dataSocket.on('end', () => this.log('data channel ended by remote'));
 
      // Initialize MRP protocol on data channel
-@@ -471,10 +471,8 @@ export class AirPlayConnection extends EventEmitter {
+@@ -471,10 +542,8 @@ export class AirPlayConnection extends EventEmitter {
        uniqueIdentifier: this.credentials.clientId,
        name: 'Node ATV Remote',
      });
@@ -786,20 +1485,191 @@ index 8851355..b31edb0 100644
      this.log('DeviceInfo exchange complete');
 
      // 2. CryptoPairing is NOT performed over AirPlay transport.
-@@ -492,6 +490,7 @@ export class AirPlayConnection extends EventEmitter {
+@@ -492,34 +561,13 @@ export class AirPlayConnection extends EventEmitter {
        nowPlayingUpdates: true,
        volumeUpdates: true,
        keyboardUpdates: true,
 +      outputDeviceUpdates: true,
      });
-     await this.sendMRPMessage(updatesConfig);
+-    await this.sendMRPMessage(updatesConfig);
++    await this.sendMRPMessageAndWait(updatesConfig);
 
-@@ -749,13 +748,22 @@ export class AirPlayConnection extends EventEmitter {
+     // 5. GetKeyboardSession (pyatv uses send_and_receive)
+     const getKeyboard = await MRPMessage.sendCommand(MessageType.GetKeyboardSession);
+-    await this.sendMRPMessage(getKeyboard);
+-
+-    // Wait a moment for the Apple TV to process init messages and send updates
+-    await new Promise((r) => setTimeout(r, 500));
+-  }
+-
+-  /** Wait for an MRP message of a specific type from the data channel */
+-  private waitForMRPMessage(type: number, timeoutMs = 5000): Promise<Record<string, unknown>> {
+-    return new Promise((resolve, reject) => {
+-      const timer = setTimeout(() => {
+-        const idx = this.pendingMRPResolvers.findIndex((r) => r.type === type);
+-        if (idx >= 0) this.pendingMRPResolvers.splice(idx, 1);
+-        reject(new Error(`Timeout waiting for MRP message type ${type}`));
+-      }, timeoutMs);
+-
+-      this.pendingMRPResolvers.push({
+-        type,
+-        resolve: (msg) => {
+-          clearTimeout(timer);
+-          resolve(msg);
+-        },
+-      });
+-    });
++    await this.sendMRPMessageAndWait(getKeyboard, MessageType.Keyboard);
+   }
+
+   /** Perform MRP-level pair-verify using CryptoPairingMessage */
+@@ -538,11 +586,8 @@ export class AirPlayConnection extends EventEmitter {
+       ephemeralPublicKeyRaw,
+     ]);
+     const m1Msg = await MRPMessage.cryptoPairing(m1Tlv);
+-    const m2Promise = this.waitForMRPMessage(MessageType.CryptoPairing, 10000);
+-    await this.sendMRPMessage(m1Msg);
+-
+     // Wait for M2 response
+-    const m2Response = await m2Promise;
++    const m2Response = await this.sendMRPMessageAndWait(m1Msg, MessageType.CryptoPairing, 10000);
+     const m2PairingData = (m2Response as any)['.cryptoPairingMessage']?.pairingData as Buffer;
+     if (!m2PairingData) throw new Error('M2 missing pairingData');
+
+@@ -620,11 +665,8 @@ export class AirPlayConnection extends EventEmitter {
+       [TlvTag.EncryptedData]: Buffer.concat([ciphertext, tag]),
+     });
+     const m3Msg = await MRPMessage.cryptoPairing(m3Tlv);
+-    const m4Promise = this.waitForMRPMessage(MessageType.CryptoPairing);
+-    await this.sendMRPMessage(m3Msg);
+-
+     // Wait for M4 acknowledgment
+-    await m4Promise;
++    await this.sendMRPMessageAndWait(m3Msg, MessageType.CryptoPairing);
+
+     // Over AirPlay, MRP encryption keys are derived but NOT applied.
+     // The data channel is already encrypted at the transport layer.
+@@ -634,56 +676,44 @@ export class AirPlayConnection extends EventEmitter {
+
+   /** Handle encrypted data after pair-verify is complete */
+   private onEncryptedData(data: Buffer): void {
++    if (this.closed) return;
+     this.encryptedBuffer = Buffer.concat([this.encryptedBuffer, data]);
+     this.tryParseRTSPResponse();
+   }
+
+   private tryParseRTSPResponse(): void {
+-    let decrypted: Buffer;
+     try {
+-      if (this.session && this.encryptedBuffer.length > 0) {
+-        if (!this.hasCompleteHAPFrame(this.encryptedBuffer)) return;
+-        decrypted = this.session.decrypt(this.encryptedBuffer);
+-        this.encryptedBuffer = Buffer.alloc(0);
+-      } else {
+-        decrypted = this.encryptedBuffer;
+-        this.encryptedBuffer = Buffer.alloc(0);
++      if (!this.session) throw new Error('AirPlay encryption not available');
++      while (this.encryptedBuffer.length >= 2) {
++        const size = 2 + this.encryptedBuffer.readUInt16LE(0) + 16;
++        if (this.encryptedBuffer.length < size) break;
++        const frame = this.encryptedBuffer.subarray(0, size);
++        this.encryptedBuffer = this.encryptedBuffer.subarray(size);
++        this.rtspBuffer = Buffer.concat([this.rtspBuffer, this.session.decrypt(frame)]);
+       }
+-    } catch (err) {
+-      this.log(`decrypt error: ${err}`);
+-      return;
+-    }
+-
+-    const parsed = parseHTTPMessage(decrypted);
+-    if (!parsed) {
+-      this.encryptedBuffer = Buffer.from(decrypted);
+-      return;
+-    }
+-
+-    const remaining = decrypted.subarray(parsed.totalSize);
+-    if (remaining.length > 0) {
+-      this.encryptedBuffer = Buffer.from(remaining);
+-    }
+-
+-    this.emit('rtsp-response', { headers: parsed.headers, body: parsed.body });
+-  }
+-
+-  private hasCompleteHAPFrame(buf: Buffer): boolean {
+-    let offset = 0;
+-    while (offset < buf.length) {
+-      if (buf.length - offset < 2) return false;
+-      const frameLen = buf.readUInt16LE(offset);
+-      const totalFrameSize = 2 + frameLen + 16;
+-      if (buf.length - offset < totalFrameSize) return false;
+-      offset += totalFrameSize;
++      while (!this.closed) {
++        const parsed = parseHTTPMessage(this.rtspBuffer);
++        if (!parsed) break;
++        this.rtspBuffer = this.rtspBuffer.subarray(parsed.totalSize);
++        if (parsed.statusCode === undefined) throw new Error('Invalid AirPlay RTSP response');
++        const sequence = parsed.headers.cseq;
++        if (sequence && /^\d+$/.test(sequence) && Number.isSafeInteger(Number(sequence))) {
++          const key = `rtsp:${Number(sequence)}`;
++          if (parsed.statusCode >= 200 && parsed.statusCode < 300) this.pending.resolve(key, parsed);
++          else this.pending.reject(key, new Error(`AirPlay RTSP status ${parsed.statusCode}`));
++        }
++        this.emit('rtsp-response', { headers: parsed.headers, body: parsed.body });
++      }
++    } catch (error) {
++      this.fail(error instanceof Error ? error : new Error('Invalid AirPlay RTSP frame'));
+     }
+-    return true;
+   }
+
+   private eventEncBuffer = Buffer.alloc(0);
+   private eventDecBuffer = Buffer.alloc(0);
+
+   private onEventChannelData(data: Buffer): void {
++    if (this.closed) return;
+     this.eventEncBuffer = Buffer.concat([this.eventEncBuffer, data]);
+     if (!this.eventSession) return;
+
+@@ -699,14 +729,15 @@ export class AirPlayConnection extends EventEmitter {
+       try {
+         const decrypted = this.eventSession.decrypt(frame);
+         this.eventDecBuffer = Buffer.concat([this.eventDecBuffer, decrypted]);
+-      } catch (e) {
+-        this.log(`event channel decrypt error: ${e}`);
++      } catch {
++        this.fail(new Error('Invalid AirPlay event encryption'));
+         return;
+       }
+     }
+
+     // Parse HTTP requests from decrypted data and respond with 200 OK
+-    this.processEventRequests();
++    try { this.processEventRequests(); }
++    catch { this.fail(new Error('Invalid AirPlay event request')); }
+   }
+
+   private processEventRequests(): void {
+@@ -726,13 +757,14 @@ export class AirPlayConnection extends EventEmitter {
+
+       const response = `RTSP/1.0 200 OK\r\n${respHeaders.join('\r\n')}\r\n\r\n`;
+       const encrypted = this.eventSession!.encrypt(Buffer.from(response));
+-      this.eventSocket?.write(encrypted);
++      void this.write(this.eventSocket, encrypted).catch(error => this.fail(error));
+     }
+   }
+
+   private dataEncBuffer = Buffer.alloc(0);
+
+   private onDataChannelData(data: Buffer): void {
++    if (this.closed) return;
+     this.dataEncBuffer = Buffer.concat([this.dataEncBuffer, data]);
+
+     // Wait for complete HAP frames before decrypting
+@@ -749,24 +781,31 @@ export class AirPlayConnection extends EventEmitter {
          this.dataDecBuffer = Buffer.concat([this.dataDecBuffer, decrypted]);
        } catch (e) {
          this.log(`data channel decrypt error: ${e}`);
-+        this.close();
-+        this.emit('error', new Error('Invalid AirPlay data encryption'));
++        this.fail(new Error('Invalid AirPlay data encryption'));
          return;
        }
      }
@@ -811,37 +1681,181 @@ index 8851355..b31edb0 100644
 +      try {
 +        frame = parseDataStreamFrame(this.dataDecBuffer, 0);
 +      } catch {
-+        this.close();
-+        this.emit('error', new Error('Invalid AirPlay data frame'));
++        this.fail(new Error('Invalid AirPlay data frame'));
 +        return;
 +      }
        if (!frame) break;
 
        // Send rply for sync frames from the Apple TV
-@@ -765,8 +773,8 @@ export class AirPlayConnection extends EventEmitter {
-         this.dataSocket?.write(encrypted);
+       if (frame.messageType === 'sync') {
+         const reply = buildDataStreamReply(frame.seqno);
+         const encrypted = this.dataSession!.encrypt(reply);
+-        this.dataSocket?.write(encrypted);
++        void this.write(this.dataSocket, encrypted).catch(error => this.fail(error));
        }
 
 -      if (frame.protobufData) {
 -        this.handleMRPResponse(frame.protobufData);
 +      for (const protobufData of frame.protobufMessages) {
-+        void this.handleMRPResponse(protobufData);
++        this.incomingMRP = this.incomingMRP.then(() => this.handleMRPResponse(protobufData));
        }
 
        // Advance buffer past this frame
+@@ -775,69 +814,108 @@ export class AirPlayConnection extends EventEmitter {
+   }
+
+   private async handleMRPResponse(protobufData: Buffer): Promise<void> {
++    if (this.closed) return;
+     try {
+       const decoded = await MRPMessage.decode(protobufData);
++      if (this.closed) return;
+       const msg = decoded as unknown as Record<string, unknown>;
+       this.log(`MRP response: type=${msg.type}`);
+
+       // Always emit so that listeners (e.g. AppleTV) can observe all messages
+       this.emit('mrp-message', msg);
+
+-      // Also resolve any pending resolver that matches this message type
+-      const idx = this.pendingMRPResolvers.findIndex(
+-        (r) => r.type === undefined || r.type === msg.type,
+-      );
+-      if (idx >= 0) {
+-        const resolver = this.pendingMRPResolvers.splice(idx, 1)[0];
+-        resolver.resolve(msg);
++      const identifier = Object.hasOwn(msg, 'identifier') ? msg.identifier : undefined;
++      const key = identifier ? `mrp:id:${identifier}` : `mrp:type:${msg.type}`;
++      if (this.pending.has(key)) {
++        const expected = this.mrpResponseTypes.get(key);
++        if (typeof msg.errorCode === 'number' && msg.errorCode !== 0) {
++          this.pending.reject(key, new Error(`AirPlay MRP error ${msg.errorCode}`));
++        } else if (expected !== undefined && (!Object.hasOwn(msg, 'type') || msg.type !== expected)) {
++          this.pending.reject(key, new Error('Unexpected AirPlay MRP response type'));
++        } else this.pending.resolve(key, msg);
+       }
+     } catch (e) {
+-      this.log(`MRP decode error: ${e}`);
++      this.fail(new Error('Invalid AirPlay MRP message'));
+     }
+   }
+
+   private startFeedbackHeartbeat(): void {
++    this.assertOpen();
++    let pending = false;
+     this.feedbackInterval = setInterval(async () => {
++      if (pending || this.closed) return;
++      pending = true;
+       try {
+         await this.sendRTSP('POST', '/feedback');
+       } catch (e) {
+-        this.log(`FEEDBACK error: ${e}`);
++        this.fail(new Error('AirPlay heartbeat failed'));
++      } finally {
++        pending = false;
+       }
+     }, 2000);
+   }
+
+   async sendMRPMessageAndWait(
+     protobufData: Buffer,
+-    responseType: number,
++    responseType?: number,
+     timeoutMs = 5000,
+   ): Promise<Record<string, unknown>> {
+-    const waitPromise = this.waitForMRPMessage(responseType, timeoutMs);
+-    await this.sendMRPMessage(protobufData);
+-    return waitPromise;
++    this.assertOpen();
++    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new RangeError('Invalid MRP timeout');
++    const message = await MRPMessage.decode(protobufData);
++    this.assertOpen();
++    const identifier = Object.hasOwn(message, 'identifier') ? message.identifier : undefined;
++    if (!identifier && responseType === undefined) throw new Error('MRP request needs an identifier or response type');
++    const key = identifier ? `mrp:id:${identifier}` : `mrp:type:${responseType}`;
++    const response = this.pending.create<Record<string, unknown>>(key, timeoutMs);
++    this.mrpResponseTypes.set(key, responseType);
++    try {
++      const [, result] = await Promise.all([this.sendMRPMessage(protobufData), response]);
++      return result;
++    } catch (error) {
++      this.pending.reject(key, error instanceof Error ? error : new Error('AirPlay MRP request failed'));
++      throw error;
++    } finally {
++      this.mrpResponseTypes.delete(key);
++    }
+   }
+
+   async sendMRPMessage(protobufData: Buffer): Promise<void> {
++    this.assertOpen();
+     if (!this.dataSocket || !this.dataSession) throw new Error('Data channel not connected');
+     const frame = buildDataStreamFrame(protobufData);
+     const encrypted = this.dataSession.encrypt(frame);
+-    await new Promise<void>((resolve, reject) => {
+-      this.dataSocket!.write(encrypted, (err) => {
+-        if (err) reject(err);
+-        else resolve();
+-      });
+-    });
++    await this.write(this.dataSocket, encrypted);
+   }
+
+-  close(): void {
++  private fail(error: Error): void {
++    if (this.closed) return;
++    this.shutdown(error);
++    if (this.listenerCount('error')) this.emit('error', error);
++  }
++
++  private shutdown(error: Error): void {
++    if (this.closed) return;
++    this.closed = true;
++    this.removeAbortListener?.();
++    this.removeAbortListener = undefined;
++    this.pending.rejectAll(error);
++    this.mrpResponseTypes.clear();
+     if (this.feedbackInterval) {
+       clearInterval(this.feedbackInterval);
+       this.feedbackInterval = undefined;
+     }
+-    this.dataSocket?.destroy();
++    for (const socket of new Set([...this.sockets, this.socket, this.eventSocket, this.dataSocket])) socket?.destroy();
++    this.sockets.clear();
+     this.dataSocket = undefined;
+-    this.eventSocket?.destroy();
+     this.eventSocket = undefined;
+-    this.socket?.destroy();
+     this.socket = undefined;
++    this.rawBuffer = this.encryptedBuffer = this.rtspBuffer = Buffer.alloc(0);
++    this.eventEncBuffer = this.eventDecBuffer = this.dataEncBuffer = this.dataDecBuffer = Buffer.alloc(0);
++    this.session = this.eventSession = this.dataSession = undefined;
++    this.sharedSecret = undefined;
++    this.emit('close');
+   }
++
++  close(): void { this.shutdown(new Error('AirPlay connection closed')); }
+ }
 diff --git a/src/discovery.ts b/src/discovery.ts
-index 3f67678..46f633b 100644
+index 3f67678..9f288b2 100644
 --- a/src/discovery.ts
 +++ b/src/discovery.ts
-@@ -55,6 +55,7 @@ export interface ScanOptions {
+@@ -50,13 +50,16 @@ export class DiscoveredDevice {
+ export interface ScanOptions {
+   timeout?: number;
+   filter?: (device: DiscoveredDevice) => boolean;
++  signal?: AbortSignal;
+ }
+
  export async function scan(options: ScanOptions = {}): Promise<DiscoveredDevice[]> {
    const timeout = options.timeout ?? 5000;
++  options.signal?.throwIfAborted();
    const devices = new Map<string, DiscoveredDevice>();
 +  const companionPorts = new Map<string, number>();
 
-   return new Promise((resolve) => {
+-  return new Promise((resolve) => {
++  return new Promise((resolve, reject) => {
      const instance = new Bonjour();
-@@ -78,6 +79,7 @@ export async function scan(options: ScanOptions = {}): Promise<DiscoveredDevice[
+
+     const browser = instance.find({ type: 'airplay', protocol: 'tcp' }, (service: Service) => {
+@@ -78,6 +81,7 @@ export async function scan(options: ScanOptions = {}): Promise<DiscoveredDevice[
              port: service.port,
              deviceId: parsed.deviceId,
              model: parsed.model,
@@ -849,7 +1863,7 @@ index 3f67678..46f633b 100644
            }),
          );
        }
-@@ -91,6 +93,8 @@ export async function scan(options: ScanOptions = {}): Promise<DiscoveredDevice[
+@@ -91,6 +95,8 @@ export async function scan(options: ScanOptions = {}): Promise<DiscoveredDevice[
          );
          if (!address) return;
 
@@ -858,8 +1872,43 @@ index 3f67678..46f633b 100644
          for (const device of devices.values()) {
            if (device.address === address) {
              device.companionPort = service.port;
+@@ -99,16 +105,27 @@ export async function scan(options: ScanOptions = {}): Promise<DiscoveredDevice[
+       },
+     );
+
+-    setTimeout(() => {
++    let finished = false;
++    const finish = (cancelled = false) => {
++      if (finished) return;
++      finished = true;
++      clearTimeout(timer);
++      options.signal?.removeEventListener('abort', onAbort);
+       browser.stop();
+       companionBrowser.stop();
+       instance.destroy();
+-
+-      let result = Array.from(devices.values());
+-      if (options.filter) {
+-        result = result.filter(options.filter);
++      if (cancelled) { reject(options.signal?.reason); return; }
++      try {
++        let result = Array.from(devices.values());
++        if (options.filter) result = result.filter(options.filter);
++        resolve(result.sort((a, b) => a.name.localeCompare(b.name)));
++      } catch (error) {
++        reject(error);
+       }
+-      resolve(result.sort((a, b) => a.name.localeCompare(b.name)));
+-    }, timeout);
++    };
++    const onAbort = () => finish(true);
++    const timer = setTimeout(() => finish(), timeout);
++    options.signal?.addEventListener('abort', onAbort, { once: true });
++    if (options.signal?.aborted) onAbort();
+   });
+ }
 diff --git a/src/index.ts b/src/index.ts
-index 8466eac..b1b7ac8 100644
+index 8466eac..72d2fbe 100644
 --- a/src/index.ts
 +++ b/src/index.ts
 @@ -4,7 +4,7 @@ export type { KeyboardInfo, TextInputEvent, CompanionEvent } from './appletv.js'
@@ -871,12 +1920,13 @@ index 8466eac..b1b7ac8 100644
  export type { OpackValue, OpackDict } from './companion/opack.js';
  export { FrameType, encodeFrame, parseFrames } from './companion/framing.js';
  export type { Frame } from './companion/framing.js';
-@@ -12,6 +12,7 @@ export { Credentials, parseCredentials } from './credentials.js';
+@@ -12,6 +12,8 @@ export { Credentials, parseCredentials } from './credentials.js';
  export { NowPlayingInfo, PlaybackState } from './now-playing-info.js';
  export { SupportedCommand, Command } from './supported-command.js';
  export { Message } from './message.js';
 +export { MRPMessage, MessageType } from './mrp/messages.js';
  export { AirPlayConnection } from './connection.js';
++export type { AirPlayConnectionOptions } from './connection.js';
  export type { HAPCredentials } from './auth/types.js';
  export type { ScanOptions, DiscoveredDevice } from './discovery.js';
 diff --git a/src/message.ts b/src/message.ts
@@ -1326,3 +2376,43 @@ index f797944..fe9fbfa 100644
  }
 
  /** Build a "rply" frame to acknowledge a received sync frame */
+diff --git a/src/util/pending-requests.ts b/src/util/pending-requests.ts
+new file mode 100644
+index 0000000..e1442c7
+--- /dev/null
++++ b/src/util/pending-requests.ts
+@@ -0,0 +1,34 @@
++type Pending = { resolve(value: unknown): void; reject(error: Error): void };
++
++/** Correlated waits with exact cleanup and a shared connection shutdown boundary. */
++export class PendingRequests {
++  private entries = new Map<string, Pending>();
++
++  constructor(private onTimeout: (error: Error) => void) {}
++
++  create<T>(key: string, timeoutMs: number): Promise<T> {
++    if (this.entries.has(key)) throw new Error('An equivalent AirPlay request is already pending');
++    return new Promise<T>((resolve, reject) => {
++      const finish = () => { clearTimeout(timer); this.entries.delete(key); };
++      const timer = setTimeout(() => {
++        const error = new Error('AirPlay request timed out');
++        this.reject(key, error);
++        this.onTimeout(error);
++      }, timeoutMs);
++      this.entries.set(key, {
++        resolve: value => { finish(); resolve(value as T); },
++        reject: error => { finish(); reject(error); },
++      });
++    });
++  }
++
++  has(key: string): boolean { return this.entries.has(key); }
++
++  resolve(key: string, value: unknown): void { this.entries.get(key)?.resolve(value); }
++
++  reject(key: string, error: Error): void { this.entries.get(key)?.reject(error); }
++
++  rejectAll(error: Error): void {
++    for (const entry of this.entries.values()) entry.reject(error);
++  }
++}
