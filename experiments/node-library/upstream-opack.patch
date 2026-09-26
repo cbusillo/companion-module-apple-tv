@@ -31,6 +31,47 @@ index 1fc2eb1..7cde59a 100644
 -Requires Node.js 18+ (ES2022 target, ESM modules).
 \ No newline at end of file
 +Requires Node.js 18+ (ES2022 target, ESM modules).
+diff --git a/src/__tests__/discovery-order.test.ts b/src/__tests__/discovery-order.test.ts
+new file mode 100644
+index 0000000..b9d5319
+--- /dev/null
++++ b/src/__tests__/discovery-order.test.ts
+@@ -0,0 +1,35 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
++import { scan } from '../discovery.js';
++
++const mock = vi.hoisted(() => ({ callbacks: new Map<string, (service: Record<string, unknown>) => void>(), stopped: vi.fn(), destroyed: vi.fn() }));
++vi.mock('bonjour-service', () => ({
++  Bonjour: class {
++    find(options: { type: string }, callback: (service: Record<string, unknown>) => void) {
++      mock.callbacks.set(options.type, callback);
++      return { stop: mock.stopped };
++    }
++    destroy() { mock.destroyed(); }
++  },
++}));
++
++beforeEach(() => { vi.useFakeTimers(); mock.callbacks.clear(); vi.clearAllMocks(); });
++afterEach(() => vi.useRealTimers());
++
++describe('mDNS service ordering', () => {
++  for (const order of [['airplay', 'companion-link'], ['companion-link', 'airplay']]) {
++    it(`finds the Companion port when ${order[0]} arrives first`, async () => {
++      const services: Record<string, Record<string, unknown>> = {
++        airplay: { name: 'Synthetic TV', addresses: ['192.0.2.10'], port: 7000, txt: { deviceid: 'synthetic-tv', model: 'AppleTV6,2' } },
++        'companion-link': { addresses: ['192.0.2.10'], port: 49153 },
++      };
++      const pending = scan({ timeout: 10 });
++      for (const service of order) mock.callbacks.get(service)!(services[service]);
++      await vi.advanceTimersByTimeAsync(10);
++      const devices = await pending;
++      expect(devices).toHaveLength(1);
++      expect(devices[0].companionPort).toBe(services['companion-link'].port);
++      expect(mock.stopped).toHaveBeenCalledTimes(2);
++      expect(mock.destroyed).toHaveBeenCalledOnce();
++    });
++  }
++});
 diff --git a/src/companion/__tests__/companion-session.test.ts b/src/companion/__tests__/companion-session.test.ts
 index 1fb65bc..cc1c76c 100644
 --- a/src/companion/__tests__/companion-session.test.ts
@@ -48,6 +89,70 @@ index 1fb65bc..cc1c76c 100644
 
      const encryptedPayload = encrypted.subarray(4);
      const decrypted = receiver.decrypt(header, encryptedPayload);
+diff --git a/src/companion/__tests__/event-correlation.test.ts b/src/companion/__tests__/event-correlation.test.ts
+new file mode 100644
+index 0000000..61ef47e
+--- /dev/null
++++ b/src/companion/__tests__/event-correlation.test.ts
+@@ -0,0 +1,58 @@
++import { describe, expect, it } from 'vitest';
++import { CompanionConnection } from '../connection.js';
++import { CompanionSession } from '../companion-session.js';
++import { FrameType } from '../framing.js';
++import { opackDecode, opackEncode, type OpackDict, type OpackValue } from '../opack.js';
++
++function fixture() {
++  const key = Buffer.alloc(32, 7);
++  const connection = new CompanionConnection('unused.invalid', 1, {
++    clientId: 'synthetic', serverId: 'synthetic', clientLTSK: key, clientLTPK: key, serverLTPK: key,
++  });
++  const parser = connection as unknown as {
++    session: CompanionSession;
++    socket: { write(data: Buffer): void; destroy(): void };
++    onData(data: Buffer): void;
++  };
++  parser.session = new CompanionSession(key, key);
++  const peer = new CompanionSession(key, key);
++  const requests: OpackDict[] = [];
++  parser.socket = {
++    write(data): void { requests.push(opackDecode(peer.decrypt(data.subarray(0, 4), data.subarray(4))) as OpackDict); },
++    destroy(): void {},
++  };
++  const receive = (body: OpackDict): void => parser.onData(peer.encrypt(FrameType.E_OPACK, opackEncode(body)));
++  return { connection, requests, receive };
++}
++
++describe('Companion request and event correlation', () => {
++  it('delivers an event with a colliding ID without resolving the pending request', async () => {
++    const { connection, requests, receive } = fixture();
++    const events: unknown[] = [];
++    connection.on('event', (event) => events.push(event));
++    try {
++      const pending = connection.sendRequest('_mcc', new Map<OpackValue, OpackValue>([['_t', 2], ['_c', new Map()]]));
++      const id = requests[0].get('_x');
++      receive(new Map<OpackValue, OpackValue>([['_x', id!], ['_t', 1], ['_i', '_iMC'], ['_c', new Map([['_mcF', 256]])]]));
++      receive(new Map<OpackValue, OpackValue>([['_x', id!], ['_t', 3], ['_c', new Map([['_vol', 0.25]])]]));
++      const reply = await pending;
++      expect(reply.get('_t')).toBe(3);
++      expect((reply.get('_c') as OpackDict).get('_vol')).toBe(0.25);
++      expect(events).toHaveLength(1);
++    } finally { connection.close(); }
++  });
++
++  it('numbers public event messages and subsequent requests independently', async () => {
++    const { connection, requests, receive } = fixture();
++    try {
++      connection.sendMessage('_interest', new Map<OpackValue, OpackValue>([['_t', 1], ['_c', new Map()]]));
++      const first = requests[0].get('_x');
++      expect(first).toBeGreaterThan(0);
++      const pending = connection.sendRequest('_systemInfo', new Map<OpackValue, OpackValue>([['_t', 2], ['_c', new Map()]]));
++      const second = requests[1].get('_x');
++      expect(second).not.toBe(first);
++      receive(new Map<OpackValue, OpackValue>([['_x', second!], ['_t', 3], ['_c', new Map()]]));
++      await pending;
++    } finally { connection.close(); }
++  });
++});
 diff --git a/src/companion/__tests__/framing-compatibility.test.ts b/src/companion/__tests__/framing-compatibility.test.ts
 new file mode 100644
 index 0000000..ff480cb
@@ -246,6 +351,36 @@ index 0000000..fb9a21e
 +    expect(() => opackDecode(Buffer.from('d243666f6fc2', 'hex'))).toThrow();
 +  });
 +});
+diff --git a/src/companion/__tests__/socket-latency.test.ts b/src/companion/__tests__/socket-latency.test.ts
+new file mode 100644
+index 0000000..3a1fba5
+--- /dev/null
++++ b/src/companion/__tests__/socket-latency.test.ts
+@@ -0,0 +1,24 @@
++import { createServer, Socket } from 'node:net';
++import { expect, it, vi } from 'vitest';
++import { CompanionConnection } from '../connection.js';
++
++it('disables TCP batching before time-sensitive Companion events', async () => {
++  const server = createServer(socket => socket.resume());
++  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
++  const address = server.address();
++  if (!address || typeof address === 'string') throw new Error('Missing loopback port');
++  const key = Buffer.alloc(32, 7);
++  const connection = new CompanionConnection('127.0.0.1', address.port, {
++    clientId: 'synthetic', serverId: 'synthetic', clientLTSK: key, clientLTPK: key, serverLTPK: key,
++  });
++  const noDelay = vi.spyOn(Socket.prototype, 'setNoDelay');
++  try {
++    // Exercise the real socket setup without pairing or contacting any device.
++    await (connection as unknown as { openSocket(): Promise<void> }).openSocket();
++    expect(noDelay).toHaveBeenCalledWith(true);
++  } finally {
++    connection.close();
++    noDelay.mockRestore();
++    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
++  }
++});
 diff --git a/src/companion/companion-session.ts b/src/companion/companion-session.ts
 index 9500d2e..5e3db8d 100644
 --- a/src/companion/companion-session.ts
@@ -305,7 +440,7 @@ index 9500d2e..5e3db8d 100644
 
      const ciphertext = encryptedPayload.subarray(0, encryptedPayload.length - AUTH_TAG_LENGTH);
 diff --git a/src/companion/connection.ts b/src/companion/connection.ts
-index 351e7fb..80bb340 100644
+index 351e7fb..8ab5320 100644
 --- a/src/companion/connection.ts
 +++ b/src/companion/connection.ts
 @@ -57,7 +57,8 @@ export class CompanionConnection extends EventEmitter {
@@ -318,7 +453,24 @@ index 351e7fb..80bb340 100644
    private pendingRequests = new Map<number, {
      resolve: (value: OpackDict) => void;
      reject: (error: Error) => void;
-@@ -365,11 +366,10 @@ export class CompanionConnection extends EventEmitter {
+@@ -79,6 +80,8 @@ export class CompanionConnection extends EventEmitter {
+   private openSocket(): Promise<void> {
+     return new Promise((resolve, reject) => {
+       this.socket = new Socket();
++      // Touch events are paced by the caller; Nagle buffering distorts gestures.
++      this.socket.setNoDelay(true);
+       this.socket.connect(this.port, this.host, () => resolve());
+       this.socket.on('error', (err) => {
+         reject(err);
+@@ -288,6 +291,7 @@ export class CompanionConnection extends EventEmitter {
+     }
+
+     content.set('_i', identifier);
++    if (!content.has('_x')) content.set('_x', this.transferId++);
+     const payload = opackEncode(content);
+     const encrypted = this.session.encrypt(FrameType.E_OPACK, payload);
+     this.writeRaw(encrypted);
+@@ -365,11 +369,10 @@ export class CompanionConnection extends EventEmitter {
 
    private processEncryptedFrames(): void {
      // Encrypted frames: 4-byte header + ciphertext + 16-byte tag
@@ -333,6 +485,15 @@ index 351e7fb..80bb340 100644
 
        if (this.buffer.length < totalLen) break;
 
+@@ -395,7 +398,7 @@ export class CompanionConnection extends EventEmitter {
+     const identifier = dict.get('_i');
+
+     // Check if this is a response to a pending request
+-    if (typeof transferId === 'number' && this.pendingRequests.has(transferId)) {
++    if (dict.get('_t') === 3 && typeof transferId === 'number' && this.pendingRequests.has(transferId)) {
+       const pending = this.pendingRequests.get(transferId)!;
+       this.pendingRequests.delete(transferId);
+       pending.resolve(dict);
 diff --git a/src/companion/opack.ts b/src/companion/opack.ts
 index 7641ce2..0918c4b 100644
 --- a/src/companion/opack.ts
@@ -515,6 +676,35 @@ index 7641ce2..0918c4b 100644
      offset = val.offset;
      dict.set(key.value, val.value);
    }
+diff --git a/src/discovery.ts b/src/discovery.ts
+index 3f67678..46f633b 100644
+--- a/src/discovery.ts
++++ b/src/discovery.ts
+@@ -55,6 +55,7 @@ export interface ScanOptions {
+ export async function scan(options: ScanOptions = {}): Promise<DiscoveredDevice[]> {
+   const timeout = options.timeout ?? 5000;
+   const devices = new Map<string, DiscoveredDevice>();
++  const companionPorts = new Map<string, number>();
+
+   return new Promise((resolve) => {
+     const instance = new Bonjour();
+@@ -78,6 +79,7 @@ export async function scan(options: ScanOptions = {}): Promise<DiscoveredDevice[
+             port: service.port,
+             deviceId: parsed.deviceId,
+             model: parsed.model,
++            companionPort: companionPorts.get(address),
+           }),
+         );
+       }
+@@ -91,6 +93,8 @@ export async function scan(options: ScanOptions = {}): Promise<DiscoveredDevice[
+         );
+         if (!address) return;
+
++        companionPorts.set(address, service.port);
++
+         for (const device of devices.values()) {
+           if (device.address === address) {
+             device.companionPort = service.port;
 diff --git a/src/index.ts b/src/index.ts
 index 8466eac..448f1c8 100644
 --- a/src/index.ts
