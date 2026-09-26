@@ -74,6 +74,9 @@ export class NodeController {
 	get audioRevision(): number {
 		return this.commands?.audioRevision ?? -1
 	}
+	get audioOutputIdentity(): string | undefined {
+		return this.commands?.audioOutputIdentity
+	}
 	observe(listener: () => void): () => void {
 		this.listeners.add(listener)
 		return () => {

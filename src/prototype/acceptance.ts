@@ -4,14 +4,24 @@ import type { NodeController, RemoteAction } from './controller.js'
 
 type Controller = Pick<
 	NodeController,
-	'perform' | 'state' | 'reconnects' | 'audioRevision' | 'queryPower' | 'queryVolume' | 'listApps'
+	| 'perform'
+	| 'state'
+	| 'reconnects'
+	| 'audioRevision'
+	| 'audioOutputIdentity'
+	| 'feedback'
+	| 'observe'
+	| 'queryPower'
+	| 'queryVolume'
+	| 'listApps'
 >
-export type AcceptanceMode = 'close-app' | 'power' | 'wake' | 'volume' | 'audio' | 'remaining'
+export type AcceptanceMode = 'close-app' | 'power' | 'wake' | 'volume' | 'audio' | 'audio-output' | 'remaining'
 type Event = {
 	stage: string
 	result: string
 	action?: RemoteAction
 	volume?: number
+	mute?: 'Muted' | 'Unmuted' | 'Unavailable'
 	expected?: 'On' | 'Off'
 	attempt?: number
 }
@@ -42,6 +52,13 @@ export function previewAcceptance(
 	const sleepMs = sleepWait(mode, sleepSeconds)
 	const powerOnly = mode === 'power' || mode === 'wake'
 	return [
+		...(mode === 'audio-output'
+			? [
+					'Mute once, then observe the owner switching to another audio output and back within three minutes',
+					'Confirm the saved mute level clears on the changed output and stays cleared on return; observe five more seconds',
+					'No further volume or routing controls are sent; restore a comfortable volume with the normal remote afterward',
+				]
+			: []),
 		...(mode === 'audio'
 			? [
 					'Keep the same audio output: lower volume five percentage points, restore it, mute, then unmute',
@@ -156,6 +173,90 @@ export async function runAcceptance(controller: Controller, options: Options): P
 				throw new PilotStopped('Volume changed during the observation pause; remaining controls were not sent')
 		}
 	}
+	const outputSequence = async (): Promise<void> => {
+		const originalOutput = controller.audioOutputIdentity
+		const revision = controller.audioRevision
+		const initial = await controller.queryVolume()
+		check()
+		if (originalOutput === undefined || revision < 0 || controller.audioRevision !== revision)
+			throw new PilotStopped('Start with one stable authenticated audio output')
+		if (!Number.isFinite(initial) || initial < 10 || initial > 95)
+			throw new PilotStopped('Start with authenticated volume between 10 and 95 percent')
+		options.record({ stage: 'initial volume', result: 'authenticated report', volume: initial })
+		const action: RemoteAction = { kind: 'mute' }
+		options.record({ stage: 'mute original output', result: 'sending', action })
+		await controller.perform(action)
+		check()
+		if (
+			controller.audioRevision !== revision ||
+			controller.feedback?.mute !== 'Muted' ||
+			controller.feedback.volume !== 0
+		)
+			throw new PilotStopped('Initial mute was not confirmed on the original output')
+		options.record({ stage: 'mute original output', result: 'confirmed; saved level armed', volume: 0, mute: 'Muted' })
+		options.record({ stage: 'manual output round trip', result: 'waiting up to 180 seconds; no further controls' })
+		let changedOutput = false
+		let returned = false
+		let failure: Error | undefined
+		const inspectOutput = (): void => {
+			check()
+			const identity = controller.audioOutputIdentity
+			const feedback = controller.feedback
+			if (!feedback) throw new PilotStopped('Audio feedback became unavailable')
+			if ((changedOutput || (identity !== undefined && identity !== originalOutput)) && feedback.mute === 'Muted')
+				throw new PilotStopped('Saved mute level survived an output change')
+			if (identity === undefined) return
+			if (identity !== originalOutput) {
+				if (returned) throw new PilotStopped('Audio output changed again after returning')
+				if (!changedOutput) {
+					changedOutput = true
+					options.record({ stage: 'changed output', result: 'saved mute level cleared', mute: feedback.mute })
+				}
+			} else if (changedOutput && !returned) {
+				returned = true
+				options.record({
+					stage: 'original output returned',
+					result: 'saved mute level remains cleared',
+					mute: feedback.mute,
+				})
+			} else if (!changedOutput && feedback.volume !== null && feedback.volume > 0) {
+				throw new PilotStopped('Volume changed before the output switch; repeat requires a newly prepared mute')
+			}
+		}
+		// Never throw through the metadata emitter; surface errors in the awaited pilot.
+		const observe = (): void => {
+			if (failure) return
+			try {
+				inspectOutput()
+			} catch (error) {
+				failure = error instanceof Error ? error : new PilotStopped('Output observation failed', { cause: error })
+			}
+		}
+		const checkObservation = (): void => {
+			observe()
+			if (failure) throw failure
+		}
+		const unsubscribe = controller.observe(observe)
+		try {
+			for (let elapsed = 0; elapsed < 180000 && !returned; elapsed += 500) {
+				checkObservation()
+				if (!returned) await pause(500)
+			}
+			checkObservation()
+			if (!returned) throw new PilotStopped('No complete output round trip was observed within 180 seconds')
+			await pause(5000)
+			checkObservation()
+			if (controller.audioOutputIdentity !== originalOutput)
+				throw new PilotStopped('Original audio output is not confirmed at the end of observation')
+			options.record({
+				stage: 'output round trip complete',
+				result: 'saved level stayed cleared; restore volume with the normal remote; physical result unverified',
+				mute: controller.feedback?.mute,
+			})
+		} finally {
+			unsubscribe()
+		}
+	}
 
 	check()
 	if (options.mode === 'power') return powerSequence()
@@ -166,9 +267,10 @@ export async function runAcceptance(controller: Controller, options: Options): P
 		if (current !== 'Off') throw new PilotStopped('Start with the Apple TV already asleep')
 		return wakeSequence()
 	}
-	if (options.mode === 'volume' || options.mode === 'audio') {
+	if (options.mode === 'volume' || options.mode === 'audio' || options.mode === 'audio-output') {
 		if ((await controller.queryPower()) !== 'On') throw new PilotStopped('Start with the Apple TV awake')
 		check()
+		if (options.mode === 'audio-output') return outputSequence()
 		return options.mode === 'audio' ? audioSequence() : volumeSequence()
 	}
 	if (!options.appName.trim()) throw new PilotStopped('Choose an app to close')

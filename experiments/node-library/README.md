@@ -190,8 +190,9 @@ Mute restoration is bound to the complete output list and primary volume ID.
 Output changes, capability loss, external volume changes and disconnects discard
 the saved level. A volume command queued before an output change is rejected.
 Metadata loss closes both sessions; recovery starts a new pair without replaying
-input. These behaviors have offline coverage; live absolute-volume and mute
-effects still require the prepared owner-observed test below.
+input. At `bf981b9`, the owner accepted absolute volume down/restore and
+mute/unmute on one unchanged output, with fresh matching reports and zero
+reconnects. Output-change protection still requires its separate live test.
 
 The normal Companion entry point still uses Python. The new controller and CLI
 are development tools, not an installed replacement or the final pairing UI.
@@ -218,6 +219,28 @@ node dist/prototype/acceptance-live.js --mode audio --run --credentials /private
 The first command is an offline preview. The second requires the owner to be
 ready and writes a new private receipt; protocol confirmation is separate from
 the owner's audible acceptance.
+
+The focused output-change test mutes once, then observes a manual round trip to
+another output and back for up to three minutes. Start audible playback at a
+comfortable level, with authenticated volume between 10 and 95 percent. Once
+muted, select the other output, return to the original one, then restore volume
+with the normal remote. The pilot confirms that the saved mute level clears
+when the authenticated output set changes and stays cleared after returning,
+including five more seconds of observation. Capability loss alone does not
+count as an output change. Output identity comparisons stay inside the process;
+the receipt does not record device identifiers.
+
+```sh
+node dist/prototype/acceptance-live.js --mode audio-output
+node dist/prototype/acceptance-live.js --mode audio-output --run --credentials /private/directory/test.json --report /private/directory/audio-output.json
+```
+
+Only the initial mute sends a volume control. The pilot never selects an output,
+attempts unmute on a changed output, or automatically restores a level. A missing
+round trip, connection change, cancellation or retained mute level stops the
+test; restore volume with the normal remote afterward. Cancellation is triggered
+after 210 seconds including startup, followed by bounded cleanup. This tests saved-level
+invalidation during owner-operated routing, not automated AirPods selection.
 
 The acceptance runner previews offline by default. This command does not
 read credentials, discover devices, or open a network connection:
@@ -466,7 +489,8 @@ Before this can replace the worker, it still needs:
 - Discovery and PIN pairing inside Companion, using its connection secret store.
 - Integration of the persistent controller into Companion, extended lifecycle
   qualification, and supervised acceptance of navigation, swipes, media, and power.
-- Owner-observed absolute-volume and mute restoration, including output changes.
+- Owner-observed saved-mute invalidation across output changes; fixed-output
+  absolute volume and mute/unmute were accepted at `bf981b9`.
 - Long-lived AirPlay lifecycle and Now Playing integration into Companion.
 - Packaged installation tests on the intended operating systems, followed by
   supervised Apple TV acceptance with separate pairing and preserved rollback.

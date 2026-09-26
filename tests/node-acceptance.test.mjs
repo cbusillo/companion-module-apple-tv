@@ -500,3 +500,25 @@ test('audio CLI preview remains offline and describes its complete bounded seque
 	assert.equal(preview.mode, 'offline preview')
 	assert.ok(preview.plan.length > 0)
 })
+
+test('output-change CLI previews offline without reading credentials or creating a receipt', () => {
+	const result = spawnSync(
+		process.execPath,
+		[
+			'dist/prototype/acceptance-live.js',
+			'--mode',
+			'audio-output',
+			'--app',
+			'',
+			'--credentials',
+			'/unreadable/test.json',
+			'--report',
+			'/unwritable/output.json',
+		],
+		{ encoding: 'utf8', timeout: 5000 },
+	)
+	assert.equal(result.status, 0, result.stderr)
+	const preview = JSON.parse(result.stdout)
+	assert.equal(preview.mode, 'offline preview')
+	assert.ok(preview.plan.length > 0)
+})

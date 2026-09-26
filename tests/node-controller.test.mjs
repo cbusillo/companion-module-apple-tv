@@ -7,6 +7,7 @@ import { withCompanionSession } from '../dist/prototype/session.js'
 import { CommandNotSent } from '../dist/prototype/queue.js'
 import { withMetadataSession } from '../dist/prototype/metadata-session.js'
 import { MetadataPeer } from './fixtures/metadata-peer.mjs'
+import { runAcceptance } from '../dist/prototype/acceptance.js'
 
 const credentials = {
 	clientId: 'synthetic',
@@ -411,3 +412,132 @@ test('controller volume and mute use confirmed metadata through one paired lifet
 		await controller.stop()
 	}
 })
+
+test('output pilot observes a slow round trip and sends only the initial mute', async () => {
+	const { controller, peers, metadataPeers } = fixture()
+	const events = []
+	const cancel = new AbortController()
+	let elapsed = 0
+	controller.start()
+	try {
+		await controller.waitUntilReady(2000)
+		const original = controller.audioOutputIdentity
+		assert.ok(original)
+		await runAcceptance(controller, {
+			appName: '',
+			mode: 'audio-output',
+			signal: cancel.signal,
+			record: (event) => events.push(event),
+			pause: async (ms) => {
+				elapsed += ms
+				if (elapsed === 140000) {
+					metadataPeers[0].route(['headphones'])
+					metadataPeers[0].capability()
+					metadataPeers[0].volume(20)
+					assert.notEqual(controller.audioOutputIdentity, original)
+				}
+				if (elapsed === 160000) {
+					metadataPeers[0].route()
+					metadataPeers[0].capability()
+					metadataPeers[0].volume(0)
+				}
+			},
+		})
+		assert.equal(elapsed, 165000)
+		assert.equal(controller.audioOutputIdentity, original)
+		assert.equal(controller.feedback.mute, 'Unavailable')
+		await assert.rejects(controller.perform({ kind: 'mute' }), /No saved volume/)
+		assert.deepEqual(
+			peers[0].requests.filter(({ id }) => id === '_mcc').map(({ content }) => content.get('_vol').value),
+			[0],
+		)
+		assert.deepEqual(
+			events.filter((event) => event.result.includes('cleared')).map((event) => event.stage),
+			['changed output', 'original output returned', 'output round trip complete'],
+		)
+		assert.equal(controller.reconnects, 0)
+		assert.equal(
+			peers[0].requests.some(({ id }) => id === '_hidC'),
+			false,
+		)
+		assert.equal(
+			peers[0].events.some(({ id }) => id === '_hidC'),
+			false,
+		)
+	} finally {
+		await controller.stop()
+	}
+	assert.equal(controller.audioOutputIdentity, undefined)
+})
+
+for (const [scenario, expected] of [
+	['no switch', /No complete output round trip/],
+	['capability loss only', /No complete output round trip/],
+	['no return', /No complete output round trip/],
+	['external volume', /Volume changed before the output switch/],
+	['connection loss', /Connection changed/],
+	['cancel', /abort/i],
+	['stale saved level', /Saved mute level survived/],
+	['report failure', /Synthetic report failure/],
+	['switch after return', /changed again after returning/],
+]) {
+	test(`output pilot stops on ${scenario} without another volume write`, async () => {
+		const { controller, peers, metadataPeers } = fixture()
+		const cancel = new AbortController()
+		let pauses = 0
+		let observers = 0
+		controller.start()
+		try {
+			await controller.waitUntilReady(2000)
+			const subscribe = controller.observe.bind(controller)
+			controller.observe = (listener) => {
+				observers++
+				const unsubscribe = subscribe(listener)
+				return () => {
+					observers--
+					unsubscribe()
+				}
+			}
+			await assert.rejects(
+				runAcceptance(controller, {
+					appName: '',
+					mode: 'audio-output',
+					signal: cancel.signal,
+					record: (event) => {
+						if (scenario === 'report failure' && event.stage === 'changed output')
+							throw new Error('Synthetic report failure')
+					},
+					pause: async () => {
+						pauses++
+						const peer = metadataPeers[0]
+						if (pauses === 1) {
+							if (scenario === 'capability loss only') peer.capability(false)
+							if (scenario === 'external volume') peer.volume(15)
+							if (scenario === 'connection loss') peer.close()
+							if (scenario === 'cancel') cancel.abort()
+							if (scenario === 'stale saved level') {
+								const feedback = controller.feedback
+								Object.defineProperty(controller, 'feedback', { get: () => feedback })
+							}
+							if (['no return', 'stale saved level', 'report failure', 'switch after return'].includes(scenario))
+								peer.route(['headphones'])
+						}
+						if (scenario === 'switch after return') {
+							if (pauses === 2) peer.route()
+							if (pauses === 3) peer.route(['headphones'])
+						}
+					},
+				}),
+				expected,
+			)
+			assert.equal(observers, 0, 'Pilot observation must be detached on every exit')
+			assert.ok(pauses <= 360)
+			assert.deepEqual(
+				peers[0].requests.filter(({ id }) => id === '_mcc').map(({ content }) => content.get('_vol').value),
+				[0],
+			)
+		} finally {
+			await controller.stop()
+		}
+	})
+}

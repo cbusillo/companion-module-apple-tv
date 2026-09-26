@@ -109,6 +109,10 @@ export class CompanionPrototype {
 	get audioRevision(): number {
 		return this.outputRevision
 	}
+	/** Opaque identity for comparing authenticated output sets without logging device IDs. */
+	get audioOutputIdentity(): string | undefined {
+		return this.output
+	}
 
 	observe(listener: () => void): () => void {
 		this.listeners.add(listener)
