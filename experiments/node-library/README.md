@@ -377,8 +377,10 @@ Independent synthetic pyatv packets cover the patched codec and metadata reducer
 The library's encrypted receive regression splits a coalesced pair of batches
 across TCP chunks and checks all 24 messages and both acknowledgements. The
 read-only live repeat received volume 30%, matching the Python reference, plus
-authenticated output identity and capability messages. Dynamic volume changes,
-Now Playing during real playback, and output switching still need observation.
+authenticated output identity and capability messages. At `47b2070`, the owner
+accepted the matching YouTube title, Playing/Paused/Playing transitions, and
+volume feedback 30/25/30 while using the normal remote. Output switching and
+position interpolation remain unqualified. No agent-sent control was involved.
 
 The new pilot follows explicit active-client/player selection, merges partial
 content updates, ignores other outputs' volume, requires absolute-volume
@@ -397,11 +399,26 @@ The first command is an offline preview. Observation lasts 5-60 seconds after
 connection, with a separate twenty-second startup limit. Ctrl-C or connection
 loss stops it; it never reconnects. The receipt is created with mode 0600 without
 overwriting, and can contain private titles and output identifiers. Terminal
-output omits device identifiers. Raw library logging is consumed privately by an
-isolated worker. The supervisor always terminates that worker and its pending
-handles, including late connection attempts. This bounds the development tool;
-it does not qualify the library's long-lived AirPlay lifecycle. RTSP fragmentation,
-request correlation, and cancellation still need qualification before integration.
+output omits device identifiers. The library logger is disabled for this pilot.
+The observer now connects directly and closes through the library's native
+cancellation path. Completion, cancellation, failure, and report errors close the
+session and clear feedback. Discovery cancellation also stops mDNS work. The
+earlier worker-termination workaround is no longer used.
+
+The library patch now separates encrypted fragments from partial plaintext RTSP
+replies, processes coalesced replies, correlates CSeq and MRP identifiers, rejects
+protocol errors, and registers pending replies before writing. Closing rejects
+pending socket/authentication/write/request work and cancels heartbeat timers.
+Only one heartbeat remains outstanding. Ten regressions failed against the prior
+library before these repairs; additional tests cover simultaneous MRP requests,
+late messages, cancellation during TCP connect, peer loss, heartbeat cleanup, and
+discovery cancellation. Downstream CI exercises the installed npm patch's public
+API against a stalled loopback peer as well as the metadata observation lifecycle.
+
+Two native read-only sessions against the TV each connected, observed metadata,
+closed once without errors, and left no TCP sockets; the diagnostic process exited
+naturally. These tests cover the reproduced transport defects. Longer outage/soak
+coverage and integration with the persistent controls controller remain to be done.
 The installed Python-backed entry point and its package remain unchanged.
 
 ## Remaining qualification
