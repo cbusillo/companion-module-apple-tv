@@ -175,6 +175,23 @@ test('power toggles use an actual query and never guess from Unknown', async () 
 	)
 })
 
+test('explicit sleep and wake preserve their requested direction regardless of cached power', async () => {
+	const { controls, requests } = fixture()
+	controls.receiveEvent(event('SystemStatus', [['state', 3]]))
+	await controls.setPower('On')
+	controls.receiveEvent(event('SystemStatus', [['state', 1]]))
+	await controls.setPower('Off')
+	assert.deepEqual(
+		requests.map(({ id, content }) => [id, content.get('_hidC'), content.get('_hBtS')]),
+		[
+			['_hidC', 13, 2],
+			['_hidC', 12, 2],
+		],
+	)
+	await assert.rejects(controls.setPower('Unknown'), RangeError)
+	assert.equal(requests.length, 2)
+})
+
 test('fresh pushed power can replace an unsupported query, but expires and accepts Unknown', async () => {
 	const { controls, client, advance } = fixture()
 	client.sendCompanionRequest = async () => new Map([['_ec', 58822]])

@@ -246,6 +246,35 @@ test('stopping an idle session discards a queued volume refresh', async () => {
 	assert.equal(peers[0].requests.at(-1).id, '_sessionStop')
 })
 
+test('status queries share the gesture queue and reject offline calls', async () => {
+	const { controller, peers } = fixture()
+	await assert.rejects(controller.queryPower(), CommandNotSent)
+	controller.start()
+	try {
+		await controller.waitUntilReady(2000)
+		const held = Promise.withResolvers()
+		peers[0].onRequest = async (id, content) => {
+			if (id === '_hidC' && content.get('_hBtS') === 1) await held.promise
+		}
+		const gesture = controller.perform({ kind: 'button', button: 'select' })
+		await until(() => peers[0].requests.some(({ id }) => id === '_hidC'))
+		const query = controller.queryVolume()
+		await delay(10)
+		assert.equal(peers[0].requests.at(-1).id, '_hidC')
+		held.resolve(undefined)
+		await gesture
+		assert.equal(await query, 20)
+		assert.equal(peers[0].requests.at(-2).content.get('_hBtS'), 2)
+		assert.equal(peers[0].requests.at(-1).id, '_mcc')
+		assert.equal(await controller.queryPower(), 'On')
+		assert.equal((await controller.listApps())[0].id, 'com.example.app')
+		await controller.perform({ kind: 'power', state: 'On' })
+		assert.equal(peers[0].requests.at(-1).content.get('_hidC'), 13)
+	} finally {
+		await controller.stop()
+	}
+})
+
 for (const source of ['control', 'volume', 'health']) {
 	test(`a ${source} timeout invalidates pending input before the queue advances`, async () => {
 		const { controller, peers } = fixture({ healthIntervalMs: source === 'health' ? 5 : 30000 })

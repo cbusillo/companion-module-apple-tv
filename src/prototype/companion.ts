@@ -257,10 +257,16 @@ export class CompanionPrototype {
 	async togglePower(): Promise<void> {
 		const state = await this.readPower()
 		if (state === 'Unknown') throw new UnsupportedCommand('Unknown power state; no power command sent')
+		await this.setPower(state === 'On' ? 'Off' : 'On')
+	}
+
+	/** Explicit sleep/wake cannot turn into the opposite command if state changes. */
+	async setPower(state: 'On' | 'Off'): Promise<void> {
+		if (state !== 'On' && state !== 'Off') throw new RangeError('Power target must be On or Off')
 		const revision = this.powerRevision
 		await this.request('_hidC', [
 			['_hBtS', 2],
-			['_hidC', state === 'On' ? 12 : 13],
+			['_hidC', state === 'Off' ? 12 : 13],
 		])
 		if (revision === this.powerRevision) this.power = 'Unknown'
 		this.changed()

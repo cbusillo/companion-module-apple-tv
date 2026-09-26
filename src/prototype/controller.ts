@@ -8,6 +8,7 @@ import {
 	type CommandState,
 	type Direction,
 	type MediaCommand,
+	type Power,
 } from './companion.js'
 import { bounded, withCompanionSession, type Target } from './session.js'
 import { CommandNotSent, CommandQueue } from './queue.js'
@@ -19,7 +20,8 @@ export type RemoteAction =
 	| { kind: 'volume'; percent: number }
 	| { kind: 'swipe'; direction: Direction }
 	| { kind: 'launch'; bundleId: string }
-	| { kind: 'power' | 'mute' }
+	| { kind: 'power'; state?: 'On' | 'Off' }
+	| { kind: 'mute' }
 
 type State = 'stopped' | 'connecting' | 'ready' | 'reconnecting'
 type Options = {
@@ -130,7 +132,7 @@ export class NodeController {
 					case 'launch':
 						return commands.launchApp(action.bundleId)
 					case 'power':
-						return commands.togglePower()
+						return action.state === undefined ? commands.togglePower() : commands.setPower(action.state)
 					case 'mute':
 						return commands.toggleMute()
 					default:
@@ -140,6 +142,26 @@ export class NodeController {
 		} finally {
 			this.refreshVolume()
 		}
+	}
+
+	private async query<T>(operation: (commands: CompanionPrototype) => Promise<T>): Promise<T> {
+		const commands = this.commands
+		const session = this.endSession
+		if (this.stopRequested || this.phase !== 'ready' || !commands?.active || !session)
+			throw new CommandNotSent('Not connected; query not sent')
+		return this.queueCommand(session, 'Status query failed', async () => operation(commands))
+	}
+
+	async queryPower(): Promise<Power> {
+		return this.query(async (commands) => commands.readPower())
+	}
+
+	async queryVolume(): Promise<number> {
+		return this.query(async (commands) => commands.readVolume())
+	}
+
+	async listApps(): Promise<{ id: string; name: string }[]> {
+		return this.query(async (commands) => commands.listApps())
 	}
 
 	private async queueCommand<T>(

@@ -168,6 +168,38 @@ wired into this pilot.
 The normal Companion entry point still uses Python. The new controller and CLI
 are development tools, not an installed replacement or the final pairing UI.
 
+### Prepare before asking for physical observation
+
+Build and test the code first, then finish the conversation turn with the exact
+sequence and wait for the owner to say they are watching. Do not start a device
+test or ask the owner to watch partway through a coding turn.
+
+The remaining-controls runner previews offline by default. This command does not
+read credentials, discover devices, or open a network connection:
+
+```sh
+node dist/prototype/acceptance-live.js --app YouTube
+```
+
+After the owner confirms they are watching, run the already-prepared command:
+
+```sh
+node dist/prototype/acceptance-live.js --app YouTube --run --credentials /private/directory/test.json --report /private/directory/remaining-controls.json
+```
+
+The script first checks that the TV reports On, the app name uniquely matches
+an installed app, and reported volume is between 5 and 95 percent. It then sends
+one volume-down/up pair, foregrounds the selected app, opens App Switcher, swipes
+up, and tests explicit sleep followed by explicit wake. Every control has a
+five-second observation pause. Power transitions require reported Off/On, with
+bounded read-only polling; uncertain state cannot become a reversed power toggle.
+
+Cancellation, a failed command, or connection loss stops remaining controls.
+Nothing is retried, including the wake command. If it stops after sleep, use the
+normal remote to wake the TV. The private report is created before controls and
+never overwrites another report. Command acknowledgements and reported power
+remain separate from owner-observed results.
+
 ### Pilot evidence (September 26, 2026)
 
 Separate PIN pairing completed on one Apple TV. Fresh Node sessions discovered
