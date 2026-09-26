@@ -42,6 +42,15 @@ events omitted transaction IDs; and discovery lost the Companion port when that
 mDNS advertisement arrived before AirPlay. Regression tests cover both service
 orders and event/request collisions.
 
+The upward close gesture initially bounced back on the real TV. The replacement
+now matches the locked pyatv implementation's motion, timestamp origin, and
+release sequence. An independent test executes pyatv itself with controlled
+clocks and compares all four directions under normal, jittered, and stalled
+timers (12 traces); the old Node implementation fails this comparison. Companion
+TCP sockets also disable Nagle buffering, matching Python asyncio's low-latency
+socket behavior. These corrections still require a physical close-app repeat;
+the failed gesture's exact physical cause is not yet proven.
+
 Eight regression tests reproduced the numeric, reference, and framing failures
 before the changes. The extended library suite passes with the candidate.
 Golden app-list and numeric packets were generated independently with the locked
@@ -174,7 +183,7 @@ Build and test the code first, then finish the conversation turn with the exact
 sequence and wait for the owner to say they are watching. Do not start a device
 test or ask the owner to watch partway through a coding turn.
 
-The remaining-controls runner previews offline by default. This command does not
+The acceptance runner previews offline by default. This command does not
 read credentials, discover devices, or open a network connection:
 
 ```sh
@@ -184,15 +193,20 @@ node dist/prototype/acceptance-live.js --app YouTube
 After the owner confirms they are watching, run the already-prepared command:
 
 ```sh
-node dist/prototype/acceptance-live.js --app YouTube --run --credentials /private/directory/test.json --report /private/directory/remaining-controls.json
+node dist/prototype/acceptance-live.js --app YouTube --mode close-app --run --credentials /private/directory/test.json --report /private/directory/close-app.json
 ```
 
-The script first checks that the TV reports On, the app name uniquely matches
-an installed app, and reported volume is between 5 and 95 percent. It then sends
-one volume-down/up pair, foregrounds the selected app, opens App Switcher, swipes
-up, and tests explicit sleep followed by explicit wake. Every control has a
-five-second observation pause. Power transitions require reported Off/On, with
-bounded read-only polling; uncertain state cannot become a reversed power toggle.
+The default `close-app` mode checks that the TV reports On and the app name
+uniquely matches an installed app. It foregrounds that app, opens App Switcher,
+swipes up, and stops. Every control has a five-second observation pause. It does
+not require volume support or send volume or power controls.
+
+The explicit `--mode remaining` sequence also requires reported volume between
+5 and 95 percent. It tests volume down/up before closing the app, then explicit
+sleep followed by explicit wake. Every power poll is recorded, including unknown
+or unchanged values. Uncertain state cannot become a reversed power toggle.
+Wake is not yet physically qualified; do not include this mode in the focused
+close-app repeat.
 
 Cancellation, a failed command, or connection loss stops remaining controls.
 Nothing is retried, including the wake command. If it stops after sleep, use the
@@ -211,7 +225,16 @@ module, its credentials, and its packaged artifact were not replaced.
 The controls-stage read-only pilot received live power, capability, and volume
 updates without reconnects. Closing only that test client's socket then exercised
 rediscovery and automatic reconnection to the real TV. No control was sent during
-those checks. The newly added controls still need supervised screen acceptance.
+those checks. Later supervised runs supplied the physical results below.
+
+The owner subsequently accepted navigation, horizontal swipes, Select, Home,
+Control Center/Back, Twitch Play/Pause, and YouTube -10/+10-second seeks. The
+remaining-controls run failed: the owner saw the YouTube card bounce instead of
+close, and the TV stayed off after the acknowledged wake. Volume was not
+physically confirmed. One separately requested Home press recovered reported
+power to On in fresh Node and installed-module checks; physical recovery remains
+an owner observation. The close-app corrections and direct wake remain
+unqualified. No automatic control retry or installed-module change was made.
 
 This qualifies an initial developer pilot on that device. It does not qualify
 all controls, tvOS versions, supported operating systems, or end-user installation.
@@ -243,3 +266,4 @@ prototype. Fixing its existing setup instructions is a separate change.
 - [pyatv media and power commands](https://github.com/postlund/pyatv/blob/v0.18.0/pyatv/protocols/companion/__init__.py)
 - [OPACK protocol and reference examples](https://pyatv.dev/documentation/protocols/#opack)
 - [pyatv encrypted frame implementation](https://github.com/postlund/pyatv/blob/v0.18.0/pyatv/protocols/companion/connection.py)
+- [Node TCP no-delay behavior](https://nodejs.org/docs/latest-v22.x/api/net.html#socketsetnodelaynodelay)

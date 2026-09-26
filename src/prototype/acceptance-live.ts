@@ -1,7 +1,7 @@
 /** Offline preview by default; an explicit --run starts the prepared device test. */
 import { open } from 'node:fs/promises'
 import { parseArgs } from 'node:util'
-import { PilotStopped, previewAcceptance, runAcceptance } from './acceptance.js'
+import { PilotStopped, previewAcceptance, runAcceptance, type AcceptanceMode } from './acceptance.js'
 import { loadTestCredentials } from './credentials.js'
 import { NodeController } from './controller.js'
 
@@ -9,6 +9,7 @@ async function main(): Promise<void> {
 	const { values } = parseArgs({
 		options: {
 			app: { type: 'string', default: 'YouTube' },
+			mode: { type: 'string', default: 'close-app' },
 			run: { type: 'boolean' },
 			credentials: { type: 'string' },
 			report: { type: 'string' },
@@ -16,13 +17,15 @@ async function main(): Promise<void> {
 		},
 	})
 	if (values.help) {
-		process.stdout.write(`Prepared remaining-controls test (Node 22):
+		process.stdout.write(`Prepared physical test (Node 22):
   node dist/prototype/acceptance-live.js --app YouTube
   node dist/prototype/acceptance-live.js --app YouTube --run --credentials /private/test.json --report /private/result.json
 
 Without --run: offline preview only; no credential access or network connection.
-Run only after the owner is watching. Playback will stop and the TV may go blank.
-Requires an awake TV, reported volume 5-95%, and one exact app-name match.
+Run only after the owner is watching. Requires an awake TV and one exact app-name match.
+Default --mode close-app: open the app, enter App Switcher, swipe up, then stop.
+Explicit --mode remaining also tests volume and sleep/wake; requires volume 5-95%.
+Playback will stop. Remaining mode briefly blanks the TV and wake is not yet qualified.
 Ctrl-C, error, or connection loss stops remaining controls; no command is retried.
 If the test stops after sleep, wake the TV with its normal remote.
 Reports are created privately and never overwrite an existing file.
@@ -30,7 +33,9 @@ Reports are created privately and never overwrite an existing file.
 		return
 	}
 	if (!values.app.trim()) throw new Error('An app name is required')
-	const plan = previewAcceptance(values.app)
+	if (values.mode !== 'close-app' && values.mode !== 'remaining') throw new Error('Invalid acceptance mode')
+	const mode: AcceptanceMode = values.mode
+	const plan = previewAcceptance(values.app, mode)
 	if (!values.run) {
 		process.stdout.write(`${JSON.stringify({ mode: 'offline preview', plan })}\n`)
 		return
@@ -56,6 +61,7 @@ Reports are created privately and never overwrite an existing file.
 		await controller.waitUntilReady(15000)
 		await runAcceptance(controller, {
 			appName: values.app,
+			mode,
 			signal: cancel.signal,
 			record: (event) => {
 				const entry = { ...event, at: new Date().toISOString() }

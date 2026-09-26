@@ -329,31 +329,38 @@ export class CompanionPrototype {
 		}
 		if (!Object.hasOwn(paths, direction)) throw new RangeError('Invalid swipe direction')
 		if (this.touchStart === undefined) {
+			const origin = this.now()
 			await this.request('_touchStart', [
 				['_height', new OpackFloat(1000)],
 				['_width', new OpackFloat(1000)],
 				['_tFl', 0],
 			])
-			this.touchStart = this.now()
+			this.touchStart = origin
 		}
 		const [x0, y0, x1, y1] = paths[direction]
-		const started = this.now()
+		const end = this.now() + 100_000_000n
 		const send = (phase: number, x: number, y: number): void =>
 			this.event('_hidT', [
 				['_ns', this.now() - this.touchStart!],
 				['_tFg', 1],
-				['_cx', Math.round(x)],
-				['_cy', Math.round(y)],
+				['_cx', Math.trunc(x)],
+				['_cy', Math.trunc(y)],
 				['_tPh', phase],
 			])
 		try {
 			send(1, x0, y0)
-			for (let frame = 0; frame < 7; frame++) {
-				const elapsed = Number(this.now() - started) / 1e6
-				if (elapsed >= 100) break
-				await this.pause(Math.min(16, 100 - elapsed))
-				const progress = Math.min(1, Number(this.now() - started) / 100_000_000)
-				if (progress < 1) send(3, x0 + (x1 - x0) * progress, y0 + (y1 - y0) * progress)
+			let x = x0
+			let y = y0
+			let current = this.now()
+			// Match pyatv's accepted brisk gesture, including its immediate first Hold
+			// and remaining-time interpolation. A wait-first linear swipe is different.
+			while (current < end) {
+				const remaining = Number(end - current)
+				x = Math.max(0, Math.min(1000, x + ((x1 - x) * 16 * 1_000_000) / remaining))
+				y = Math.max(0, Math.min(1000, y + ((y1 - y) * 16 * 1_000_000) / remaining))
+				send(3, x, y)
+				await this.pause(16)
+				current = this.now()
 			}
 		} finally {
 			send(4, x1, y1)

@@ -31,6 +31,7 @@ function fixture() {
 	}
 	const options = {
 		appName: 'Player',
+		mode: 'remaining',
 		signal: cancel.signal,
 		record: (event) => events.push(event),
 		pause: async (ms) => {
@@ -59,6 +60,18 @@ test('prepared pilot foregrounds its target, closes it, and uses explicit sleep 
 		events.filter((event) => event.stage === 'power report').map((event) => event.result),
 		['Off', 'On'],
 	)
+})
+
+test('default focused pilot closes the selected app and stops without volume or power controls', async () => {
+	const { controller, options, actions } = fixture()
+	delete options.mode
+	controller.queryVolume = async () => assert.fail('The focused test must not require volume support')
+	await runAcceptance(controller, options)
+	assert.deepEqual(actions, [
+		{ kind: 'launch', bundleId: 'com.example.player' },
+		{ kind: 'button', button: 'appSwitcher' },
+		{ kind: 'swipe', direction: 'up' },
+	])
 })
 
 test('preflight refuses an absent or ambiguous app before any control', async () => {
@@ -120,14 +133,17 @@ test('an unconfirmed sleep state never turns into a blind toggle or repeated sle
 	)
 })
 
-test('a wake acknowledgement without reported On does not pass or trigger another wake', async () => {
-	const { controller, options, actions } = fixture()
+test('a wake acknowledgement without reported On retains every poll and never triggers another wake', async () => {
+	const { controller, options, actions, events } = fixture()
 	controller.queryPower = async () => {
 		const lastPower = actions.filter((action) => action.kind === 'power').at(-1)
 		return lastPower?.state === 'On' ? 'Unknown' : (lastPower?.state ?? 'On')
 	}
 	await assert.rejects(runAcceptance(controller, options), /Power did not report On/)
 	assert.equal(actions.filter((action) => action.kind === 'power' && action.state === 'On').length, 1)
+	const polls = events.filter((event) => event.stage === 'power report' && event.expected === 'On')
+	assert.equal(polls.length, 10)
+	assert.ok(polls.every((event, index) => event.result === 'Unknown' && event.attempt === index + 1))
 })
 
 test('default CLI preview does not read credentials or connect to a device', () => {

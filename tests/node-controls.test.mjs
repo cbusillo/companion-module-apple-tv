@@ -229,8 +229,9 @@ test('all cardinal swipes use bounded coordinates, monotonic timestamps, and one
 		assert.deepEqual([touches.at(-1).get('_cx'), touches.at(-1).get('_cy')], end)
 		assert.equal(touches[0].get('_tPh'), 1)
 		assert.equal(touches.filter((content) => content.get('_tPh') === 4).length, 1)
-		assert.equal(touches.at(-1).get('_ns'), 100000000n)
-		assert.ok(touches.every((content, index) => index === 0 || content.get('_ns') > touches[index - 1].get('_ns')))
+		assert.ok(touches.at(-1).get('_ns') >= 100000000n)
+		assert.ok(touches.at(-1).get('_ns') < 120000000n)
+		assert.ok(touches.every((content, index) => index === 0 || content.get('_ns') >= touches[index - 1].get('_ns')))
 		await controls.stopTouch()
 		assert.deepEqual(
 			requests.map(({ id }) => id),

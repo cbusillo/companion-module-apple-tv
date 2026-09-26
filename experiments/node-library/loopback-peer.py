@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 from typing import Any, TypedDict
 
+from gesture_parity import check_gestures
 from pyatv.auth.server_auth import PIN_CODE
 from pyatv.protocols.companion.connection import FrameType
 from pyatv.protocols.companion.server_auth import CompanionServerAuth
@@ -165,6 +166,7 @@ async def main() -> None:
     root = Path(__file__).resolve().parents[2]
     process = None
     try:
+        await check_gestures(root)
         for fixture in ("node-peer-client.mjs", "node-reconnect-peer-client.mjs"):
             state["drop_next_right"] = fixture == "node-reconnect-peer-client.mjs"
             process = await asyncio.create_subprocess_exec("node", str(root / "tests/fixtures" / fixture), str(port), str(PIN_CODE))

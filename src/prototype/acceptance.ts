@@ -3,9 +3,18 @@ import { setTimeout as delay } from 'node:timers/promises'
 import type { NodeController, RemoteAction } from './controller.js'
 
 type Controller = Pick<NodeController, 'perform' | 'state' | 'reconnects' | 'queryPower' | 'queryVolume' | 'listApps'>
-type Event = { stage: string; result: string; action?: RemoteAction; volume?: number }
+export type AcceptanceMode = 'close-app' | 'remaining'
+type Event = {
+	stage: string
+	result: string
+	action?: RemoteAction
+	volume?: number
+	expected?: 'On' | 'Off'
+	attempt?: number
+}
 type Options = {
 	appName: string
+	mode?: AcceptanceMode
 	signal: AbortSignal
 	record: (event: Event) => void
 	pause?: (ms: number) => Promise<void>
@@ -13,11 +22,11 @@ type Options = {
 
 export class PilotStopped extends Error {}
 
-export function previewAcceptance(appName: string): string[] {
+export function previewAcceptance(appName: string, mode: AcceptanceMode = 'close-app'): string[] {
 	return [
-		'Volume down one step, then up one step',
+		...(mode === 'remaining' ? ['Volume down one step, then up one step'] : []),
 		`Open ${appName}, open App Switcher, then swipe up to close the focused app`,
-		'Put Apple TV to sleep, verify Off, then wake it and verify On',
+		...(mode === 'remaining' ? ['Put Apple TV to sleep, verify Off, then wake it and verify On'] : []),
 		'Five-second observation pauses; stop on error or connection loss; no command retries',
 	]
 }
@@ -44,10 +53,9 @@ export async function runAcceptance(controller: Controller, options: Options): P
 	const expectPower = async (expected: 'On' | 'Off'): Promise<void> => {
 		for (let attempt = 0; attempt < 10; attempt++) {
 			check()
-			if ((await controller.queryPower()) === expected) {
-				options.record({ stage: 'power report', result: expected })
-				return
-			}
+			const result = await controller.queryPower()
+			options.record({ stage: 'power report', result, expected, attempt: attempt + 1 })
+			if (result === expected) return
 			await pause(1000)
 		}
 		throw new PilotStopped(`Power did not report ${expected}; remaining controls were not sent`)
@@ -60,19 +68,21 @@ export async function runAcceptance(controller: Controller, options: Options): P
 	check()
 	if ((await controller.queryPower()) !== 'On') throw new PilotStopped('Start with the Apple TV awake')
 	check()
-	const volume = await controller.queryVolume()
-	if (!Number.isFinite(volume) || volume < 5 || volume > 95)
-		throw new PilotStopped('Start with reported volume between 5 and 95 percent to avoid an end stop')
-	options.record({ stage: 'initial volume', result: 'reported', volume })
-
-	await step('volume down', { kind: 'button', button: 'volumeDown' })
-	await step('volume up', { kind: 'button', button: 'volumeUp' })
-	const after = await controller.queryVolume()
-	options.record({ stage: 'final volume', result: 'reported; physical result unverified', volume: after })
+	if (options.mode === 'remaining') {
+		const volume = await controller.queryVolume()
+		if (!Number.isFinite(volume) || volume < 5 || volume > 95)
+			throw new PilotStopped('Start with reported volume between 5 and 95 percent to avoid an end stop')
+		options.record({ stage: 'initial volume', result: 'reported', volume })
+		await step('volume down', { kind: 'button', button: 'volumeDown' })
+		await step('volume up', { kind: 'button', button: 'volumeUp' })
+		const after = await controller.queryVolume()
+		options.record({ stage: 'final volume', result: 'reported; physical result unverified', volume: after })
+	}
 	// Foreground the exact discovered app before entering the switcher.
 	await step('open selected app', { kind: 'launch', bundleId: apps[0].id })
 	await step('App Switcher', { kind: 'button', button: 'appSwitcher' })
 	await step('close focused app', { kind: 'swipe', direction: 'up' })
+	if (options.mode !== 'remaining') return
 	check()
 	if ((await controller.queryPower()) !== 'On') throw new PilotStopped('Power changed before the sleep test')
 	await step('sleep', { kind: 'power', state: 'Off' })
