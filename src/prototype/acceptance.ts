@@ -2,8 +2,11 @@
 import { setTimeout as delay } from 'node:timers/promises'
 import type { NodeController, RemoteAction } from './controller.js'
 
-type Controller = Pick<NodeController, 'perform' | 'state' | 'reconnects' | 'queryPower' | 'queryVolume' | 'listApps'>
-export type AcceptanceMode = 'close-app' | 'power' | 'wake' | 'volume' | 'remaining'
+type Controller = Pick<
+	NodeController,
+	'perform' | 'state' | 'reconnects' | 'audioRevision' | 'queryPower' | 'queryVolume' | 'listApps'
+>
+export type AcceptanceMode = 'close-app' | 'power' | 'wake' | 'volume' | 'audio' | 'remaining'
 type Event = {
 	stage: string
 	result: string
@@ -39,6 +42,12 @@ export function previewAcceptance(
 	const sleepMs = sleepWait(mode, sleepSeconds)
 	const powerOnly = mode === 'power' || mode === 'wake'
 	return [
+		...(mode === 'audio'
+			? [
+					'Keep the same audio output: lower volume five percentage points, restore it, mute, then unmute',
+					'Each volume write needs a new matching TV volume report; any output change stops the remaining steps',
+				]
+			: []),
 		...(mode === 'remaining' || mode === 'volume'
 			? ['Volume down one step, then up one step; report before and after each step']
 			: []),
@@ -118,6 +127,35 @@ export async function runAcceptance(controller: Controller, options: Options): P
 		check()
 		options.record({ stage: 'final volume', result: 'reported; physical result unverified', volume: after })
 	}
+	const audioSequence = async (): Promise<void> => {
+		const revision = controller.audioRevision
+		const sameOutput = (): void => {
+			check()
+			if (revision < 0 || controller.audioRevision !== revision)
+				throw new PilotStopped('Audio output changed; remaining controls were not sent')
+		}
+		const initial = await controller.queryVolume()
+		sameOutput()
+		if (!Number.isFinite(initial) || initial < 10 || initial > 95)
+			throw new PilotStopped('Start with authenticated volume between 10 and 95 percent')
+		options.record({ stage: 'initial volume', result: 'authenticated report', volume: initial })
+		const actions: [string, RemoteAction, number][] = [
+			['lower absolute volume', { kind: 'volume', percent: initial - 5 }, initial - 5],
+			['restore initial volume', { kind: 'volume', percent: initial }, initial],
+			['mute', { kind: 'mute' }, 0],
+			['unmute', { kind: 'mute' }, initial],
+		]
+		for (const [stage, action, expected] of actions) {
+			sameOutput()
+			await step(stage, action)
+			sameOutput()
+			const volume = await controller.queryVolume()
+			sameOutput()
+			options.record({ stage, result: 'authenticated report; physical result unverified', volume })
+			if (Math.abs(volume - expected) >= 0.01)
+				throw new PilotStopped('Volume changed during the observation pause; remaining controls were not sent')
+		}
+	}
 
 	check()
 	if (options.mode === 'power') return powerSequence()
@@ -128,10 +166,10 @@ export async function runAcceptance(controller: Controller, options: Options): P
 		if (current !== 'Off') throw new PilotStopped('Start with the Apple TV already asleep')
 		return wakeSequence()
 	}
-	if (options.mode === 'volume') {
+	if (options.mode === 'volume' || options.mode === 'audio') {
 		if ((await controller.queryPower()) !== 'On') throw new PilotStopped('Start with the Apple TV awake')
 		check()
-		return volumeSequence()
+		return options.mode === 'audio' ? audioSequence() : volumeSequence()
 	}
 	if (!options.appName.trim()) throw new PilotStopped('Choose an app to close')
 	const apps = (await controller.listApps()).filter((app) => app.name === options.appName)

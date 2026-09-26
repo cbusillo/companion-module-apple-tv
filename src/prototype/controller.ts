@@ -12,6 +12,8 @@ import {
 } from './companion.js'
 import { bounded, withCompanionSession, type Target } from './session.js'
 import { CommandNotSent, CommandQueue } from './queue.js'
+import { withMetadataSession } from './metadata-session.js'
+import type { MetadataSnapshot } from './metadata.js'
 
 export type RemoteAction =
 	| { kind: 'button'; button: Button }
@@ -24,14 +26,16 @@ export type RemoteAction =
 	| { kind: 'mute' }
 
 type State = 'stopped' | 'connecting' | 'ready' | 'reconnecting'
+type ControllerTarget = Target & { airplayPort: number }
 type Options = {
-	discover?: () => Promise<Target>
+	discover?: () => Promise<ControllerTarget>
 	session?: typeof withCompanionSession
+	metadataSession?: typeof withMetadataSession
 	reconnectDelayMs?: number
 	healthIntervalMs?: number
 }
 
-/** Owns one session at a time. Reconnect restores state, never past user input. */
+/** Owns a Companion/metadata pair. Reconnect restores state, never past user input. */
 export class NodeController {
 	private phase: State = 'stopped'
 	private commands: CompanionPrototype | undefined
@@ -42,9 +46,8 @@ export class NodeController {
 	private endSession: { resolve(): void; reject(error: Error): void } | undefined
 	private healthTimer: ReturnType<typeof setInterval> | undefined
 	private readonly listeners = new Set<() => void>()
-	private readonly discover: () => Promise<Target>
+	private readonly discover: () => Promise<ControllerTarget>
 	private epoch = 0
-	private volumeReadPending = false
 	reconnects = 0
 	constructor(
 		private readonly deviceId: string,
@@ -57,8 +60,9 @@ export class NodeController {
 				const devices = (await scan({ timeout: 5000 })).filter(
 					(device) => device.deviceId === this.deviceId && device.model.startsWith('AppleTV'),
 				)
-				if (devices.length !== 1 || !devices[0].companionPort) throw new Error('Selected Companion service unavailable')
-				return { address: devices[0].address, companionPort: devices[0].companionPort }
+				if (devices.length !== 1 || !devices[0].companionPort || !devices[0].port)
+					throw new Error('Selected Companion or metadata service unavailable')
+				return { address: devices[0].address, companionPort: devices[0].companionPort, airplayPort: devices[0].port }
 			})
 	}
 	get state(): State {
@@ -66,6 +70,9 @@ export class NodeController {
 	}
 	get feedback(): CommandState | undefined {
 		return this.commands?.state
+	}
+	get audioRevision(): number {
+		return this.commands?.audioRevision ?? -1
 	}
 	observe(listener: () => void): () => void {
 		this.listeners.add(listener)
@@ -116,32 +123,31 @@ export class NodeController {
 		const session = this.endSession
 		if (this.stopRequested || this.phase !== 'ready' || !commands?.active || !session)
 			throw new CommandNotSent('Not connected; command not sent')
-		try {
-			await this.queueCommand(session, 'Control failed; delivery uncertain', async () => {
-				switch (action.kind) {
-					case 'button':
-						return commands.press(action.button)
-					case 'media':
-						return commands.media(action.command)
-					case 'seek':
-						return commands.seek(action.seconds)
-					case 'volume':
-						return commands.setVolume(action.percent)
-					case 'swipe':
-						return commands.swipe(action.direction)
-					case 'launch':
-						return commands.launchApp(action.bundleId)
-					case 'power':
-						return action.state === undefined ? commands.togglePower() : commands.setPower(action.state)
-					case 'mute':
-						return commands.toggleMute()
-					default:
-						throw new RangeError('Unknown action')
-				}
-			})
-		} finally {
-			this.refreshVolume()
-		}
+		const audioRevision = commands.audioRevision
+		await this.queueCommand(session, 'Control failed; delivery uncertain', async () => {
+			if ((action.kind === 'volume' || action.kind === 'mute') && audioRevision !== commands.audioRevision)
+				throw new UnsupportedCommand('Audio output changed while the command was queued')
+			switch (action.kind) {
+				case 'button':
+					return commands.press(action.button)
+				case 'media':
+					return commands.media(action.command)
+				case 'seek':
+					return commands.seek(action.seconds)
+				case 'volume':
+					return commands.setVolume(action.percent)
+				case 'swipe':
+					return commands.swipe(action.direction)
+				case 'launch':
+					return commands.launchApp(action.bundleId)
+				case 'power':
+					return action.state === undefined ? commands.togglePower() : commands.setPower(action.state)
+				case 'mute':
+					return commands.toggleMute()
+				default:
+					throw new RangeError('Unknown action')
+			}
+		})
 	}
 
 	private async query<T>(operation: (commands: CompanionPrototype) => Promise<T>): Promise<T> {
@@ -194,31 +200,6 @@ export class NodeController {
 		session.reject(new Error(reason))
 	}
 
-	private refreshVolume(): void {
-		const commands = this.commands
-		const session = this.endSession
-		if (
-			this.stopRequested ||
-			!commands ||
-			!session ||
-			this.phase !== 'ready' ||
-			this.queue.busy ||
-			this.volumeReadPending ||
-			commands.state.volume !== null ||
-			!(commands.state.mediaFlags! & 0x100)
-		)
-			return
-		this.volumeReadPending = true
-		const epoch = this.epoch
-		void this.queueCommand(session, 'Volume query failed', async () => commands.readVolume())
-			.catch(() => {
-				// Unsupported volume stays unavailable; transport failures end the session in the queue.
-			})
-			.finally(() => {
-				if (epoch === this.epoch) this.volumeReadPending = false
-			})
-	}
-
 	private async run(): Promise<void> {
 		const signal = this.stopSignal.signal
 		let delayMs = this.options.reconnectDelayMs ?? 2000
@@ -230,47 +211,69 @@ export class NodeController {
 			this.setState(connectedBefore ? 'reconnecting' : 'connecting')
 			try {
 				const target = await bounded(this.discover, 7000, signal)
-				await (this.options.session ?? withCompanionSession)(target, this.credentials, signal, async (commands) => {
-					await commands.listApps() // Genuine read-only round trip before accepting input.
-					try {
-						await commands.readPower()
-					} catch {
-						/* Power can remain Unknown while navigation works. */
-					}
-					if (this.stopRequested || epoch !== this.epoch || !commands.active) return
-					this.commands = commands
-					const end = Promise.withResolvers<void>()
-					this.endSession = end
-					if (connectedBefore) this.reconnects++
-					connectedBefore = true
-					delayMs = this.options.reconnectDelayMs ?? 2000
-					const stopObserving = commands.observe(() => {
-						this.changed()
-						queueMicrotask(() => this.refreshVolume())
-					})
-					this.setState('ready')
-					this.refreshVolume()
-					this.healthTimer = setInterval(() => {
-						if (this.queue.busy || this.stopRequested) return
-						void this.queue
-							.run(async () => {
+				let snapshot: MetadataSnapshot = {
+					connected: false,
+					nowPlaying: { state: 'Unknown' },
+					audio: { absolute: false, relative: false },
+				}
+				await (this.options.metadataSession ?? withMetadataSession)(
+					{ address: target.address, port: target.airplayPort },
+					this.credentials,
+					signal,
+					(next) => {
+						if (epoch !== this.epoch) return
+						snapshot = next
+						this.commands?.observeMetadata(next)
+						if (!next.connected && this.endSession && !this.stopRequested)
+							this.failSession(this.endSession, 'Metadata connection lost')
+					},
+					async (metadataSignal) => {
+						await (this.options.session ?? withCompanionSession)(
+							target,
+							this.credentials,
+							metadataSignal,
+							async (commands) => {
+								commands.observeMetadata(snapshot)
+								await commands.listApps() // Genuine read-only round trip before accepting input.
 								try {
-									await commands.listApps()
-								} catch (error) {
-									this.failSession(end, 'Health check failed')
-									throw error
+									await commands.readPower()
+								} catch {
+									/* Power can remain Unknown while navigation works. */
 								}
-							})
-							.catch(() => {
-								// Failures were handled before advancing the queue; invalidated checks were not sent.
-							})
-					}, this.options.healthIntervalMs ?? 30000)
-					try {
-						await end.promise
-					} finally {
-						stopObserving()
-					}
-				})
+								if (this.stopRequested || epoch !== this.epoch || !commands.active) return
+								commands.observeMetadata(snapshot)
+								this.commands = commands
+								const end = Promise.withResolvers<void>()
+								this.endSession = end
+								if (connectedBefore) this.reconnects++
+								connectedBefore = true
+								delayMs = this.options.reconnectDelayMs ?? 2000
+								const stopObserving = commands.observe(() => this.changed())
+								this.setState('ready')
+								this.healthTimer = setInterval(() => {
+									if (this.queue.busy || this.stopRequested) return
+									void this.queue
+										.run(async () => {
+											try {
+												await commands.listApps()
+											} catch (error) {
+												this.failSession(end, 'Health check failed')
+												throw error
+											}
+										})
+										.catch(() => {
+											// Failures were handled before advancing the queue; invalidated checks were not sent.
+										})
+								}, this.options.healthIntervalMs ?? 30000)
+								try {
+									await end.promise
+								} finally {
+									stopObserving()
+								}
+							},
+						)
+					},
+				)
 			} catch {
 				// No command crosses this boundary. Only discovery and session setup repeat.
 			} finally {
@@ -281,7 +284,6 @@ export class NodeController {
 				this.commands = undefined
 				this.endSession?.resolve()
 				this.endSession = undefined
-				this.volumeReadPending = false
 			}
 			if (this.stopRequested) break
 			this.setState('reconnecting')

@@ -1,14 +1,14 @@
 import { setTimeout as delay } from 'node:timers/promises'
-import { AirPlayConnection, scan, type DiscoveredDevice, type HAPCredentials } from 'node-appletv-remote'
+import { scan, type DiscoveredDevice, type HAPCredentials } from 'node-appletv-remote'
 import { loadTestCredentials } from './credentials.js'
-import { MetadataState, type MetadataSnapshot } from './metadata.js'
+import type { MetadataSnapshot } from './metadata.js'
+import { withMetadataSession, type MetadataConnection } from './metadata-session.js'
 import { bounded } from './session.js'
 
-type Connection = Pick<AirPlayConnection, 'connect' | 'close' | 'on' | 'off'>
 type Dependencies = {
 	load?: typeof loadTestCredentials
 	discover?: () => Promise<DiscoveredDevice[]>
-	createConnection?: (target: DiscoveredDevice, credentials: HAPCredentials) => Connection
+	createConnection?: (target: DiscoveredDevice, credentials: HAPCredentials) => MetadataConnection
 }
 export type MetadataPilotOptions = {
 	credentialsPath: string
@@ -26,38 +26,9 @@ export async function observeMetadata(
 	if (!Number.isInteger(options.seconds) || options.seconds < 5 || options.seconds > 180)
 		throw new Error('Observation duration must be 5-180 seconds')
 	options.signal.throwIfAborted()
-	const state = new MetadataState()
 	const stop = new AbortController()
 	const signal = AbortSignal.any([options.signal, stop.signal])
 	const startup = setTimeout(() => stop.abort(new Error('Metadata startup timed out')), startupMs)
-	let connection: Connection | undefined
-	let closing = false
-	let reportFailed = false
-	let lastSnapshot = ''
-	const publish = (): void => {
-		if (reportFailed) return
-		const snapshot = state.snapshot()
-		const encoded = JSON.stringify(snapshot)
-		if (encoded === lastSnapshot) return
-		lastSnapshot = encoded
-		try {
-			options.onSnapshot(snapshot)
-		} catch {
-			reportFailed = true
-			stop.abort(new Error('Metadata report failed'))
-		}
-	}
-	const onLost = (): void => {
-		if (closing || signal.aborted) return
-		state.invalidate()
-		publish()
-		stop.abort(new Error('Metadata connection lost'))
-	}
-	const onMessage = (message: Record<string, unknown>): void => {
-		if (closing || signal.aborted) return
-		state.receive(message)
-		publish()
-	}
 	try {
 		const saved = await bounded(
 			async () => (dependencies.load ?? loadTestCredentials)(options.credentialsPath),
@@ -70,36 +41,23 @@ export async function observeMetadata(
 			signal,
 		)
 		const matches = devices.filter((device) => device.deviceId === saved.deviceId && device.model.startsWith('AppleTV'))
-		if (matches.length !== 1) throw new Error('Selected TV not uniquely discovered')
-		connection = dependencies.createConnection
-			? dependencies.createConnection(matches[0], saved.credentials)
-			: new AirPlayConnection(matches[0].address, matches[0].port, saved.credentials, { logger: () => {} })
-		connection.on('mrp-message', onMessage)
-		connection.on('error', onLost)
-		connection.on('close', onLost)
-		await bounded(async () => connection!.connect({ signal }), undefined, signal)
-		signal.throwIfAborted()
-		clearTimeout(startup)
-		state.setConnected()
-		publish()
-		await delay(options.seconds * 1000, undefined, { signal })
-	} catch {
-		if (reportFailed) throw new Error('Metadata report failed')
-		if (options.signal.aborted) throw new Error('Metadata observation cancelled')
+		if (matches.length !== 1) throw new Error('Metadata connection failed: selected TV not uniquely discovered')
+		await withMetadataSession(
+			matches[0],
+			saved.credentials,
+			signal,
+			options.onSnapshot,
+			async (active) => {
+				clearTimeout(startup)
+				await delay(options.seconds * 1000, undefined, { signal: active })
+			},
+			dependencies.createConnection ? () => dependencies.createConnection!(matches[0], saved.credentials) : undefined,
+		)
+	} catch (error) {
+		if (options.signal.aborted) throw new Error('Metadata observation cancelled', { cause: error })
 		if (stop.signal.reason instanceof Error) throw stop.signal.reason
-		throw new Error('Metadata connection failed')
+		throw error
 	} finally {
 		clearTimeout(startup)
-		closing = true
-		try {
-			connection?.close()
-		} finally {
-			connection?.off('mrp-message', onMessage)
-			connection?.off('error', onLost)
-			connection?.off('close', onLost)
-			state.invalidate()
-			publish()
-		}
 	}
-	if (reportFailed) throw new Error('Metadata report failed')
 }

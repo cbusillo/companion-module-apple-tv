@@ -14,7 +14,14 @@ export type MetadataSnapshot = {
 		duration?: number
 		reportedPosition?: number
 	}
-	audio: { volume?: number; absolute: boolean; relative: boolean; outputId?: string; outputs?: Output[] }
+	audio: {
+		volume?: number
+		volumeRevision?: number
+		absolute: boolean
+		relative: boolean
+		outputId?: string
+		outputs?: Output[]
+	}
 }
 
 function fields(value: unknown): Fields | undefined {
@@ -49,7 +56,8 @@ export class MetadataState {
 	private outputs?: Output[]
 	private capabilities?: Fields
 	private outputCapabilities = new Map<string, Fields>()
-	private volumes = new Map<string, number>()
+	private volumes = new Map<string, { value: number; revision: number }>()
+	private volumeRevision = 0
 
 	setConnected(): void {
 		this.connected = true
@@ -123,7 +131,8 @@ export class MetadataState {
 				const update = fields(message['.volumeDidChangeMessage'])
 				const id = text(update?.outputDeviceUID)
 				const volume = finite(own(update, 'volume'))
-				if (id && volume !== undefined && volume <= 1) this.volumes.set(id, Math.round(volume * 10000) / 100)
+				if (id && volume !== undefined && volume <= 1)
+					this.volumes.set(id, { value: Math.round(volume * 10000) / 100, revision: ++this.volumeRevision })
 				return
 			}
 			case 46:
@@ -196,7 +205,11 @@ export class MetadataState {
 			const kind = own(capabilities, 'volumeCapabilities')
 			result.audio.absolute = kind === 2 || kind === 3
 			result.audio.relative = kind === 1 || kind === 3
-			if (result.audio.absolute) result.audio.volume = this.volumes.get(this.outputId)
+			if (result.audio.absolute) {
+				const observation = this.volumes.get(this.outputId)
+				result.audio.volume = observation?.value
+				result.audio.volumeRevision = observation?.revision
+			}
 		}
 		result.audio.outputId = this.outputId
 		result.audio.outputs = this.outputs?.map((output) => ({ ...output }))

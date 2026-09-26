@@ -25,6 +25,7 @@ async function main(): Promise<void> {
   node dist/prototype/acceptance-live.js --mode power --sleep-seconds 20
   node dist/prototype/acceptance-live.js --mode wake --run --credentials /private/test.json --report /private/wake.json
   node dist/prototype/acceptance-live.js --mode volume --run --credentials /private/test.json --report /private/volume.json
+  node dist/prototype/acceptance-live.js --mode audio --run --credentials /private/test.json --report /private/audio.json
 
 Without --run: offline preview only; no credential access or network connection.
 Run only after the owner is watching. Wake mode requires an asleep TV; other modes require it awake.
@@ -41,6 +42,10 @@ Explicit --mode remaining also tests volume and sleep/wake; requires volume 5-95
 Explicit --mode volume: volume down once, wait five seconds, then up once; report each stage.
 Volume mode requires an awake TV and reported volume 5-95%; start audible playback manually.
 It sends no app, playback, swipe, power, mute, or absolute-volume control.
+Explicit --mode audio: lower volume five percentage points, restore it, mute, then unmute.
+Start audible playback on the original output with authenticated volume 10-95%; keep that output selected.
+Every write requires a fresh matching TV report. Output changes stop the remaining steps.
+If interrupted while muted, use the normal remote to restore volume; no automatic cleanup write is sent.
 Power and remaining modes briefly blank the TV; rapid sleep/wake remains unqualified.
 Ctrl-C, error, or connection loss stops remaining controls; no command is retried.
 If the test stops after sleep, wake the TV with its normal remote.
@@ -53,6 +58,7 @@ Reports are created privately and never overwrite an existing file.
 		values.mode !== 'power' &&
 		values.mode !== 'wake' &&
 		values.mode !== 'volume' &&
+		values.mode !== 'audio' &&
 		values.mode !== 'remaining'
 	)
 		throw new Error('Invalid acceptance mode')

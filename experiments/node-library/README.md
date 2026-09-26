@@ -179,13 +179,19 @@ For a supervised test, add exactly one explicit action, for example `--button up
 `--button appSwitcher`, `--swipe left`, or `--seek 10`. `--help` lists the actions.
 The output distinguishes completed dispatch from unverified physical effect.
 
-Mute restoration is implemented and tested against synthetic outputs, including
-output changes, external volume changes, and disconnects. It is deliberately
-unavailable in the live pilot until a separate authenticated metadata connection
-identifies the current audio output. The Companion-only volume reply does not
-establish that identity. The separate read-only metadata pilot below now receives
-authenticated output identity and volume; it is not yet wired into the controls
-controller or live mute restoration.
+The controller now owns a Companion session and an authenticated AirPlay metadata
+session together. Numeric volume comes from metadata; it never falls back to the
+unqualified Companion volume reply. Absolute-volume writes still use Companion,
+but require both an acknowledgement and a new matching metadata volume report.
+Repeated cached snapshots cannot confirm a write. Missing volume or capabilities
+after an output change remain unavailable until the TV reports them again.
+
+Mute restoration is bound to the complete output list and primary volume ID.
+Output changes, capability loss, external volume changes and disconnects discard
+the saved level. A volume command queued before an output change is rejected.
+Metadata loss closes both sessions; recovery starts a new pair without replaying
+input. These behaviors have offline coverage; live absolute-volume and mute
+effects still require the prepared owner-observed test below.
 
 The normal Companion entry point still uses Python. The new controller and CLI
 are development tools, not an installed replacement or the final pairing UI.
@@ -195,6 +201,23 @@ are development tools, not an installed replacement or the final pairing UI.
 Build and test the code first, then finish the conversation turn with the exact
 sequence and wait for the owner to say they are watching. Do not start a device
 test or ask the owner to watch partway through a coding turn.
+
+For the focused audio test, start audible playback on the original output and
+keep that output selected. It lowers volume five percentage points, restores the
+initial level, mutes, and unmutes, with five seconds between steps. Starting
+volume must be reported between 10 and 95 percent. A missing confirmation,
+output change, cancellation or connection loss stops the sequence. There is no
+automatic cleanup write; use the normal remote if an interrupted test leaves the
+output muted. No playback, app, power or output-routing command is sent.
+
+```sh
+node dist/prototype/acceptance-live.js --mode audio
+node dist/prototype/acceptance-live.js --mode audio --run --credentials /private/directory/test.json --report /private/directory/audio.json
+```
+
+The first command is an offline preview. The second requires the owner to be
+ready and writes a new private receipt; protocol confirmation is separate from
+the owner's audible acceptance.
 
 The acceptance runner previews offline by default. This command does not
 read credentials, discover devices, or open a network connection:
@@ -379,8 +402,13 @@ across TCP chunks and checks all 24 messages and both acknowledgements. The
 read-only live repeat received volume 30%, matching the Python reference, plus
 authenticated output identity and capability messages. At `47b2070`, the owner
 accepted the matching YouTube title, Playing/Paused/Playing transitions, and
-volume feedback 30/25/30 while using the normal remote. Output switching and
-position interpolation remain unqualified. No agent-sent control was involved.
+volume feedback 30/25/30 while using the normal remote. At `a334413`, the owner
+confirmed two AirPods round trips matched the authenticated output list during
+a three-minute observation. The primary volume ID did not change. Volume and
+capabilities temporarily became unavailable during those transitions. This
+qualifies output-list feedback for that sequence; agent-initiated output
+selection, per-route volume accuracy and position interpolation remain
+unqualified. No agent-sent control was involved.
 
 The new pilot follows explicit active-client/player selection, merges partial
 content updates, ignores other outputs' volume, requires absolute-volume
@@ -416,10 +444,14 @@ late messages, cancellation during TCP connect, peer loss, heartbeat cleanup, an
 discovery cancellation. Downstream CI exercises the installed npm patch's public
 API against a stalled loopback peer as well as the metadata observation lifecycle.
 
-Two native read-only sessions against the TV each connected, observed metadata,
+Two earlier native read-only sessions against the TV each connected, observed metadata,
 closed once without errors, and left no TCP sockets; the diagnostic process exited
 naturally. These tests cover the reproduced transport defects. Longer outage/soak
-coverage and integration with the persistent controls controller remain to be done.
+coverage and installed Companion integration remain to be done. The persistent
+prototype controller and standalone observer now share the metadata session's
+cancellation and cleanup path. The independent encrypted Companion peer uses a
+synthetic metadata connection for its reconnect/no-replay check; it does not
+claim to reproduce an AirPlay server.
 The installed Python-backed entry point and its package remain unchanged.
 
 ## Remaining qualification
@@ -434,7 +466,7 @@ Before this can replace the worker, it still needs:
 - Discovery and PIN pairing inside Companion, using its connection secret store.
 - Integration of the persistent controller into Companion, extended lifecycle
   qualification, and supervised acceptance of navigation, swipes, media, and power.
-- Dynamic metadata/output qualification before enabling live volume restoration.
+- Owner-observed absolute-volume and mute restoration, including output changes.
 - Long-lived AirPlay lifecycle and Now Playing integration into Companion.
 - Packaged installation tests on the intended operating systems, followed by
   supervised Apple TV acceptance with separate pairing and preserved rollback.
