@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto'
+import { randomInt } from 'node:crypto'
 import { CompanionConnection, type HAPCredentials } from 'node-appletv-remote'
 import { CompanionPrototype, CompanionRequestRejected, companionRequest } from './companion.js'
 
@@ -62,15 +62,16 @@ export async function withCompanionSession<T>(
 			['_bf', 0],
 			['_cf', 512],
 			['_clFl', 128],
-			['_i', credentials.clientId],
+			['_i', publicId.replaceAll(':', '')],
 			['_idsID', Buffer.from(credentials.clientId)],
 			['_pubID', publicId],
 			['_sf', 256],
 			['_sv', '170.18'],
-			['model', 'Companion'],
+			['model', 'iPhone10,6'],
 			['name', 'Companion Node Test'],
 		])
-		const localId = randomBytes(4).readUInt32LE()
+		// Keep the client half positive when a TV treats it as a signed int32.
+		const localId = randomInt(1, 0x80000000)
 		onStage('session start')
 		const started = await companionRequest(client, '_sessionStart', [
 			['_srvT', 'com.apple.tvremoteservices'],

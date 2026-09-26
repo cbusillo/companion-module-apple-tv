@@ -50,15 +50,15 @@ index 1fb65bc..cc1c76c 100644
      const decrypted = receiver.decrypt(header, encryptedPayload);
 diff --git a/src/companion/__tests__/framing-compatibility.test.ts b/src/companion/__tests__/framing-compatibility.test.ts
 new file mode 100644
-index 0000000..ffeec55
+index 0000000..ff480cb
 --- /dev/null
 +++ b/src/companion/__tests__/framing-compatibility.test.ts
-@@ -0,0 +1,73 @@
+@@ -0,0 +1,105 @@
 +import { describe, expect, it } from 'vitest';
 +import { CompanionSession } from '../companion-session.js';
 +import { CompanionConnection } from '../connection.js';
 +import { FrameType } from '../framing.js';
-+import type { OpackDict } from '../opack.js';
++import { opackDecode, opackEncode, type OpackDict, type OpackValue } from '../opack.js';
 +
 +// pyatv 0.18.0 Chacha20Cipher(nonce_length=12), bytes(range(32)), counters 0 and 1.
 +// Public synthetic keys and payloads; no pairing or live device data.
@@ -77,6 +77,7 @@ index 0000000..ffeec55
 +  // Enter the post-authentication parser without opening a socket.
 +  const parser = connection as unknown as {
 +    session: CompanionSession;
++    socket: { write(data: Buffer): void; destroy(): void };
 +    onData(data: Buffer): void;
 +  };
 +  parser.session = new CompanionSession(key, key);
@@ -85,10 +86,41 @@ index 0000000..ffeec55
 +  connection.on('event', ({ data }: { data: OpackDict }) =>
 +    states.push((data.get('_c') as OpackDict).get('state')));
 +  connection.on('error', error => errors.push(error));
-+  return { parser, states, errors };
++  return { connection, parser, states, errors };
 +}
 +
 +describe('Companion encrypted framing compatibility', () => {
++  it('uses nonzero transaction IDs and correlates successive public requests', async () => {
++    const { connection, parser, errors } = receiver();
++    const peer = new CompanionSession(key, key);
++    const ids: number[] = [];
++    parser.socket = {
++      write(frame: Buffer): void {
++        const request = opackDecode(peer.decrypt(frame.subarray(0, 4), frame.subarray(4))) as OpackDict;
++        const id = request.get('_x') as number;
++        // Observed TV behavior: transaction zero is never acknowledged.
++        expect(id).toBeGreaterThan(0);
++        expect(ids).not.toContain(id);
++        ids.push(id);
++        const reply = new Map<OpackValue, OpackValue>([['_x', id], ['_t', 3], ['_c', new Map()]]);
++        queueMicrotask(() => parser.onData(peer.encrypt(FrameType.E_OPACK, opackEncode(reply))));
++      },
++      destroy(): void {},
++    };
++    try {
++      for (const identifier of ['_systemInfo', '_sessionStart']) {
++        const reply = await connection.sendRequest(identifier, new Map<OpackValue, OpackValue>([
++          ['_t', 2], ['_c', new Map()],
++        ]));
++        expect(reply.get('_t')).toBe(3);
++      }
++      expect(ids).toHaveLength(2);
++      expect(errors).toEqual([]);
++    } finally {
++      connection.close();
++    }
++  });
++
 +  it('matches an independently encrypted packet including the tag in its header', () => {
 +    const sender = new CompanionSession(key, key);
 +    expect(sender.encrypt(FrameType.E_OPACK, payload)).toEqual(frames[0]);
@@ -273,10 +305,20 @@ index 9500d2e..5e3db8d 100644
 
      const ciphertext = encryptedPayload.subarray(0, encryptedPayload.length - AUTH_TAG_LENGTH);
 diff --git a/src/companion/connection.ts b/src/companion/connection.ts
-index 351e7fb..6fda777 100644
+index 351e7fb..80bb340 100644
 --- a/src/companion/connection.ts
 +++ b/src/companion/connection.ts
-@@ -365,11 +365,10 @@ export class CompanionConnection extends EventEmitter {
+@@ -57,7 +57,8 @@ export class CompanionConnection extends EventEmitter {
+   private socket: Socket | undefined;
+   private session: CompanionSession | undefined;
+   private buffer: Buffer = Buffer.alloc(0);
+-  private transferId = 0;
++  // A real TV may treat transaction zero as unacknowledged traffic.
++  private transferId = 1;
+   private pendingRequests = new Map<number, {
+     resolve: (value: OpackDict) => void;
+     reject: (error: Error) => void;
+@@ -365,11 +366,10 @@ export class CompanionConnection extends EventEmitter {
 
    private processEncryptedFrames(): void {
      // Encrypted frames: 4-byte header + ciphertext + 16-byte tag

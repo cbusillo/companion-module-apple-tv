@@ -31,6 +31,11 @@ Companion also places its encryption counter at byte zero of the 12-byte nonce;
 the library reused the HAP/AirPlay layout with four leading zero bytes. This
 breaks the second encrypted packet. The candidate uses the Companion layout
 without changing HAP/AirPlay encryption.
+The live TV also did not acknowledge request transaction zero. The library now
+starts request IDs at one; a regression exercises successive request correlation.
+The harness keeps its client session ID within the positive signed-32-bit range:
+high-bit client IDs were accepted at startup but rejected at teardown by the TV.
+The remote half still preserves all 32 bits in the combined unsigned-64-bit ID.
 
 Eight regression tests reproduced the numeric, reference, and framing failures
 before the changes. The extended library suite passes with the candidate.
@@ -113,6 +118,17 @@ Pairing adds a separate controller registration on the TV. Removing the local te
 file does not revoke that registration; remove only the test controller in the
 TV's paired-device settings when retiring the experiment. Preserve existing
 controller registrations and the production credentials.
+
+### Pilot evidence (September 26, 2026)
+
+Separate PIN pairing completed on one Apple TV. Fresh Node sessions discovered
+22 apps, reported power as `On`, and received session-teardown acknowledgements.
+One Plex launch request was acknowledged and its session closed cleanly; physical
+screen confirmation is tracked separately in the draft PR. The normal Companion
+module, its credentials, and its packaged artifact were not replaced.
+
+This qualifies an initial developer pilot on that device. It does not qualify
+all controls, tvOS versions, supported operating systems, or end-user installation.
 
 ## Remaining qualification
 

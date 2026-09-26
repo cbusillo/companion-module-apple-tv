@@ -59,6 +59,8 @@ class Peer(CompanionServerAuth, asyncio.Protocol):
             self.transport.abort()
 
     def command(self, message):
+        # The live TV never acknowledges transaction zero.
+        assert isinstance(message.get("_x"), int) and message["_x"] > 0
         identifier = message["_i"]
         content = {}
         if identifier == "_sessionStart":
