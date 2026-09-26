@@ -15,6 +15,7 @@ type Event = {
 type Options = {
 	appName: string
 	mode?: AcceptanceMode
+	sleepSeconds?: number
 	signal: AbortSignal
 	record: (event: Event) => void
 	pause?: (ms: number) => Promise<void>
@@ -22,14 +23,27 @@ type Options = {
 
 export class PilotStopped extends Error {}
 
-export function previewAcceptance(appName: string, mode: AcceptanceMode = 'close-app'): string[] {
+function sleepWait(mode: AcceptanceMode, seconds?: number): number {
+	if (seconds !== undefined && mode !== 'power' && mode !== 'remaining')
+		throw new RangeError('Sleep wait is only available in power or remaining mode')
+	const value = seconds ?? 5
+	if (!Number.isInteger(value) || value < 5 || value > 30) throw new RangeError('Sleep wait must be 5–30 whole seconds')
+	return value * 1000
+}
+
+export function previewAcceptance(
+	appName: string,
+	mode: AcceptanceMode = 'close-app',
+	sleepSeconds?: number,
+): string[] {
+	const sleepMs = sleepWait(mode, sleepSeconds)
 	const powerOnly = mode === 'power' || mode === 'wake'
 	return [
 		...(mode === 'remaining' ? ['Volume down one step, then up one step'] : []),
 		...(!powerOnly ? [`Open ${appName}, open App Switcher, then swipe up to close the focused app`] : []),
 		...(mode === 'wake' ? ['Start with Apple TV already Off, request Wake, and verify On; no Sleep is sent'] : []),
 		...(mode === 'remaining' || mode === 'power'
-			? ['Put Apple TV to sleep, verify Off, then wake it and verify On']
+			? [`Put Apple TV to sleep, wait ${sleepMs / 1000} seconds, verify Off, then wake it and verify On`]
 			: []),
 		...(powerOnly
 			? [
@@ -37,11 +51,12 @@ export function previewAcceptance(appName: string, mode: AcceptanceMode = 'close
 					'After On is confirmed, request Wake again; an already-awake TV must receive no button and stay unchanged',
 				]
 			: []),
-		'Five-second observation pauses; stop on error or connection loss; no command retries',
+		'Observation pauses are five seconds except the stated Sleep wait; stop on error or connection loss; no command retries',
 	]
 }
 
 export async function runAcceptance(controller: Controller, options: Options): Promise<void> {
+	const sleepMs = sleepWait(options.mode ?? 'close-app', options.sleepSeconds)
 	const pause = options.pause ?? (async (ms) => delay(ms, undefined, { signal: options.signal }))
 	const reconnects = controller.reconnects
 	const check = (): void => {
@@ -49,16 +64,13 @@ export async function runAcceptance(controller: Controller, options: Options): P
 		if (controller.state !== 'ready' || controller.reconnects !== reconnects)
 			throw new PilotStopped('Connection changed; remaining controls were not sent')
 	}
-	const observe = async (): Promise<void> => {
-		await pause(5000)
-		check()
-	}
-	const step = async (stage: string, action: RemoteAction): Promise<void> => {
+	const step = async (stage: string, action: RemoteAction, waitMs = 5000): Promise<void> => {
 		check()
 		options.record({ stage, action, result: 'sending' })
 		await controller.perform(action)
 		options.record({ stage, action, result: 'action completed; physical result unverified' })
-		await observe()
+		await pause(waitMs)
+		check()
 	}
 	const expectPower = async (expected: 'On' | 'Off'): Promise<void> => {
 		for (let attempt = 0; attempt < 10; attempt++) {
@@ -82,7 +94,7 @@ export async function runAcceptance(controller: Controller, options: Options): P
 	const powerSequence = async (): Promise<void> => {
 		check()
 		if ((await controller.queryPower()) !== 'On') throw new PilotStopped('Start with the Apple TV awake')
-		await step('sleep', { kind: 'power', state: 'Off' })
+		await step('sleep', { kind: 'power', state: 'Off' }, sleepMs)
 		await expectPower('Off')
 		await wakeSequence()
 	}

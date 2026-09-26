@@ -10,6 +10,7 @@ async function main(): Promise<void> {
 		options: {
 			app: { type: 'string', default: 'YouTube' },
 			mode: { type: 'string', default: 'close-app' },
+			'sleep-seconds': { type: 'string' },
 			run: { type: 'boolean' },
 			credentials: { type: 'string' },
 			report: { type: 'string' },
@@ -21,6 +22,7 @@ async function main(): Promise<void> {
   node dist/prototype/acceptance-live.js --app YouTube
   node dist/prototype/acceptance-live.js --app YouTube --run --credentials /private/test.json --report /private/result.json
   node dist/prototype/acceptance-live.js --mode power --run --credentials /private/test.json --report /private/power.json
+  node dist/prototype/acceptance-live.js --mode power --sleep-seconds 20
   node dist/prototype/acceptance-live.js --mode wake --run --credentials /private/test.json --report /private/wake.json
 
 Without --run: offline preview only; no credential access or network connection.
@@ -28,6 +30,8 @@ Run only after the owner is watching. Wake mode requires an asleep TV; other mod
 Default --mode close-app: open the app, enter App Switcher, swipe up, then stop.
 Close-app and remaining modes require one exact app-name match.
 Explicit --mode power: sleep, wake, then request Wake again while already On.
+Power/remaining modes allow --sleep-seconds 5-30 (default 5) before checking Off and sending Wake.
+This changes only the test's Sleep observation pause, not the Wake command or other five-second pauses.
 Explicit --mode wake: start from Off, wake, then request Wake again while already On.
 Wake mode sends no Sleep, app, swipe, or volume control.
 Wake queries current power: Home once for Off, no button for On, stop for Unknown.
@@ -45,7 +49,8 @@ Reports are created privately and never overwrite an existing file.
 	if ((values.mode === 'close-app' || values.mode === 'remaining') && !values.app.trim())
 		throw new Error('An app name is required')
 	const mode: AcceptanceMode = values.mode
-	const plan = previewAcceptance(values.app, mode)
+	const sleepSeconds = values['sleep-seconds'] === undefined ? undefined : Number(values['sleep-seconds'])
+	const plan = previewAcceptance(values.app, mode, sleepSeconds)
 	if (!values.run) {
 		process.stdout.write(`${JSON.stringify({ mode: 'offline preview', plan })}\n`)
 		return
@@ -72,6 +77,7 @@ Reports are created privately and never overwrite an existing file.
 		await runAcceptance(controller, {
 			appName: values.app,
 			mode,
+			sleepSeconds,
 			signal: cancel.signal,
 			record: (event) => {
 				const entry = { ...event, at: new Date().toISOString() }

@@ -240,6 +240,18 @@ unchanged; this second request must send no button. There is no extra Home
 recovery. Unknown state, cancellation, connection change, or request failure
 stops input. This power cycle failed its first physical run; see the evidence below.
 
+For a supervised timing comparison, `--sleep-seconds 20` waits twenty seconds
+after the Sleep acknowledgement before checking Off and requesting Wake. The
+option accepts whole seconds from 5 to 30, defaults to 5, and is valid only for
+power/remaining modes. Other observation pauses remain five seconds. Cancellation
+or connection loss during the wait prevents Wake. This is a test setting, not a
+delay or retry in the command layer.
+
+```sh
+node dist/prototype/acceptance-live.js --mode power --sleep-seconds 20
+node dist/prototype/acceptance-live.js --mode power --sleep-seconds 20 --run --credentials /private/directory/test.json --report /private/directory/power-timing.json
+```
+
 The separate `--mode wake` pilot starts with the TV already Off. It sends no Sleep,
 app, swipe, or volume control: request Wake, require reported On, then request
 Wake while already On and check that the screen stays unchanged. It stops after
@@ -312,9 +324,15 @@ after Sleep, all ten polls stayed Off, and the owner confirmed the TV remained
 off. The already-On check was not sent. The possible brief screen flicker was
 uncertain and is not accepted as a wake. The earlier successful Home recovery
 ran about twenty seconds after Sleep. This timing difference is a hypothesis,
-not an established cause. A wake-only test from an already-asleep TV is prepared
-to separate those cases; no command-layer timing change is claimed as a fix.
-Wake and physical volume acceptance remain pending.
+not an established cause. A wake-only test from an already-asleep TV was then used
+to separate those cases. It passed at `11a1dda`: reported power changed
+from Off to On after about six seconds, remained On after the already-On check,
+and the owner confirmed the screen woke and then stayed unchanged. There were
+zero reconnects. Wake from the existing off state and already-On behavior are
+accepted on this TV. A twenty-second Sleep observation test is prepared to
+compare with the failed five-second cycle. No minimum safe interval or cause is
+established, and no command-layer timing change is claimed as a fix. The longer
+sleep/wake cycle and physical volume acceptance remain pending.
 No automatic control retry or installed-module change was made.
 
 This qualifies an initial developer pilot on that device. It does not qualify

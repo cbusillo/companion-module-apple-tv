@@ -89,6 +89,89 @@ test('power pilot checks sleep, wake, and already-awake Wake without app or volu
 	assert.deepEqual(pauses, [5000, 5000, 5000])
 })
 
+test('configured Sleep wait blocks Wake until it finishes and leaves other pauses unchanged', async () => {
+	const { controller, options, actions, pauses } = fixture()
+	options.mode = 'power'
+	options.sleepSeconds = 20
+	const waiting = Promise.withResolvers()
+	const release = Promise.withResolvers()
+	options.pause = async (ms) => {
+		pauses.push(ms)
+		if (pauses.length === 1) {
+			waiting.resolve(ms)
+			await release.promise
+		}
+	}
+	const pending = runAcceptance(controller, options)
+	assert.equal(await waiting.promise, 20000)
+	assert.deepEqual(actions, [{ kind: 'power', state: 'Off' }])
+	release.resolve(undefined)
+	await pending
+	assert.deepEqual(pauses, [20000, 5000, 5000])
+	assert.deepEqual(actions, [
+		{ kind: 'power', state: 'Off' },
+		{ kind: 'power', state: 'On' },
+		{ kind: 'power', state: 'On' },
+	])
+})
+
+test('invalid Sleep waits or modes fail before querying or controlling the TV', async () => {
+	for (const [mode, seconds] of [
+		...[-1, 0, 4, 31, 20.5, NaN, Infinity].map((seconds) => ['power', seconds]),
+		['wake', 20],
+		['close-app', 20],
+	]) {
+		const { controller, options, actions } = fixture()
+		options.mode = mode
+		options.sleepSeconds = seconds
+		controller.queryPower = async () => assert.fail('Invalid wait must fail before a query')
+		controller.listApps = async () => assert.fail('Invalid wait must fail before discovery')
+		await assert.rejects(runAcceptance(controller, options), RangeError)
+		assert.equal(actions.length, 0)
+	}
+})
+
+test('cancellation or connection loss during the longer Sleep wait prevents Wake', async () => {
+	for (const interruption of ['cancel', 'disconnect', 'reconnect']) {
+		const { controller, options, actions, cancel } = fixture()
+		options.mode = 'power'
+		options.sleepSeconds = 20
+		options.pause = async () => {
+			if (interruption === 'cancel') cancel.abort()
+			else if (interruption === 'disconnect') controller.state = 'reconnecting'
+			else controller.reconnects++
+		}
+		await assert.rejects(runAcceptance(controller, options))
+		assert.deepEqual(actions, [{ kind: 'power', state: 'Off' }])
+	}
+})
+
+test('CLI validates Sleep wait without credential access or a connection', () => {
+	for (const [mode, seconds, status] of [
+		['power', '20', 0],
+		['power', 'NaN', 1],
+		['power', '31', 1],
+		['wake', '20', 1],
+	]) {
+		const result = spawnSync(
+			process.execPath,
+			[
+				'dist/prototype/acceptance-live.js',
+				'--mode',
+				mode,
+				'--sleep-seconds',
+				seconds,
+				'--credentials',
+				'/nonexistent/preview-only.json',
+			],
+			{ encoding: 'utf8', timeout: 2000 },
+		)
+		assert.equal(result.status, status, result.stderr)
+		if (status === 0) assert.equal(JSON.parse(result.stdout).mode, 'offline preview')
+		else assert.equal(result.stdout, '')
+	}
+})
+
 test('wake-only pilot starts from Off and checks already-On Wake without sending Sleep or other controls', async () => {
 	const { controller, options, actions, events, pauses } = fixture('Off')
 	options.mode = 'wake'
