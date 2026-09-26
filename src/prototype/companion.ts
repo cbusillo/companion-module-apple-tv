@@ -320,14 +320,8 @@ export class CompanionPrototype {
 		if (failed) throw failure
 	}
 
-	async swipe(direction: Direction): Promise<void> {
-		const paths = {
-			up: [500, 900, 500, 100],
-			down: [500, 100, 500, 900],
-			left: [900, 500, 100, 500],
-			right: [100, 500, 900, 500],
-		}
-		if (!Object.hasOwn(paths, direction)) throw new RangeError('Invalid swipe direction')
+	/** Register before tvremoteservices starts, as pyatv does; retain one clock per connection. */
+	async startTouch(): Promise<void> {
 		if (this.touchStart === undefined) {
 			const origin = this.now()
 			await this.request('_touchStart', [
@@ -337,6 +331,17 @@ export class CompanionPrototype {
 			])
 			this.touchStart = origin
 		}
+	}
+
+	async swipe(direction: Direction): Promise<void> {
+		const paths = {
+			up: [500, 900, 500, 100],
+			down: [500, 100, 500, 900],
+			left: [900, 500, 100, 500],
+			right: [100, 500, 900, 500],
+		}
+		if (!Object.hasOwn(paths, direction)) throw new RangeError('Invalid swipe direction')
+		await this.startTouch()
 		const [x0, y0, x1, y1] = paths[direction]
 		const end = this.now() + 100_000_000n
 		const send = (phase: number, x: number, y: number): void =>

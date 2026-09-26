@@ -86,6 +86,10 @@ export async function withCompanionSession<T>(
 			['model', 'iPhone10,6'],
 			['name', 'Companion Node Test'],
 		])
+		if (connection.sendMessage) {
+			onStage('touch surface registration')
+			await commands.startTouch()
+		}
 		// Keep the client half positive when a TV treats it as a signed int32.
 		const localId = randomInt(1, 0x80000000)
 		onStage('session start')

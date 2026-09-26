@@ -49,7 +49,12 @@ clocks and compares all four directions under normal, jittered, and stalled
 timers (12 traces); the old Node implementation fails this comparison. Companion
 TCP sockets also disable Nagle buffering, matching Python asyncio's low-latency
 socket behavior. These corrections still require a physical close-app repeat;
-the failed gesture's exact physical cause is not yet proven.
+the failed gesture's exact physical cause is not yet proven. The owner-observed
+repeat still left the YouTube card visible. The next correction registers the
+touch surface before starting tvremoteservices, following pyatv's session order,
+and preserves that timestamp origin until disconnect. Previously the first swipe
+registered touch lazily, after the remote session was already active. This
+startup correction is not yet physically qualified.
 
 Eight regression tests reproduced the numeric, reference, and framing failures
 before the changes. The extended library suite passes with the candidate.
@@ -213,6 +218,29 @@ Nothing is retried, including the wake command. If it stops after sleep, use the
 normal remote to wake the TV. The private report is created before controls and
 never overwrites another report. Command acknowledgements and reported power
 remain separate from owner-observed results.
+
+For a controlled comparison, the prepared Python reference runner uses the
+unchanged worker's action mapping and the same separate Node test pairing. It
+resolves the saved AirPlay device ID to the matching Companion service, validates
+an awake TV and unique app, then performs the same three actions with five-second
+gaps. It does not read or restart the installed module. Preview is offline:
+
+```sh
+uv run --python 3.13 --locked python experiments/node-library/close_baseline.py --app YouTube
+```
+
+After the owner agrees to watch **both** rounds, run the Python reference first:
+
+```sh
+uv run --python 3.13 --locked python experiments/node-library/close_baseline.py --app YouTube --run --credentials /private/directory/test.json --report /private/directory/python-close.json
+```
+
+If that command completes, run the prepared Node `close-app` command with a new
+report path. Stop on a failed command; do not retry a control. In each round the
+observable result is whether the YouTube card disappears. Remaining in App
+Switcher is expected because neither sequence sends Home or Back afterward.
+Record Python and Node acceptance separately. This reference is a developer
+diagnostic; it adds no Python dependency to the candidate Node runtime.
 
 ### Pilot evidence (September 26, 2026)
 

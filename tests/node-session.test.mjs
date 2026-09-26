@@ -44,6 +44,64 @@ function run(connection, operation, signal = new AbortController().signal) {
 	return withCompanionSession(target, credentials, signal, operation, () => connection)
 }
 
+test('touch surface is registered before the remote session and retained across swipes', async () => {
+	const connection = new FakeConnection()
+	const touches = []
+	connection.sendMessage = (identifier, envelope) => {
+		if (identifier === '_hidT') touches.push(envelope.get('_c'))
+	}
+	await run(connection, async (commands) => {
+		// pyatv connects touch before tvremoteservices, not at the first gesture.
+		assert.deepEqual(
+			connection.requests.slice(0, 4).map((r) => r.identifier),
+			['_systemInfo', '_touchStart', '_sessionStart', 'TVRCSessionStart'],
+		)
+		await commands.swipe('up')
+		await commands.swipe('right')
+	})
+	assert.equal(connection.requests.filter((r) => r.identifier === '_touchStart').length, 1)
+	assert.equal(connection.requests.filter((r) => r.identifier === '_touchStop').length, 1)
+	assert.equal(touches.filter((point) => point.get('_tPh') === 1).length, 2)
+	assert.ok(touches.every((point, index) => index === 0 || point.get('_ns') > touches[index - 1].get('_ns')))
+})
+
+test('failed touch registration prevents controls and closes without starting a remote session', async () => {
+	const connection = new FakeConnection()
+	connection.sendMessage = () => {}
+	const original = connection.sendRequest.bind(connection)
+	connection.sendRequest = async (identifier, envelope) => {
+		const result = await original(identifier, envelope)
+		if (identifier === '_touchStart') throw new Error('touch registration failed')
+		return result
+	}
+	await assert.rejects(
+		run(connection, () => assert.fail('must not dispatch')),
+		/touch registration failed/,
+	)
+	assert.equal(
+		connection.requests.some((r) => r.identifier === '_sessionStart'),
+		false,
+	)
+	assert.equal(connection.closed, true)
+})
+
+test('a failed remote session still tears down its registered touch surface', async () => {
+	const connection = new FakeConnection()
+	connection.sendMessage = () => {}
+	const original = connection.sendRequest.bind(connection)
+	connection.sendRequest = async (identifier, envelope) => {
+		const result = await original(identifier, envelope)
+		if (identifier === '_sessionStart') throw new Error('session registration failed')
+		return result
+	}
+	await assert.rejects(
+		run(connection, () => assert.fail('must not dispatch')),
+		/session registration failed/,
+	)
+	assert.equal(connection.requests.filter((r) => r.identifier === '_touchStop').length, 1)
+	assert.equal(connection.closed, true)
+})
+
 test('realistic read-only session initializes, discovers apps, and stops its combined session ID', async () => {
 	const connection = new FakeConnection()
 	const result = await run(connection, async (commands) => ({

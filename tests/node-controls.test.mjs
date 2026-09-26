@@ -215,6 +215,16 @@ test('late power query results cannot overwrite a newer pushed state', async () 
 	assert.equal(await pending, 'Off')
 })
 
+test('the first swipe retains the touch clock registered earlier in session startup', async () => {
+	const { controls, requests, events, advance } = fixture()
+	await controls.startTouch()
+	advance(11000)
+	await controls.swipe('up')
+	const first = events.find(({ id }) => id === '_hidT').content
+	assert.equal(first.get('_ns'), 11000000000n)
+	assert.equal(requests.filter(({ id }) => id === '_touchStart').length, 1)
+})
+
 test('all cardinal swipes use bounded coordinates, monotonic timestamps, and one release', async () => {
 	for (const [direction, start, end] of [
 		['up', [500, 900], [500, 100]],

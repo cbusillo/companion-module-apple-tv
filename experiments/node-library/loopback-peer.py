@@ -103,6 +103,7 @@ class Peer(CompanionServerAuth, asyncio.Protocol):
             return
         content = {}
         if identifier == "_sessionStart":
+            assert self.touch_started, "Touch registration must precede the remote session, as in pyatv"
             self.session_id = (0xFEDCBA98 << 32) | message["_c"]["_sid"]
             content = {"_sid": 0xFEDCBA98}
         elif identifier == "_sessionStop":
@@ -130,6 +131,7 @@ class Peer(CompanionServerAuth, asyncio.Protocol):
                 assert phase == 2 and button in self.buttons
                 self.buttons.remove(button)
         elif identifier == "_touchStart":
+            assert self.session_id is None and not self.touch_started
             assert isinstance(args["_width"], float) and args["_width"] == 1000
             assert isinstance(args["_height"], float) and args["_height"] == 1000
             self.touch_started = True
