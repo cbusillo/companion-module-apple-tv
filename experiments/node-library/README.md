@@ -392,10 +392,11 @@ commands; the owner can use the normal remote during an observation.
 ```sh
 node dist/prototype/metadata-live.js
 node dist/prototype/metadata-live.js --run --seconds 30 --credentials /private/directory/test.json --report /private/directory/metadata.json
+node dist/prototype/metadata-live.js --run --seconds 180 --credentials /private/directory/test.json --report /private/directory/output-switch.json
 uv run --python 3.13 --locked python experiments/node-library/mrp_fixtures.py | node experiments/node-library/metadata-oracle.mjs
 ```
 
-The first command is an offline preview. Observation lasts 5-60 seconds after
+The first command is an offline preview. Observation lasts 5-180 seconds after
 connection, with a separate twenty-second startup limit. Ctrl-C or connection
 loss stops it; it never reconnects. The receipt is created with mode 0600 without
 overwriting, and can contain private titles and output identifiers. Terminal

@@ -23,8 +23,8 @@ export async function observeMetadata(
 	dependencies: Dependencies = {},
 	startupMs = 20000,
 ): Promise<void> {
-	if (!Number.isInteger(options.seconds) || options.seconds < 5 || options.seconds > 60)
-		throw new Error('Observation duration must be 5-60 seconds')
+	if (!Number.isInteger(options.seconds) || options.seconds < 5 || options.seconds > 180)
+		throw new Error('Observation duration must be 5-180 seconds')
 	options.signal.throwIfAborted()
 	const state = new MetadataState()
 	const stop = new AbortController()

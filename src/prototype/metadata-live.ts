@@ -15,7 +15,7 @@ async function main(): Promise<void> {
 		},
 	})
 	const seconds = Number(values.seconds)
-	if (!Number.isInteger(seconds) || seconds < 5 || seconds > 60) throw new Error('Use --seconds 5-60')
+	if (!Number.isInteger(seconds) || seconds < 5 || seconds > 180) throw new Error('Use --seconds 5-180')
 	const plan = {
 		mode: values.run ? 'read-only observation' : 'offline preview',
 		seconds,
