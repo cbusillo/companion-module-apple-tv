@@ -446,6 +446,7 @@ test('output pilot observes a slow round trip and sends only the initial mute', 
 		assert.equal(elapsed, 165000)
 		assert.equal(controller.audioOutputIdentity, original)
 		assert.equal(controller.feedback.mute, 'Unavailable')
+		assert.equal(events.at(-1).clearedBeforeOutputChange, false)
 		await assert.rejects(controller.perform({ kind: 'mute' }), /No saved volume/)
 		assert.deepEqual(
 			peers[0].requests.filter(({ id }) => id === '_mcc').map(({ content }) => content.get('_vol').value),
@@ -470,14 +471,63 @@ test('output pilot observes a slow round trip and sends only the initial mute', 
 	assert.equal(controller.audioOutputIdentity, undefined)
 })
 
+test('output pilot keeps tracing when volume arrives before output identity', async () => {
+	const { controller, peers, metadataPeers } = fixture()
+	const events = []
+	let pauses = 0
+	controller.start()
+	try {
+		await controller.waitUntilReady(2000)
+		await runAcceptance(controller, {
+			appName: '',
+			mode: 'audio-output',
+			signal: new AbortController().signal,
+			record: (event) => events.push(event),
+			pause: async () => {
+				pauses++
+				const peer = metadataPeers[0]
+				if (pauses === 1) peer.volume(20)
+				if (pauses === 2) {
+					peer.route(['headphones'])
+					peer.capability()
+					peer.volume(20)
+				}
+				if (pauses === 3) peer.volume(25)
+				if (pauses === 4) {
+					peer.route()
+					peer.capability()
+					peer.volume(0)
+				}
+			},
+		})
+		const earlyVolume = events.findIndex(
+			(event) => event.stage === 'audio observation' && event.output === 'original' && event.volume === 20,
+		)
+		const departure = events.findIndex((event) => event.stage === 'changed output')
+		assert.ok(earlyVolume >= 0 && departure > earlyVolume)
+		assert.equal(events.find((event) => event.stage === 'saved mute level cleared').clearedBeforeOutputChange, true)
+		assert.equal(events.at(-1).clearedBeforeOutputChange, true)
+		assert.equal(controller.feedback.mute, 'Unavailable')
+		await assert.rejects(controller.perform({ kind: 'mute' }), /No saved volume/)
+		assert.deepEqual(
+			peers[0].requests.filter(({ id }) => id === '_mcc').map(({ content }) => content.get('_vol').value),
+			[0],
+		)
+	} finally {
+		await controller.stop()
+	}
+})
+
 for (const [scenario, expected] of [
 	['no switch', /No complete output round trip/],
 	['capability loss only', /No complete output round trip/],
 	['no return', /No complete output round trip/],
-	['external volume', /Volume changed before the output switch/],
+	['volume report without switch', /No complete output round trip/],
 	['connection loss', /Connection changed/],
 	['cancel', /abort/i],
 	['stale saved level', /Saved mute level survived/],
+	['reappearing saved level', /Saved mute level reappeared/],
+	['nonzero retained saved level', /Saved mute level survived a nonzero/],
 	['report failure', /Synthetic report failure/],
 	['switch after return', /changed again after returning/],
 ]) {
@@ -512,12 +562,20 @@ for (const [scenario, expected] of [
 						const peer = metadataPeers[0]
 						if (pauses === 1) {
 							if (scenario === 'capability loss only') peer.capability(false)
-							if (scenario === 'external volume') peer.volume(15)
+							if (scenario === 'volume report without switch') peer.volume(15)
 							if (scenario === 'connection loss') peer.close()
 							if (scenario === 'cancel') cancel.abort()
 							if (scenario === 'stale saved level') {
 								const feedback = controller.feedback
 								Object.defineProperty(controller, 'feedback', { get: () => feedback })
+							}
+							if (scenario === 'reappearing saved level' || scenario === 'nonzero retained saved level') {
+								const feedback = controller.feedback
+								if (scenario === 'reappearing saved level') peer.volume(15)
+								Object.defineProperty(controller, 'feedback', {
+									get: () => ({ ...feedback, volume: scenario === 'nonzero retained saved level' ? 15 : 0 }),
+								})
+								peer.volume(15)
 							}
 							if (['no return', 'stale saved level', 'report failure', 'switch after return'].includes(scenario))
 								peer.route(['headphones'])

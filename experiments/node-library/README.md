@@ -224,11 +224,16 @@ The focused output-change test mutes once, then observes a manual round trip to
 another output and back for up to three minutes. Start audible playback at a
 comfortable level, with authenticated volume between 10 and 95 percent. Once
 muted, select the other output, return to the original one, then restore volume
-with the normal remote. The pilot confirms that the saved mute level clears
-when the authenticated output set changes and stays cleared after returning,
-including five more seconds of observation. Capability loss alone does not
-count as an output change. Output identity comparisons stay inside the process;
-the receipt does not record device identifiers.
+with the normal remote after the result. The pilot requires the saved mute level
+to be cleared on the changed output and to stay cleared after returning,
+including five more seconds of observation. It records volume, mute-save state,
+and output phase in arrival order. A volume update before changed output identity
+keeps observation running; the receipt separately records whether the saved
+level was already cleared before that identity changed. This establishes the
+observed sequence without attributing an earlier clear to the later output event.
+Neither a volume update nor capability loss alone counts as an output change.
+Output identity comparisons stay inside the process; the receipt uses output
+phases and revision numbers rather than device identifiers.
 
 ```sh
 node dist/prototype/acceptance-live.js --mode audio-output
@@ -239,8 +244,8 @@ Only the initial mute sends a volume control. The pilot never selects an output,
 attempts unmute on a changed output, or automatically restores a level. A missing
 round trip, connection change, cancellation or retained mute level stops the
 test; restore volume with the normal remote afterward. Cancellation is triggered
-after 210 seconds including startup, followed by bounded cleanup. This tests saved-level
-invalidation during owner-operated routing, not automated AirPods selection.
+after 210 seconds including startup, followed by bounded cleanup. This tests
+saved-level invalidation during owner-operated routing, not automated AirPods selection.
 
 The acceptance runner previews offline by default. This command does not
 read credentials, discover devices, or open a network connection:

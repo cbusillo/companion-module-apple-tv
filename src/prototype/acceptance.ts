@@ -20,8 +20,11 @@ type Event = {
 	stage: string
 	result: string
 	action?: RemoteAction
-	volume?: number
+	volume?: number | null
 	mute?: 'Muted' | 'Unmuted' | 'Unavailable'
+	output?: 'original' | 'different' | 'unavailable'
+	audioRevision?: number
+	clearedBeforeOutputChange?: boolean
 	expected?: 'On' | 'Off'
 	attempt?: number
 }
@@ -55,7 +58,8 @@ export function previewAcceptance(
 		...(mode === 'audio-output'
 			? [
 					'Mute once, then observe the owner switching to another audio output and back within three minutes',
-					'Confirm the saved mute level clears on the changed output and stays cleared on return; observe five more seconds',
+					'Record volume and output report order; require the saved mute level to be cleared on the changed output and on return',
+					'An early volume update keeps observation running; only a reported output departure and return count, followed by five seconds',
 					'No further volume or routing controls are sent; restore a comfortable volume with the normal remote afterward',
 				]
 			: []),
@@ -197,14 +201,43 @@ export async function runAcceptance(controller: Controller, options: Options): P
 		options.record({ stage: 'manual output round trip', result: 'waiting up to 180 seconds; no further controls' })
 		let changedOutput = false
 		let returned = false
+		let savedLevelCleared = false
+		let clearedBeforeOutputChange = false
+		let previousObservation = ''
 		let failure: Error | undefined
 		const inspectOutput = (): void => {
 			check()
 			const identity = controller.audioOutputIdentity
 			const feedback = controller.feedback
 			if (!feedback) throw new PilotStopped('Audio feedback became unavailable')
+			const output = identity === undefined ? 'unavailable' : identity === originalOutput ? 'original' : 'different'
+			const observation = {
+				volume: feedback.volume,
+				mute: feedback.mute,
+				output,
+				audioRevision: controller.audioRevision,
+			} as const
+			const observationKey = JSON.stringify(observation)
+			if (observationKey !== previousObservation) {
+				previousObservation = observationKey
+				options.record({ stage: 'audio observation', result: 'reported; observation only', ...observation })
+			}
+			if (savedLevelCleared && feedback.mute === 'Muted')
+				throw new PilotStopped('Saved mute level reappeared without another mute command')
 			if ((changedOutput || (identity !== undefined && identity !== originalOutput)) && feedback.mute === 'Muted')
 				throw new PilotStopped('Saved mute level survived an output change')
+			if (feedback.volume !== null && feedback.volume > 0 && feedback.mute === 'Muted')
+				throw new PilotStopped('Saved mute level survived a nonzero volume report')
+			if (!savedLevelCleared && feedback.mute !== 'Muted') {
+				savedLevelCleared = true
+				clearedBeforeOutputChange = !changedOutput && output !== 'different'
+				options.record({
+					stage: 'saved mute level cleared',
+					result: 'observation continues; a volume update alone does not confirm an output switch',
+					...observation,
+					clearedBeforeOutputChange,
+				})
+			}
 			if (identity === undefined) return
 			if (identity !== originalOutput) {
 				if (returned) throw new PilotStopped('Audio output changed again after returning')
@@ -219,8 +252,6 @@ export async function runAcceptance(controller: Controller, options: Options): P
 					result: 'saved mute level remains cleared',
 					mute: feedback.mute,
 				})
-			} else if (!changedOutput && feedback.volume !== null && feedback.volume > 0) {
-				throw new PilotStopped('Volume changed before the output switch; repeat requires a newly prepared mute')
 			}
 		}
 		// Never throw through the metadata emitter; surface errors in the awaited pilot.
@@ -252,6 +283,7 @@ export async function runAcceptance(controller: Controller, options: Options): P
 				stage: 'output round trip complete',
 				result: 'saved level stayed cleared; restore volume with the normal remote; physical result unverified',
 				mute: controller.feedback?.mute,
+				clearedBeforeOutputChange,
 			})
 		} finally {
 			unsubscribe()

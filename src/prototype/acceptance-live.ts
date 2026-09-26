@@ -49,7 +49,9 @@ Every write requires a fresh matching TV report. Output changes stop the remaini
 If interrupted while muted, use the normal remote to restore volume; no automatic cleanup write is sent.
 Explicit --mode audio-output: mute once, then watch a manual output round trip for up to three minutes.
 Start audible playback with authenticated volume 10-95%. After it mutes, select another output and return.
-The test observes the saved mute level clearing on the changed output and staying cleared on return.
+The test requires the saved mute level to be cleared on the changed output and to stay cleared on return.
+Volume can arrive before output identity: keep observing and record the order without sending another control.
+The receipt distinguishes an earlier saved-level clear from one first observed on the changed output.
 It sends no further volume or routing controls. Restore volume with the normal remote afterward.
 Capability loss alone does not count as an output switch. Connection loss stops the test.
 Power and remaining modes briefly blank the TV; rapid sleep/wake remains unqualified.
