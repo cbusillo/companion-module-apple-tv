@@ -48,6 +48,7 @@ export class NodeController {
 	private readonly listeners = new Set<() => void>()
 	private readonly discover: () => Promise<ControllerTarget>
 	private epoch = 0
+	private playing: MetadataSnapshot['nowPlaying'] = { state: 'Unknown' }
 	reconnects = 0
 	constructor(
 		private readonly deviceId: string,
@@ -70,6 +71,9 @@ export class NodeController {
 	}
 	get feedback(): CommandState | undefined {
 		return this.commands?.state
+	}
+	get nowPlaying(): MetadataSnapshot['nowPlaying'] {
+		return { ...this.playing }
 	}
 	get audioRevision(): number {
 		return this.commands?.audioRevision ?? -1
@@ -226,6 +230,7 @@ export class NodeController {
 					(next) => {
 						if (epoch !== this.epoch) return
 						snapshot = next
+						this.playing = { ...next.nowPlaying }
 						this.commands?.observeMetadata(next)
 						if (!next.connected && this.endSession && !this.stopRequested)
 							this.failSession(this.endSession, 'Metadata connection lost')
@@ -285,6 +290,7 @@ export class NodeController {
 				this.queue.invalidate()
 				this.commands?.invalidate()
 				this.commands = undefined
+				this.playing = { state: 'Unknown' }
 				this.endSession?.resolve()
 				this.endSession = undefined
 			}

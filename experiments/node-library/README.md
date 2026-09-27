@@ -1,10 +1,10 @@
-# Node library feasibility prototype
+# Node library extensions and qualification
 
-This is a feasibility prototype of extensions to `node-appletv-remote` 0.3.2,
-with offline tests and a separate, explicit-target live test harness.
-The normal Companion entry point still uses the existing Python worker.
-The candidate library is a development dependency, and the prototype is not
-loaded by the connection or included in the Companion bundle.
+These are reproducible extensions to `node-appletv-remote` 0.3.2, with offline
+tests and a separate, explicit-target live harness. The version 0.5 candidate
+integrates the controller into Companion's normal entry point and bundles the
+patched library. The installed Python version remains separate until an approved
+replacement. See the root README for the normal-user discovery and PIN flow.
 
 The prototype composes app listing/launching, explicit seek intervals, absolute
 volume read/write, and power-state queries through the library's public
@@ -194,8 +194,9 @@ input. At `bf981b9`, the owner accepted absolute volume down/restore and
 mute/unmute on one unchanged output, with fresh matching reports and zero
 reconnects. Output-change protection still requires its separate live test.
 
-The normal Companion entry point still uses Python. The new controller and CLI
-are development tools, not an installed replacement or the final pairing UI.
+The same controller now backs the version 0.5 Companion candidate. The CLI remains
+a developer tool with a separate credential file; normal setup uses Companion's
+connection secrets and requires no terminal.
 
 ### Prepare before asking for physical observation
 
@@ -497,7 +498,34 @@ prototype controller and standalone observer now share the metadata session's
 cancellation and cleanup path. The independent encrypted Companion peer uses a
 synthetic metadata connection for its reconnect/no-replay check; it does not
 claim to reproduce an AirPlay server.
-The installed Python-backed entry point and its package remain unchanged.
+The installed Python-backed connection remains unchanged. The version 0.5
+candidate packages the Node controller and schemas, with native cancellation
+through discovery, PIN entry, verification and shutdown. Pairing verifies the
+accessory's M6 identity signature before returning keys. An independent pyatv
+peer proves normal pairing and rejection of a deliberately corrupted signature.
+
+The prepared September 27 run at `1466163` used both native sessions. The owner
+reported lower volume immediately after returning to AirPods, then the TV went
+off, woke, and AirPods were muted. The output stage sent only its initial mute;
+it discarded the saved level and renewed the metadata subscription after each
+reported output change. Feedback recovered to 30% away and 0% on return. These
+reports do not establish exact immediate per-route loudness. The power stage
+used twenty seconds asleep and passed Off, On and already-On checks with zero
+reconnects. A prior fifteen-minute read-only soak and three deliberately closed
+test metadata sessions covered resource cleanup and recovery without controls.
+
+Normal setup clears submitted PINs, saves keys only after fresh dual-session
+verification, and preserves previous keys on failure. One-time migration keeps
+button/variable IDs and disables old Python-config connections until a new PIN
+pairing. Package tests load actual bundled schemas under package-only read
+permissions. Now Playing uses reported position, timestamp and rate to advance
+elapsed time; this is distinct from the CLI's raw reported-position observation.
+
+One earlier synthetic M4 failure remains unexplained at the exact-input level.
+A retained diagnostic found that srptools and fast-srp-hap differ when an SRP
+integer begins with a zero byte. Ordinary inputs agreed; that does not prove
+which encoding the tested tvOS version accepts in the edge case. No seed,
+automatic pairing retry or production SRP math was changed to hide this result.
 
 ## Remaining qualification
 
@@ -506,19 +534,13 @@ lifecycle against a fake connection. They do not prove the TV accepts a command,
 changes physical state, or behaves correctly after reconnect.
 A returned request acknowledgement is not physical confirmation.
 
-Before this can replace the worker, it still needs:
-
-- Discovery and PIN pairing inside Companion, using its connection secret store.
-- Integration of the persistent controller into Companion, extended lifecycle
-  qualification, and supervised acceptance of navigation, swipes, media, and power.
-- Owner-observed saved-mute invalidation across output changes; fixed-output
-  absolute volume and mute/unmute were accepted at `bf981b9`.
-- Long-lived AirPlay lifecycle and Now Playing integration into Companion.
-- Packaged installation tests on the intended operating systems, followed by
-  supervised Apple TV acceptance with separate pairing and preserved rollback.
-
-The installed Python-backed connection and its credentials are outside this
-prototype. Fixing its existing setup instructions is a separate change.
+The package candidate still requires fresh end-user PIN pairing and supervised
+installed acceptance with rollback preserved. Synthetic package coverage on an
+operating system does not establish device/firewall/discovery behavior there.
+Personal AirPods selection is not implemented. The observed short sleep/wake
+timing limitation and the SRP edge-case uncertainty remain explicit limitations
+for broader release qualification. The existing installed connection and its
+credentials are outside the separate developer harness.
 
 ## References
 

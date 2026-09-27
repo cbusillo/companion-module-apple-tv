@@ -14,6 +14,10 @@ export type MetadataSnapshot = {
 		album?: string
 		duration?: number
 		reportedPosition?: number
+		positionTimestamp?: number
+		playbackRate?: number
+		itemId?: string
+		playerId?: string
 	}
 	audio: {
 		volume?: number
@@ -199,7 +203,13 @@ export class MetadataState {
 				for (const item of update.contentItems) {
 					const record = fields(item)
 					const existing = player?.items.find((entry) => entry.identifier === text(record?.identifier))
-					if (existing) existing.metadata = { ...fields(existing.metadata), ...fields(record?.metadata) }
+					if (existing) {
+						const update = fields(record?.metadata)
+						const merged = { ...fields(existing.metadata), ...update }
+						if (own(update, 'elapsedTime') !== undefined && own(update, 'elapsedTimeTimestamp') === undefined)
+							delete merged.elapsedTimeTimestamp
+						existing.metadata = merged
+					}
 				}
 				return
 			}
@@ -267,6 +277,11 @@ export class MetadataState {
 		result.nowPlaying.album = text(own(metadata, 'albumName'))
 		result.nowPlaying.duration = finite(own(metadata, 'duration'))
 		result.nowPlaying.reportedPosition = finite(own(metadata, 'elapsedTime'))
+		const timestamp = finite(own(metadata, 'elapsedTimeTimestamp'))
+		result.nowPlaying.positionTimestamp = timestamp === undefined ? undefined : timestamp + 978307200
+		result.nowPlaying.playbackRate = finite(own(metadata, 'playbackRate'))
+		result.nowPlaying.itemId = text(player.items[player.location]?.identifier)
+		result.nowPlaying.playerId = selected ?? undefined
 		return result
 	}
 }

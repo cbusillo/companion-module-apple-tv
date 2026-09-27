@@ -745,6 +745,85 @@ index 0000000..fb9a21e
 +    expect(() => opackDecode(Buffer.from('d243666f6fc2', 'hex'))).toThrow();
 +  });
 +});
+diff --git a/src/companion/__tests__/pairing-lifecycle.test.ts b/src/companion/__tests__/pairing-lifecycle.test.ts
+new file mode 100644
+index 0000000..358c141
+--- /dev/null
++++ b/src/companion/__tests__/pairing-lifecycle.test.ts
+@@ -0,0 +1,73 @@
++import { createServer, type Socket, type AddressInfo } from 'node:net';
++import { once } from 'node:events';
++import { describe, expect, it } from 'vitest';
++import { CompanionPairSetup } from '../pair-setup.js';
++import { encodeFrame, FrameType } from '../framing.js';
++import { opackEncode, type OpackValue } from '../opack.js';
++import { tlvEncode, TlvTag } from '../../util/tlv.js';
++
++async function peer(operation: (port: number, sockets: Set<Socket>) => Promise<void>, reply = false): Promise<void> {
++  const sockets = new Set<Socket>();
++  const server = createServer(socket => {
++    sockets.add(socket);
++    socket.on('close', () => sockets.delete(socket));
++    socket.on('error', () => {});
++    let sent = false;
++    socket.on('data', () => {
++      if (!reply || sent) return;
++      sent = true;
++      const data = tlvEncode({ [TlvTag.SeqNo]: Buffer.from([2]), [TlvTag.Salt]: Buffer.alloc(16, 1), [TlvTag.PublicKey]: Buffer.alloc(384, 7) });
++      socket.write(encodeFrame(FrameType.PS_Next, opackEncode(new Map<OpackValue, OpackValue>([['_pd', data]]))));
++    });
++  });
++  server.listen(0, '127.0.0.1');
++  await once(server, 'listening');
++  try { await operation((server.address() as AddressInfo).port, sockets); }
++  finally { for (const socket of sockets) socket.destroy(); await new Promise<void>(resolve => server.close(() => resolve())); }
++}
++
++describe('Companion pairing lifetime', () => {
++  it('cancels before opening a socket', async () => {
++    await peer(async (port, sockets) => {
++      const pair = new CompanionPairSetup('127.0.0.1', port);
++      await expect(pair.start({ signal: AbortSignal.abort() })).rejects.toThrow(/closed/);
++      expect(sockets.size).toBe(0);
++      pair.destroy();
++    });
++  });
++
++  it('times out an unanswered handshake and closes its socket', async () => {
++    await peer(async port => {
++      const pair = new CompanionPairSetup('127.0.0.1', port, { timeoutMs: 50 });
++      await expect(pair.start()).rejects.toThrow(/timed out/);
++      await expect(pair.start()).rejects.toThrow(/once/);
++      pair.destroy();
++    });
++  });
++
++  it('rejects immediately when the peer closes during a response wait', async () => {
++    await peer(async (port, sockets) => {
++      const pair = new CompanionPairSetup('127.0.0.1', port);
++      const started = pair.start();
++      const rejected = expect(started).rejects.toThrow(/closed/);
++      while (!sockets.size) await new Promise(resolve => setTimeout(resolve, 1));
++      for (const socket of sockets) socket.destroy();
++      await rejected;
++    });
++  });
++
++  it('keeps the PIN session alive, rejects duplicate start and cancels a pending finish', async () => {
++    await peer(async port => {
++      const cancel = new AbortController();
++      const pair = new CompanionPairSetup('127.0.0.1', port);
++      await pair.start({ signal: cancel.signal });
++      await expect(pair.start()).rejects.toThrow(/once/);
++      await expect(pair.finish('abc')).rejects.toThrow(/four-digit/);
++      const rejected = expect(pair.finish('1234')).rejects.toThrow(/cancelled|closed/);
++      cancel.abort();
++      await rejected;
++      pair.destroy();
++      await expect(pair.finish('1234')).rejects.toThrow(/start/);
++    }, true);
++  });
++});
 diff --git a/src/companion/__tests__/socket-latency.test.ts b/src/companion/__tests__/socket-latency.test.ts
 new file mode 100644
 index 0000000..3a1fba5
@@ -1070,6 +1149,234 @@ index 7641ce2..0918c4b 100644
      offset = val.offset;
      dict.set(key.value, val.value);
    }
+diff --git a/src/companion/pair-setup.ts b/src/companion/pair-setup.ts
+index e3b1fed..615c5ed 100644
+--- a/src/companion/pair-setup.ts
++++ b/src/companion/pair-setup.ts
+@@ -6,15 +6,17 @@
+  */
+
+ import { Socket } from 'node:net';
+-import { generateKeyPairSync, sign, createPrivateKey, randomUUID } from 'node:crypto';
++import { generateKeyPairSync, sign, verify, createPrivateKey, createPublicKey, randomUUID } from 'node:crypto';
+ import { TlvTag, tlvEncode, tlvDecode } from '../util/tlv.js';
+ import { hkdfSha512, encryptChaCha20, decryptChaCha20 } from '../util/crypto.js';
+ import { SRPClient } from '../auth/srp.js';
+ import { FrameType, encodeFrame, parseFrames, type Frame } from './framing.js';
+ import { opackEncode, opackDecode, type OpackDict, type OpackValue } from './opack.js';
+ import type { HAPCredentials } from '../auth/types.js';
++import { PendingRequests } from '../util/pending-requests.js';
+
+ const ED25519_PKCS8_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
++const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
+
+ export class CompanionPairSetup {
+   private socket: Socket | undefined;
+@@ -31,12 +33,17 @@ export class CompanionPairSetup {
+
+   /** Queued frames that arrived before anyone was waiting for them. */
+   private frameQueue: Frame[] = [];
+-  private pendingFrameResolvers: Array<(frame: Frame) => void> = [];
++  private pending = new PendingRequests(error => this.shutdown(error), 'Companion pairing');
++  private phase: 'new' | 'starting' | 'pin' | 'finishing' | 'closed' = 'new';
++  private removeAbortListener?: () => void;
+
+   constructor(
+     private host: string,
+     private port: number,
++    private options: { timeoutMs?: number } = {},
+   ) {
++    if (!host || !Number.isInteger(port) || port < 1 || port > 65535) throw new RangeError('Invalid pairing target');
++    if (!Number.isFinite(this.timeoutMs) || this.timeoutMs <= 0) throw new RangeError('Invalid pairing timeout');
+     this.clientId = randomUUID();
+
+     const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+@@ -52,28 +59,58 @@ export class CompanionPairSetup {
+    * Open socket and send M1. The Apple TV should display the PIN after this.
+    * Call finish(pin) after the user reads the PIN.
+    */
+-  async start(): Promise<void> {
+-    await this.openSocket();
+-    const { salt, serverPublicKey } = await this.sendM1();
+-    this.salt = salt;
+-    this.serverPublicKey = serverPublicKey;
++  async start(options: { signal?: AbortSignal } = {}): Promise<void> {
++    if (this.phase !== 'new') throw new Error('Pairing can only start once');
++    this.phase = 'starting';
++    const { signal } = options;
++    if (signal) {
++      const cancel = () => this.shutdown(new Error('Companion pairing cancelled'));
++      signal.addEventListener('abort', cancel, { once: true });
++      this.removeAbortListener = () => signal.removeEventListener('abort', cancel);
++      if (signal.aborted) cancel();
++    }
++    try {
++      this.assertOpen();
++      await this.openSocket();
++      const { salt, serverPublicKey } = await this.sendM1();
++      this.assertOpen();
++      this.salt = salt;
++      this.serverPublicKey = serverPublicKey;
++      this.phase = 'pin';
++    } catch (error) {
++      this.shutdown(new Error('Companion pairing startup failed'));
++      throw error;
++    }
++  }
++
++  private get timeoutMs(): number { return this.options.timeoutMs ?? 10000; }
++
++  private assertOpen(): void {
++    if (this.phase === 'closed') throw new Error('Companion pairing is closed');
+   }
+
+   private openSocket(): Promise<void> {
+-    return new Promise((resolve, reject) => {
+-      this.socket = new Socket();
+-      this.socket.connect(this.port, this.host, () => {
+-        this.socket!.setNoDelay(true);
+-        resolve();
+-      });
+-      this.socket.on('error', (err) => {
+-        reject(err);
+-      });
+-      this.socket.on('data', (data: Buffer) => {
++    this.assertOpen();
++    const connected = this.pending.create<void>('connect', this.timeoutMs);
++    const socket = new Socket();
++    this.socket = socket;
++    socket.on('error', error => this.shutdown(error));
++    socket.on('close', () => this.shutdown(new Error('Companion pairing connection closed')));
++    socket.on('data', (data: Buffer) => {
++      if (this.phase === 'closed') return;
++      try {
+         this.buffer = Buffer.concat([this.buffer, data]);
++        if (this.buffer.length > 1024 * 1024) throw new Error('Pairing frame is too large');
+         this.processFrames();
+-      });
++      } catch {
++        this.shutdown(new Error('Invalid Companion pairing frame'));
++      }
++    });
++    socket.connect(this.port, this.host, () => {
++      socket.setNoDelay(true);
++      this.pending.resolve('connect', undefined);
+     });
++    return connected;
+   }
+
+   /**
+@@ -99,6 +136,7 @@ export class CompanionPairSetup {
+    */
+   private async receivePairingData(): Promise<Buffer> {
+     const frame = await this.waitForAnyFrame();
++    if (frame.type !== FrameType.PS_Next) throw new Error('Unexpected Companion pairing response');
+     const decoded = opackDecode(frame.payload);
+     if (!(decoded instanceof Map)) {
+       throw new Error(`Companion PS: expected OPACK dict response, got frame type 0x${frame.type.toString(16)}`);
+@@ -225,10 +263,19 @@ export class CompanionPairSetup {
+     const serverInfo = tlvDecode(decrypted);
+     const serverId = serverInfo[TlvTag.Identifier];
+     const serverLTPK = serverInfo[TlvTag.PublicKey];
+-    if (!serverId || !serverLTPK) {
+-      throw new Error('Companion PS M6 missing Identifier or PublicKey');
++    const serverSignature = serverInfo[TlvTag.Signature];
++    if (!serverId?.length || serverLTPK?.length !== 32 || serverSignature?.length !== 64) {
++      throw new Error('Companion PS M6 missing valid identity or signature');
+     }
+
++    const accessoryKey = await hkdfSha512(
++      this.sessionKey, 'Pair-Setup-Accessory-Sign-Salt', 'Pair-Setup-Accessory-Sign-Info', 32,
++    );
++    const publicKey = createPublicKey({ key: Buffer.concat([ED25519_SPKI_PREFIX, serverLTPK]), format: 'der', type: 'spki' });
++    if (!verify(null, Buffer.concat([accessoryKey, serverId, serverLTPK]), publicKey, serverSignature))
++      throw new Error('Companion PS M6 signature verification failed');
++    this.assertOpen();
++
+     return {
+       clientId: this.clientId,
+       clientLTSK: this.edPrivateKeyRaw,
+@@ -243,9 +290,11 @@ export class CompanionPairSetup {
+    * start() must have been called first (sends M1, receives M2).
+    */
+   async finish(pin: string): Promise<HAPCredentials> {
+-    if (!this.salt || !this.serverPublicKey) {
++    if (this.phase !== 'pin' || !this.salt || !this.serverPublicKey) {
+       throw new Error('start() must be called before finish()');
+     }
++    if (!/^\d{4}$/.test(pin)) throw new Error('Expected a four-digit PIN');
++    this.phase = 'finishing';
+     try {
+       await this.sendM3(pin, this.salt, this.serverPublicKey);
+       return await this.sendM5();
+@@ -255,35 +304,36 @@ export class CompanionPairSetup {
+   }
+
+   destroy(): void {
++    this.shutdown(new Error('Companion pairing closed'));
++  }
++
++  private shutdown(error: Error): void {
++    if (this.phase === 'closed') return;
++    this.phase = 'closed';
++    this.removeAbortListener?.();
++    this.removeAbortListener = undefined;
++    this.pending.rejectAll(error);
+     this.socket?.destroy();
+     this.socket = undefined;
++    this.buffer = Buffer.alloc(0);
++    this.frameQueue = [];
++    this.salt = this.serverPublicKey = this.sessionKey = undefined;
+   }
+
+   private writeFrame(type: FrameType, payload: Buffer): void {
++    this.assertOpen();
++    if (!this.socket) throw new Error('Companion pairing is not connected');
+     const frame = encodeFrame(type, payload);
+-    this.socket?.write(frame);
++    this.socket.write(frame, error => { if (error) this.shutdown(error); });
+   }
+
+-  private waitForAnyFrame(timeoutMs = 10000): Promise<Frame> {
++  private waitForAnyFrame(): Promise<Frame> {
++    this.assertOpen();
+     if (this.frameQueue.length > 0) {
+       return Promise.resolve(this.frameQueue.shift()!);
+     }
+
+-    return new Promise((resolve, reject) => {
+-      const onFrame = (frame: Frame): void => {
+-        clearTimeout(timer);
+-        resolve(frame);
+-      };
+-
+-      const timer = setTimeout(() => {
+-        const idx = this.pendingFrameResolvers.indexOf(onFrame);
+-        if (idx >= 0) this.pendingFrameResolvers.splice(idx, 1);
+-        reject(new Error('Companion PS timeout waiting for response frame'));
+-      }, timeoutMs);
+-
+-      this.pendingFrameResolvers.push(onFrame);
+-      this.processFrames();
+-    });
++    return this.pending.create<Frame>('frame', this.timeoutMs);
+   }
+
+   private processFrames(): void {
+@@ -291,10 +341,10 @@ export class CompanionPairSetup {
+     this.buffer = remainder;
+
+     for (const frame of frames) {
+-      const resolver = this.pendingFrameResolvers.shift();
+-      if (resolver) {
+-        resolver(frame);
++      if (this.pending.has('frame')) {
++        this.pending.resolve('frame', frame);
+       } else {
++        if (this.frameQueue.length >= 8) throw new Error('Unexpected queued pairing frames');
+         this.frameQueue.push(frame);
+       }
+     }
 diff --git a/src/connection.ts b/src/connection.ts
 index 8851355..deb04dc 100644
 --- a/src/connection.ts
@@ -2076,18 +2383,28 @@ index 0000000..a1c862a
 +  });
 +});
 diff --git a/src/mrp/messages.ts b/src/mrp/messages.ts
-index 499a60a..0d88958 100644
+index 499a60a..f1541b4 100644
 --- a/src/mrp/messages.ts
 +++ b/src/mrp/messages.ts
-@@ -7,6 +7,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
- const PROTO_DIR = join(__dirname, '..', 'proto');
+@@ -2,11 +2,16 @@ import protobuf from 'protobufjs';
+ import { fileURLToPath } from 'node:url';
+ import { randomUUID } from 'node:crypto';
+ import { dirname, join } from 'node:path';
++import { existsSync } from 'node:fs';
+
+ const __dirname = dirname(fileURLToPath(import.meta.url));
+-const PROTO_DIR = join(__dirname, '..', 'proto');
++// Single-file application bundles keep the packaged schemas next to their entry.
++const PROTO_DIR = existsSync(join(__dirname, 'proto'))
++  ? join(__dirname, 'proto')
++  : join(__dirname, '..', 'proto');
 
  export enum MessageType {
 +  Unknown = 0,
    SendCommand = 1,
    SendCommandResult = 2,
    GetState = 3,
-@@ -47,8 +48,15 @@ export enum MessageType {
+@@ -47,8 +52,15 @@ export enum MessageType {
    GenericMessage = 42,
    SendButtonEvent = 43,
    SetNowPlayingClient = 46,
@@ -2103,7 +2420,7 @@ index 499a60a..0d88958 100644
  }
 
  let rootPromise: Promise<protobuf.Root> | null = null;
-@@ -74,6 +82,13 @@ const PROTO_FILES = [
+@@ -74,6 +86,13 @@ const PROTO_FILES = [
    'SetConnectionStateMessage.proto',
    'SetHiliteModeMessage.proto',
    'SetNowPlayingClientMessage.proto',
@@ -2117,7 +2434,7 @@ index 499a60a..0d88958 100644
    'PlaybackQueueRequestMessage.proto',
    'TransactionMessage.proto',
    'UpdateClientMessage.proto',
-@@ -163,6 +178,16 @@ async function encodeMessage(
+@@ -163,6 +182,16 @@ async function encodeMessage(
  }
 
  export class MRPMessage {
@@ -2482,7 +2799,7 @@ index f797944..fe9fbfa 100644
  /** Build a "rply" frame to acknowledge a received sync frame */
 diff --git a/src/util/pending-requests.ts b/src/util/pending-requests.ts
 new file mode 100644
-index 0000000..e1442c7
+index 0000000..8a87662
 --- /dev/null
 +++ b/src/util/pending-requests.ts
 @@ -0,0 +1,34 @@
@@ -2492,14 +2809,14 @@ index 0000000..e1442c7
 +export class PendingRequests {
 +  private entries = new Map<string, Pending>();
 +
-+  constructor(private onTimeout: (error: Error) => void) {}
++  constructor(private onTimeout: (error: Error) => void, private label = 'AirPlay') {}
 +
 +  create<T>(key: string, timeoutMs: number): Promise<T> {
-+    if (this.entries.has(key)) throw new Error('An equivalent AirPlay request is already pending');
++    if (this.entries.has(key)) throw new Error(`An equivalent ${this.label} request is already pending`);
 +    return new Promise<T>((resolve, reject) => {
 +      const finish = () => { clearTimeout(timer); this.entries.delete(key); };
 +      const timer = setTimeout(() => {
-+        const error = new Error('AirPlay request timed out');
++        const error = new Error(`${this.label} request timed out`);
 +        this.reject(key, error);
 +        this.onTimeout(error);
 +      }, timeoutMs);

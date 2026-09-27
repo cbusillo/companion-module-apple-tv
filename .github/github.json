@@ -19,7 +19,8 @@
 			"node": "yarn build"
 		},
 		"package": {
-			"module": "yarn package"
+			"module": "yarn package",
+			"smoke": "yarn test:package"
 		},
 		"inspection": {
 			"tool": "jetbrains",

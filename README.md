@@ -1,148 +1,123 @@
 # Apple TV Companion module
 
-Apple TV control for Bitfocus Companion using a persistent, locally spawned
-Python worker backed by pyatv. The module provides remote commands, power and
-playback control, application launching, swipe gestures, and optional Now
-Playing metadata.
-
-The Python runtime is currently an explicit installation prerequisite. New
-connections start disabled, and pairing is handled by a separate interactive
-utility rather than by the runtime worker.
-
-An [offline Node library prototype](experiments/node-library/README.md) evaluates
-a possible future backend. It is not part of the installed connection.
-
-## Development
-
-Use Node 22 and Yarn 4 (`npx --yes --package=@yarnpkg/cli-dist@4.17.0 yarn` is
-an alternative to installing Yarn globally).
-
-```sh
-yarn install
-uv sync --locked
-yarn build
-yarn test
-uv run python -m unittest discover -s tests -p 'test_*.py' -v
-yarn lint
-yarn package
-```
+Control Apple TV from Bitfocus Companion, with discovery, PIN pairing, remote
+buttons, app launching and Now Playing variables. Version 0.5 runs entirely in
+Companion's Node runtime. Users do not install Python, run a terminal command or
+prepare a credential file.
 
 ## Setup
 
-1. Load the module into Companion, leaving Enable Apple TV connection unchecked.
-2. Run `uv sync --locked`, then set the Python executable to the absolute path
-   of this project's `.venv/bin/python`. Dependencies are not downloaded when
-   a Companion button is pressed.
-3. Select an explicitly prepared credential JSON file with `host`, `identifier`,
-   and `credentials`. The file must be regular, owner-owned, mode 0600, and
-   outside any repository. Do not reuse credentials from another integration.
-4. Confirm the exact physical target before enabling the connection. An
-   existing pyatv storage file has a different schema and cannot be used
-   directly. Run the separate interactive pairing utility described below; the
-   runtime worker never pairs devices.
+1. Import the built package into Companion and add an Apple TV connection.
+2. Enable the connection and Save. Select your Apple TV from the discovered list.
+   If needed, check **Refresh device list when saving** and Save again.
+3. While watching that TV, check **Start pairing when saving** and Save.
+4. Enter the four-digit PIN shown on the TV and Save again within three minutes.
+5. Wait for **Connected**. Keys are saved in Companion's connection secrets after
+   a fresh connection verifies remote control and metadata access.
 
-One Remote command action exposes navigation, select, back, home, play/pause,
-previous/next, relative volume (one step), seek (ten or thirty seconds), and
-fixed brisk up/down/left/right touchpad swipes.
-The worker checks the current pyatv capability immediately before each action.
-Cached availability never blocks a newly available action; unsupported commands
-are rejected without replay. Version 0.3 adds Control Center, App Switcher,
-Screensaver, state-based sleep/wake, app launching by bundle identifier, and
-volume save/zero/restore. Text entry remains outside the module.
+Apple TV and Companion must be reachable on the same local network with Bonjour
+discovery available. A saved pairing uses the TV's discovered identifier, so a
+changed IP address does not require editing the connection. A PIN appears only
+after an explicit pairing request; reconnects never start pairing automatically.
 
-Volume save/restore requires current `Volume` and `SetVolume` availability. It
-never guesses a level when playback is already at zero. The saved level is
-session-local and cleared by dial changes, external nonzero volume changes,
-reported output-device changes, lost capabilities, or reconnect. Output changes
-that the device does not report cannot be detected. A power toggle refuses an
-unknown state rather than guessing which command to send.
+The PIN clears after submission. If pairing fails or expires, explicitly start a
+new attempt. Previous saved keys are retained until a replacement verifies.
+Disabling the connection cancels a pending attempt. Failed pairing can leave a
+controller registration on the TV; remove only the abandoned registration from
+tvOS when retiring it.
 
-## Now Playing
+## Upgrading from the Python version
 
-An optional AirPlay pairing enables the MRP metadata transport. Add it to a new
-credential file with the interactive helper; the existing remote pairing stays
-untouched:
+Keep a Companion backup and the previous package before upgrading. Existing
+connections start disabled after migration and require one new PIN pairing.
+Enable, discover, select and pair using the steps above. Existing Remote command
+and Launch App action IDs and variable names are preserved, so buttons keep their
+mappings. Old Python and credential-file paths remain in the saved config for
+rollback; the Node runtime does not read them. Keep that environment and file
+until the new installation has been accepted.
 
-```sh
-uv run python bridge/pair_metadata.py \
-  --source ~/.config/companion-apple-tv/credentials.json \
-  --output ~/.config/companion-apple-tv/credentials-with-metadata.json
-```
+## Controls and feedback
 
-Select the new file in Companion after successful verification. The helper
-never accepts a PIN as a command argument, prints credentials, or overwrites an
-existing destination. The runtime never initiates pairing.
+Remote command provides navigation, Select, Back, Home, Control Center, App
+Switcher, Screensaver, play/pause, previous/next, ten- or thirty-second seeks,
+relative volume, mute save/restore, power toggle and four swipe directions.
+Launch App lists applications reported by the TV and accepts existing bundle
+identifiers. Playback commands depend on the active app's advertised capabilities.
+Text entry and selecting personal AirPods are not implemented.
 
-The module polls cached device metadata once per second through its serialized
-worker queue and provides title, artist, app, playback state, elapsed time,
-remaining time, progress, volume, mute-save state, and power variables. Live
-streams without a duration have no invented remaining time. Transient metadata
-errors retain the last good text and mark it stale. Connection loss explicitly
-marks telemetry offline. Available metadata depends on the playing app.
+Power toggle requires a current known state. Wake sends Home only while the TV
+reports Off, so it opens the Home screen rather than resuming the previous stream.
+Wake from an already-asleep TV and a cycle with twenty seconds asleep passed on
+the test device. An earlier five-second cycle failed; no minimum safe interval
+has been established. Avoid immediate sleep/wake automation until it is qualified
+on your device.
 
-The connection variable reports session setup, not independently verified
-playback or device power. `last_result` distinguishes dispatch acknowledgement
-from physical state confirmation. Readiness requires a successful app-list round
-trip. Disconnect notifications invalidate the session immediately; after 30
-seconds idle another app-list query detects a silent connection loss within a
-three-second request timeout.
+Mute saves a nonzero reported volume and sets it to zero. A second press restores
+the saved value only while the audio output and feedback remain valid. A dial
+change, external volume change, output change, lost capability or reconnect
+discards the saved level. Switching back to AirPods does not automatically restore
+audio. A missing or discarded level is **Unavailable**, not a guessed mute state.
+Output changes are observable only when reported by the TV; numeric volume does
+not prove perceived loudness or per-output accuracy.
 
-Since 0.2.3, `last_result` replaces `unavailable or busy` with separate
-`not connected; not sent`, `unknown command; not sent`, and `busy; not sent`
-results. Unsupported actions report `unsupported by current playback`. Update
-any custom comparisons against the old strings when upgrading.
+Variables include connection, title, artist, app, playback state, elapsed and
+remaining time, progress, volume, mute-save state, power and `last_result`.
+Elapsed time advances from the selected player's reported position, timestamp
+and playback rate; it freezes on pause and clears on connection loss. Streams
+without a duration have no invented remaining time. Metadata availability depends
+on the playing app. `last_result` describes dispatch, rejection or uncertain
+delivery, never physical confirmation. Its wording changed from the Python
+version; update custom comparisons if used.
 
 ## Failure and lifecycle contract
 
-- At most eight submitted actions; queued input expires after one second.
-- At most one worker request in flight. An action timeout terminates the
-  session; the result is unknown, never retried.
-- Session generation changes discard old queued input and late results.
-- Connection retries back off from five to sixty seconds plus up to one second
-  of jitter. They do not replay actions.
-- Credentials travel over the private child pipe, never command arguments or
-  module logs. Python diagnostics are suppressed; only bounded result categories
-  are emitted.
-- The worker has no network listener and does not persist credentials.
+- One serialized action queue, at most eight operations, with input expiring
+  after 500 ms waiting. Complete button and swipe gestures stay together.
+- Failed or lost sessions discard queued actions and stale feedback. Controls
+  are never automatically retried, including after uncertain delivery.
+- Remote and metadata connections reconnect together using saved pairing and
+  bounded backoff. Read-only health checks detect silent failures.
+- Disabling or destroying the connection cancels discovery, pairing, requests,
+  sockets and timers. Keys remain in Companion's secret store.
+- The package needs no child-process or general filesystem permission. It reads
+  its own bundled protocol schemas. Companion's handling of secrets and backups
+  still applies; do not publish backups containing pairing keys.
+
+## Development and qualification
+
+Use Node 22 and Yarn 4. Python is used only for the independent protocol oracle
+and retained reference-worker tests, not by the packaged module.
+
+```sh
+yarn install --immutable
+yarn build
+yarn test
+yarn lint
+yarn package
+yarn test:package
+uv sync --locked
+uv run python -m unittest discover -s tests -p 'test_*.py' -v
+uv run --python 3.13 --locked python experiments/node-library/loopback-peer.py
+uv run --python 3.13 --locked python experiments/node-library/mrp_fixtures.py | node experiments/node-library/metadata-oracle.mjs
+```
+
+CI checks the bundle on Linux, macOS and Windows. Synthetic tests cover setup,
+secret persistence, restart, cancellation, migration, encryption, metadata,
+queue expiry and reconnect without replay. The package test loads the real bundle
+and schemas with filesystem access restricted to the package. Hardware testing
+so far covers one Apple TV; this does not establish compatibility with every tvOS
+version, app, audio route or operating-system installation.
+
+The [library patch and qualification notes](experiments/node-library/README.md)
+describe the reproducible extensions to `node-appletv-remote` 0.3.2 and the separate
+developer harness. Source and compiled patches are checked in together. No
+upstream acceptance or distribution approval is implied by the candidate.
 
 ## Provenance
 
-`bridge/controller.py` adapts an Apple TV protocol adapter from the MIT-licensed
-Media Control Relay project. Its license is preserved in LICENSE-MCR. This is
-source reuse, not a runtime dependency. The worker excludes discovery and
-pairing operations from its public request surface. pyatv 0.18.0 is locked in
-uv.lock. Bitfocus's official TypeScript module template is retained in Git
-history.
-
-## Pairing utility
-
-Run from an interactive terminal with the exact host and stable identifier:
-
-```sh
-uv run python bridge/pair.py \
-  --host DEVICE_HOST --identifier DEVICE_IDENTIFIER \
-  --output ~/.config/companion-apple-tv/credentials.json
-```
-
-The parent directory must be private (0700). The utility prompts for the
-four-digit TV PIN without echo, verifies a connection and read-only app-list
-query, and publishes a complete 0600 credential file without replacing an
-existing file. PIN and credentials are never command arguments or printed. A
-failed pairing may leave an authorization on the TV; reconcile it in tvOS if
-abandoning setup. If replacing revoked credentials, choose a new filename,
-verify it, then select that file in Companion. Keep the old file until rollback
-is no longer needed.
-
-Idle health checks share the action queue. New input may briefly wait behind a
-probe; input older than one second expires, and no command is retried. An
-unsupported or failed health query prevents the module claiming readiness. The
-app-list query's sleep/wake behavior must be confirmed on the actual device
-before accepting this as a replacement.
-
-## Companion permissions
-
-The module declares `filesystem` to read its owner-only credential file and
-`child-process` to run the Python worker. Companion currently grants general
-filesystem access for that declaration; it cannot limit the grant to one file.
-The module itself validates the selected file and directory and does not write
-credentials. The separate pairing utility owns credential creation.
+The project started with Bitfocus's TypeScript template and a Python adapter
+reused from the MIT-licensed Media Control Relay project. Historical Python source
+and `LICENSE-MCR` remain for reference and rollback work. The Node runtime uses
+the patched MIT-licensed `node-appletv-remote` library; package generation includes
+the bundled dependency license inventory. pyatv 0.18.0, locked in `uv.lock`, remains
+the independent protocol reference.

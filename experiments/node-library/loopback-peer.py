@@ -164,6 +164,25 @@ class Peer(CompanionServerAuth, asyncio.Protocol):
         })
 
 
+class BadSignaturePeer(Peer):
+    """Keep SRP and encryption valid but corrupt the authenticated M6 identity."""
+
+    def _m5_setup(self, pairing_data: dict[int, bytes]) -> None:
+        original = self.keys
+
+        class CorruptSigner:
+            @staticmethod
+            def sign(data: bytes) -> bytes:
+                signature = original.sign.sign(data)
+                return bytes([signature[0] ^ 1]) + signature[1:]
+
+        self.keys = original._replace(sign=CorruptSigner())
+        try:
+            super()._m5_setup(pairing_data)
+        finally:
+            self.keys = original
+
+
 async def main() -> None:
     failures: list[Exception] = []
     state: PeerState = {"right_down": 0, "drop_next_right": False, "swipes": 0}
@@ -181,6 +200,18 @@ async def main() -> None:
                 raise RuntimeError("Independent loopback protocol test failed")
         assert state["right_down"] == 1, "A failed action was replayed"
         assert state["swipes"] == 4, "Missing complete swipe gestures"
+        bad_server = await asyncio.get_running_loop().create_server(lambda: BadSignaturePeer(failures, state), "127.0.0.1", 0)
+        try:
+            bad_port = bad_server.sockets[0].getsockname()[1]
+            process = await asyncio.create_subprocess_exec(
+                "node", str(root / "tests/fixtures/node-pair-rejection.mjs"), str(bad_port), str(PIN_CODE),
+            )
+            await asyncio.wait_for(process.wait(), 30)
+            if process.returncode or failures:
+                raise RuntimeError("Invalid pairing signature was not rejected")
+        finally:
+            bad_server.close()
+            await bad_server.wait_closed()
     finally:
         if process is not None and process.returncode is None:
             process.kill()

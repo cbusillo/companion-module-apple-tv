@@ -1,0 +1,30 @@
+import type { RemoteAction } from './prototype/controller.js'
+
+/** Keep the existing command IDs so configured buttons continue to map correctly. */
+export const remoteActions: Record<string, RemoteAction> = {
+	up: { kind: 'button', button: 'up' },
+	down: { kind: 'button', button: 'down' },
+	left: { kind: 'button', button: 'left' },
+	right: { kind: 'button', button: 'right' },
+	select: { kind: 'button', button: 'select' },
+	back: { kind: 'button', button: 'back' },
+	home: { kind: 'button', button: 'home' },
+	playPause: { kind: 'button', button: 'playPause' },
+	previous: { kind: 'media', command: 'previous' },
+	next: { kind: 'media', command: 'next' },
+	toggleMute: { kind: 'mute' },
+	controlCenter: { kind: 'button', button: 'controlCenter' },
+	appSwitcher: { kind: 'button', button: 'appSwitcher' },
+	screensaver: { kind: 'button', button: 'screensaver' },
+	power: { kind: 'power' },
+	volumeUp: { kind: 'button', button: 'volumeUp' },
+	volumeDown: { kind: 'button', button: 'volumeDown' },
+	seekForward: { kind: 'seek', seconds: 10 },
+	seekBackward: { kind: 'seek', seconds: -10 },
+	seekForward30: { kind: 'seek', seconds: 30 },
+	seekBackward30: { kind: 'seek', seconds: -30 },
+	swipeUp: { kind: 'swipe', direction: 'up' },
+	swipeDown: { kind: 'swipe', direction: 'down' },
+	swipeLeft: { kind: 'swipe', direction: 'left' },
+	swipeRight: { kind: 'swipe', direction: 'right' },
+}
