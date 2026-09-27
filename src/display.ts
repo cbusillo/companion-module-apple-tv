@@ -28,7 +28,7 @@ export function displayValues(values: Record<string, string>): Partial<DisplayVa
 	for (const key of Object.keys(displayDefaults) as (keyof DisplayValues)[]) {
 		if (typeof values[key] === 'string') output[key] = values[key].slice(0, 240)
 	}
-	if (values.position !== undefined && values.duration !== undefined) {
+	if (values.position?.trim() && values.duration?.trim()) {
 		const position = Number(values.position)
 		const duration = Number(values.duration)
 		if (Number.isFinite(position) && position >= 0 && Number.isFinite(duration) && duration >= 0) {

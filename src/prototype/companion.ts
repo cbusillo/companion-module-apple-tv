@@ -1,6 +1,7 @@
 /** Candidate command layer: callers supply an initialized Companion session. */
 import { OpackFloat, type AppleTV, type OpackDict, type OpackValue } from 'node-appletv-remote'
 import { setTimeout as delay } from 'node:timers/promises'
+import type { MetadataSnapshot } from './metadata.js'
 
 type Client = Pick<AppleTV, 'sendCompanionRequest'> & Partial<Pick<AppleTV, 'sendCompanionMessage'>>
 export type Power = 'On' | 'Off' | 'Unknown'
@@ -29,7 +30,12 @@ export type CommandState = {
 	mute: 'Muted' | 'Unmuted' | 'Unavailable'
 	outputKnown: boolean
 }
-type Options = { signal?: AbortSignal; now?: () => bigint; pause?: (ms: number) => Promise<void> }
+type Options = {
+	signal?: AbortSignal
+	now?: () => bigint
+	pause?: (ms: number) => Promise<void>
+	volumeConfirmationMs?: number
+}
 
 export class CompanionRequestRejected extends Error {}
 export class UnsupportedCommand extends Error {}
@@ -66,6 +72,10 @@ export class CompanionPrototype {
 	private output: string | undefined
 	private outputRevision = 0
 	private savedVolume: number | undefined
+	private metadataAudio = false
+	private metadataAbsolute = false
+	private volumeRevision = 0
+	private minimumVolumeRevision = 0
 	private touchStart: bigint | undefined
 	private valid = true
 	private readonly listeners = new Set<() => void>()
@@ -88,13 +98,20 @@ export class CompanionPrototype {
 			mute:
 				this.savedVolume !== undefined
 					? 'Muted'
-					: this.output === undefined || this.volume === null
+					: this.output === undefined || this.volume === null || this.volume === 0
 						? 'Unavailable'
 						: 'Unmuted',
 		}
 	}
 	get active(): boolean {
 		return this.valid && !this.options.signal?.aborted
+	}
+	get audioRevision(): number {
+		return this.outputRevision
+	}
+	/** Opaque identity for comparing authenticated output sets without logging device IDs. */
+	get audioOutputIdentity(): string | undefined {
+		return this.output
 	}
 
 	observe(listener: () => void): () => void {
@@ -114,6 +131,10 @@ export class CompanionPrototype {
 			devices?.length && devices.every((id) => typeof id === 'string' && id.length > 0)
 				? JSON.stringify([...new Set(devices)].sort())
 				: undefined
+		this.updateOutput(next)
+	}
+
+	private updateOutput(next: string | undefined): void {
 		if (next !== this.output) {
 			this.output = next
 			this.volume = null
@@ -121,6 +142,38 @@ export class CompanionPrototype {
 			this.savedVolume = undefined
 			this.changed()
 		}
+	}
+
+	/** Once attached, live audio never falls back to Companion's unqualified volume reply. */
+	observeMetadata(snapshot: MetadataSnapshot): void {
+		if (!this.active) return
+		this.metadataAudio = true
+		const audio = snapshot.audio
+		const ids = audio.outputs?.map((device) => device.id)
+		const identity =
+			snapshot.connected && audio.outputId && ids?.length && ids.every((id) => id.length > 0)
+				? JSON.stringify([audio.outputId, [...new Set(ids)].sort()])
+				: undefined
+		this.updateOutput(identity)
+		const absolute = identity !== undefined && audio.absolute
+		if (this.metadataAbsolute && !absolute) this.outputRevision++
+		this.metadataAbsolute = absolute
+		const revision = audio.volumeRevision
+		if (revision !== undefined && Number.isSafeInteger(revision) && revision > this.volumeRevision)
+			this.volumeRevision = revision
+		this.volume =
+			absolute &&
+			revision !== undefined &&
+			revision >= this.minimumVolumeRevision &&
+			revision >= this.volumeRevision &&
+			typeof audio.volume === 'number' &&
+			Number.isFinite(audio.volume) &&
+			audio.volume >= 0 &&
+			audio.volume <= 100
+				? audio.volume
+				: null
+		if (this.volume === null || this.volume > 0) this.savedVolume = undefined
+		this.changed()
 	}
 
 	receiveEvent(event: { identifier?: string; data: OpackDict }): void {
@@ -134,10 +187,12 @@ export class CompanionPrototype {
 			const flags = content.get('_mcF')
 			this.mediaFlags =
 				typeof flags === 'number' && Number.isInteger(flags) && flags >= 0 && flags <= 0xffffffff ? flags : null
-			this.volume = null
-			if (this.mediaFlags === null || !(this.mediaFlags & 0x100)) {
-				this.savedVolume = undefined
-				this.outputRevision++
+			if (!this.metadataAudio) {
+				this.volume = null
+				if (this.mediaFlags === null || !(this.mediaFlags & 0x100)) {
+					this.savedVolume = undefined
+					this.outputRevision++
+				}
 			}
 		} else return
 		this.changed()
@@ -152,6 +207,7 @@ export class CompanionPrototype {
 		this.output = undefined
 		this.outputRevision++
 		this.savedVolume = undefined
+		this.metadataAbsolute = false
 		this.changed()
 	}
 
@@ -209,6 +265,11 @@ export class CompanionPrototype {
 	}
 
 	async readVolume(): Promise<number> {
+		if (this.metadataAudio) {
+			if (!this.active || !this.metadataAbsolute || this.output === undefined || this.volume === null)
+				throw new UnsupportedCommand('Authenticated volume or audio output identity is unavailable')
+			return this.volume
+		}
 		this.supported(0x100)
 		const content = await this.request('_mcc', [['_mcc', 5]])
 		const volume = content.get('_vol')
@@ -223,19 +284,61 @@ export class CompanionPrototype {
 
 	async setVolume(percent: number): Promise<void> {
 		if (!Number.isFinite(percent) || percent < 0 || percent > 100) throw new RangeError('Volume must be 0–100')
-		this.supported(0x100)
+		if (!this.metadataAudio) this.supported(0x100)
+		const revision = this.outputRevision
 		this.savedVolume = undefined
 		this.changed()
-		await this.writeVolume(percent)
+		await this.writeVolume(percent, revision)
 	}
 
-	private async writeVolume(percent: number): Promise<void> {
+	private async writeVolume(percent: number, revision = this.outputRevision): Promise<void> {
+		if (this.metadataAudio) return this.writeObservedVolume(percent, revision)
 		this.volume = null
 		this.changed()
 		await this.request('_mcc', [
 			['_mcc', 6],
 			['_vol', new OpackFloat(percent / 100)],
 		])
+	}
+
+	private async writeObservedVolume(percent: number, outputRevision: number): Promise<void> {
+		const initial = await this.readVolume()
+		if (outputRevision !== this.outputRevision) throw new UnsupportedCommand('Audio output changed; volume not sent')
+		if (Math.abs(initial - percent) < 0.01) return
+		this.minimumVolumeRevision = this.volumeRevision + 1
+		this.volume = null
+		let timer: ReturnType<typeof setTimeout> | undefined
+		let unsubscribe = (): void => {}
+		let onAbort = (): void => {}
+		const confirmation = new Promise<void>((resolve, reject) => {
+			onAbort = () => reject(new Error('Volume confirmation cancelled'))
+			unsubscribe = this.observe(() => {
+				if (!this.active || outputRevision !== this.outputRevision || !this.metadataAbsolute)
+					reject(new UnsupportedCommand('Audio output changed before volume confirmation'))
+				else if (this.volume !== null && Math.abs(this.volume - percent) < 0.01) resolve()
+			})
+			this.options.signal?.addEventListener('abort', onAbort, { once: true })
+			timer = setTimeout(
+				() => reject(new Error('TV did not confirm the requested volume; no retry')),
+				this.options.volumeConfirmationMs ?? 3000,
+			)
+		})
+		try {
+			this.changed()
+			await Promise.all([
+				confirmation,
+				this.request('_mcc', [
+					['_mcc', 6],
+					['_vol', new OpackFloat(percent / 100)],
+				]),
+			])
+			if (outputRevision !== this.outputRevision || this.volume === null || Math.abs(this.volume - percent) >= 0.01)
+				throw new UnsupportedCommand('Audio output or volume changed before completion')
+		} finally {
+			clearTimeout(timer)
+			unsubscribe()
+			this.options.signal?.removeEventListener('abort', onAbort)
+		}
 	}
 
 	async readPower({ allowCached = true }: { allowCached?: boolean } = {}): Promise<Power> {
@@ -294,6 +397,10 @@ export class CompanionPrototype {
 	async press(button: Button): Promise<void> {
 		if (button === 'volumeUp' || button === 'volumeDown') {
 			this.savedVolume = undefined
+			if (this.metadataAudio) {
+				this.minimumVolumeRevision = this.volumeRevision + 1
+				this.volume = null
+			}
 			this.changed()
 		}
 		if (button === 'appSwitcher') {

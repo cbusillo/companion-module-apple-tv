@@ -65,6 +65,10 @@ test('metadata follows the selected player, independent of arrival order and bac
 		album: undefined,
 		duration: 180,
 		reportedPosition: 12,
+		positionTimestamp: undefined,
+		playbackRate: undefined,
+		itemId: 'item',
+		playerId: 'main',
 	})
 	playing(state, 'background.app', 'New background title')
 	assert.equal(state.snapshot().nowPlaying.title, 'Synthetic title')

@@ -1,10 +1,10 @@
-# Node library feasibility prototype
+# Node library extensions and qualification
 
-This is a feasibility prototype of extensions to `node-appletv-remote` 0.3.2,
-with offline tests and a separate, explicit-target live test harness.
-The normal Companion entry point still uses the existing Python worker.
-The candidate library is a development dependency, and the prototype is not
-loaded by the connection or included in the Companion bundle.
+These are reproducible extensions to `node-appletv-remote` 0.3.2, with offline
+tests and a separate, explicit-target live harness. The version 0.5 candidate
+integrates the controller into Companion's normal entry point and bundles the
+patched library. The installed Python version remains separate until an approved
+replacement. See the root README for the normal-user discovery and PIN flow.
 
 The prototype composes app listing/launching, explicit seek intervals, absolute
 volume read/write, and power-state queries through the library's public
@@ -179,22 +179,91 @@ For a supervised test, add exactly one explicit action, for example `--button up
 `--button appSwitcher`, `--swipe left`, or `--seek 10`. `--help` lists the actions.
 The output distinguishes completed dispatch from unverified physical effect.
 
-Mute restoration is implemented and tested against synthetic outputs, including
-output changes, external volume changes, and disconnects. It is deliberately
-unavailable in the live pilot until a separate authenticated metadata connection
-identifies the current audio output. The Companion-only volume reply does not
-establish that identity. The separate read-only metadata pilot below now receives
-authenticated output identity and volume; it is not yet wired into the controls
-controller or live mute restoration.
+The controller now owns a Companion session and an authenticated AirPlay metadata
+session together. Numeric volume comes from metadata; it never falls back to the
+unqualified Companion volume reply. Absolute-volume writes still use Companion,
+but require both an acknowledgement and a new matching metadata volume report.
+Repeated cached snapshots cannot confirm a write. Missing volume or capabilities
+after an output change remain unavailable until the TV reports them again.
 
-The normal Companion entry point still uses Python. The new controller and CLI
-are development tools, not an installed replacement or the final pairing UI.
+Mute restoration is bound to the complete output list and primary volume ID.
+Output changes, capability loss, external volume changes and disconnects discard
+the saved level. A volume command queued before an output change is rejected.
+Metadata loss closes both sessions; recovery starts a new pair without replaying
+input. At `bf981b9`, the owner accepted absolute volume down/restore and
+mute/unmute on one unchanged output, with fresh matching reports and zero
+reconnects. Output-change protection still requires its separate live test.
+
+The same controller now backs the version 0.5 Companion candidate. The CLI remains
+a developer tool with a separate credential file; normal setup uses Companion's
+connection secrets and requires no terminal.
 
 ### Prepare before asking for physical observation
 
 Build and test the code first, then finish the conversation turn with the exact
 sequence and wait for the owner to say they are watching. Do not start a device
 test or ask the owner to watch partway through a coding turn.
+
+For the focused audio test, start audible playback on the original output and
+keep that output selected. It lowers volume five percentage points, restores the
+initial level, mutes, and unmutes, with five seconds between steps. Starting
+volume must be reported between 10 and 95 percent. A missing confirmation,
+output change, cancellation or connection loss stops the sequence. There is no
+automatic cleanup write; use the normal remote if an interrupted test leaves the
+output muted. No playback, app, power or output-routing command is sent.
+
+```sh
+node dist/prototype/acceptance-live.js --mode audio
+node dist/prototype/acceptance-live.js --mode audio --run --credentials /private/directory/test.json --report /private/directory/audio.json
+```
+
+The first command is an offline preview. The second requires the owner to be
+ready and writes a new private receipt; protocol confirmation is separate from
+the owner's audible acceptance.
+
+The focused output-change test mutes once, then observes a manual round trip to
+another output and back for up to three minutes. Start audible playback at a
+comfortable level, with authenticated volume between 10 and 95 percent. Once
+muted, select the other output, return to the original one, then restore volume
+with the normal remote after the result. The pilot requires the saved mute level
+to be cleared on the changed output and to stay cleared after returning,
+including five more seconds of observation and a recovered authenticated volume
+reading on return. It records volume, mute-save state, and output phase in arrival
+order. A volume update before changed output identity
+keeps observation running; the receipt separately records whether the saved
+level was already cleared before that identity changed. This establishes the
+observed sequence without attributing an earlier clear to the later output event.
+Neither a volume update nor capability loss alone counts as an output change.
+Output identity comparisons stay inside the process; the receipt uses output
+phases and revision numbers rather than device identifiers.
+
+After a changed output identity, the metadata session renews its own volume
+subscription (false, then true) and sends a correlated MRP `GetVolume` request.
+Other metadata subscriptions remain enabled. Repeating an unchanged subscription
+did not refresh the tested TV; toggling the volume subscription produced fresh
+capability and volume reports. A separate read-only probe returned the same level.
+These probes did not change volume, playback, power, or output selection.
+
+While recovery is pending, numeric audio feedback and mute restoration stay
+unavailable. Each result belongs to the output generation that requested it;
+switching away and back cannot make an old reply current. Recovery is serialized,
+and a further output change schedules one fresh read after the pending one ends.
+Missing or invalid result fields remain unavailable rather than becoming zero.
+The final read never rearms a saved mute level. Synthetic regressions cover
+ordering, rapid round trips, absent/zero results, capability loss, failure and
+cancellation. Qualification across a real output switch is still pending.
+
+```sh
+node dist/prototype/acceptance-live.js --mode audio-output
+node dist/prototype/acceptance-live.js --mode audio-output --run --credentials /private/directory/test.json --report /private/directory/audio-output.json
+```
+
+Only the initial mute sends a volume control. The pilot never selects an output,
+attempts unmute on a changed output, or automatically restores a level. A missing
+round trip, connection change, cancellation or retained mute level stops the
+test; restore volume with the normal remote afterward. Cancellation is triggered
+after 210 seconds including startup, followed by bounded cleanup. This tests
+saved-level invalidation during owner-operated routing, not automated AirPods selection.
 
 The acceptance runner previews offline by default. This command does not
 read credentials, discover devices, or open a network connection:
@@ -379,8 +448,13 @@ across TCP chunks and checks all 24 messages and both acknowledgements. The
 read-only live repeat received volume 30%, matching the Python reference, plus
 authenticated output identity and capability messages. At `47b2070`, the owner
 accepted the matching YouTube title, Playing/Paused/Playing transitions, and
-volume feedback 30/25/30 while using the normal remote. Output switching and
-position interpolation remain unqualified. No agent-sent control was involved.
+volume feedback 30/25/30 while using the normal remote. At `a334413`, the owner
+confirmed two AirPods round trips matched the authenticated output list during
+a three-minute observation. The primary volume ID did not change. Volume and
+capabilities temporarily became unavailable during those transitions. This
+qualifies output-list feedback for that sequence; agent-initiated output
+selection, per-route volume accuracy and position interpolation remain
+unqualified. No agent-sent control was involved.
 
 The new pilot follows explicit active-client/player selection, merges partial
 content updates, ignores other outputs' volume, requires absolute-volume
@@ -416,11 +490,47 @@ late messages, cancellation during TCP connect, peer loss, heartbeat cleanup, an
 discovery cancellation. Downstream CI exercises the installed npm patch's public
 API against a stalled loopback peer as well as the metadata observation lifecycle.
 
-Two native read-only sessions against the TV each connected, observed metadata,
+Two earlier native read-only sessions against the TV each connected, observed metadata,
 closed once without errors, and left no TCP sockets; the diagnostic process exited
 naturally. These tests cover the reproduced transport defects. Longer outage/soak
-coverage and integration with the persistent controls controller remain to be done.
-The installed Python-backed entry point and its package remain unchanged.
+coverage and installed Companion integration remain to be done. The persistent
+prototype controller and standalone observer now share the metadata session's
+cancellation and cleanup path. The independent encrypted Companion peer uses a
+synthetic metadata connection for its reconnect/no-replay check; it does not
+claim to reproduce an AirPlay server.
+The installed Python-backed connection remains unchanged. The version 0.5
+candidate packages the Node controller and schemas, with native cancellation
+through discovery, PIN entry, verification and shutdown. Pairing verifies the
+accessory's M6 identity signature before returning keys. An independent pyatv
+peer proves normal pairing and rejection of a deliberately corrupted signature.
+
+The prepared September 27 run at `1466163` used both native sessions. The owner
+reported lower volume immediately after returning to AirPods, then the TV went
+off, woke, and AirPods were muted. The output stage sent only its initial mute;
+it discarded the saved level and renewed the metadata subscription after each
+reported output change. Feedback recovered to 30% away and 0% on return. These
+reports do not establish exact immediate per-route loudness. The power stage
+used twenty seconds asleep and passed Off, On and already-On checks with zero
+reconnects. A prior fifteen-minute read-only soak and three deliberately closed
+test metadata sessions covered resource cleanup and recovery without controls.
+
+Normal setup clears submitted PINs, saves keys only after fresh dual-session
+verification, and preserves previous keys on failure. One-time migration keeps
+button/variable IDs and disables old Python-config connections until a new PIN
+pairing. Package tests load actual bundled schemas under package-only read
+permissions. Now Playing uses reported position, timestamp and rate to advance
+elapsed time; this is distinct from the CLI's raw reported-position observation.
+Peer closure while awaiting a PIN immediately ends the prompt in Companion;
+the TV can close earlier than the module's three-minute limit. Failures report
+the PIN, identity or new-connection verification stage without logging private
+protocol payloads. The independent peer exercises these paths through the
+actual bundle as well as the installed patched library.
+
+One earlier synthetic M4 failure remains unexplained at the exact-input level.
+A retained diagnostic found that srptools and fast-srp-hap differ when an SRP
+integer begins with a zero byte. Ordinary inputs agreed; that does not prove
+which encoding the tested tvOS version accepts in the edge case. No seed,
+automatic pairing retry or production SRP math was changed to hide this result.
 
 ## Remaining qualification
 
@@ -429,18 +539,13 @@ lifecycle against a fake connection. They do not prove the TV accepts a command,
 changes physical state, or behaves correctly after reconnect.
 A returned request acknowledgement is not physical confirmation.
 
-Before this can replace the worker, it still needs:
-
-- Discovery and PIN pairing inside Companion, using its connection secret store.
-- Integration of the persistent controller into Companion, extended lifecycle
-  qualification, and supervised acceptance of navigation, swipes, media, and power.
-- Dynamic metadata/output qualification before enabling live volume restoration.
-- Long-lived AirPlay lifecycle and Now Playing integration into Companion.
-- Packaged installation tests on the intended operating systems, followed by
-  supervised Apple TV acceptance with separate pairing and preserved rollback.
-
-The installed Python-backed connection and its credentials are outside this
-prototype. Fixing its existing setup instructions is a separate change.
+The package candidate still requires fresh end-user PIN pairing and supervised
+installed acceptance with rollback preserved. Synthetic package coverage on an
+operating system does not establish device/firewall/discovery behavior there.
+Personal AirPods selection is not implemented. The observed short sleep/wake
+timing limitation and the SRP edge-case uncertainty remain explicit limitations
+for broader release qualification. The existing installed connection and its
+credentials are outside the separate developer harness.
 
 ## References
 

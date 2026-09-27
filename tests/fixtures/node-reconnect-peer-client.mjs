@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 import { setTimeout as delay } from 'node:timers/promises'
 import { CompanionPairSetup } from 'node-appletv-remote'
 import { NodeController } from '../../dist/prototype/controller.js'
+import { withMetadataSession } from '../../dist/prototype/metadata-session.js'
+import { MetadataPeer } from './metadata-peer.mjs'
 
 const target = { address: '127.0.0.1', companionPort: Number(process.argv[2]) }
 const pair = new CompanionPairSetup(target.address, target.companionPort)
@@ -15,6 +17,8 @@ try {
 }
 const controller = new NodeController('synthetic', credentials, {
 	discover: async () => target,
+	metadataSession: (device, keys, signal, snapshot, operation) =>
+		withMetadataSession(device, keys, signal, snapshot, operation, () => new MetadataPeer()),
 	reconnectDelayMs: 10,
 	healthIntervalMs: 500,
 })

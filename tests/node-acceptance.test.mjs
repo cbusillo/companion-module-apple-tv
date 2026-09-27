@@ -10,9 +10,11 @@ function fixture(initialPower = 'On') {
 	const cancel = new AbortController()
 	let power = initialPower
 	let volume = 50
+	let savedVolume
 	const controller = {
 		state: 'ready',
 		reconnects: 0,
+		audioRevision: 0,
 		async listApps() {
 			return [{ id: 'com.example.player', name: 'Player' }]
 		},
@@ -27,6 +29,16 @@ function fixture(initialPower = 'On') {
 			if (action.kind === 'power') power = action.state
 			if (action.button === 'volumeDown') volume--
 			if (action.button === 'volumeUp') volume++
+			if (action.kind === 'volume') volume = action.percent
+			if (action.kind === 'mute') {
+				if (savedVolume !== undefined) {
+					volume = savedVolume
+					savedVolume = undefined
+				} else {
+					savedVolume = volume
+					volume = 0
+				}
+			}
 		},
 	}
 	const options = {
@@ -431,4 +443,82 @@ test('explicit run without required file paths fails before opening a device con
 	})
 	assert.equal(result.status, 1)
 	assert.equal(result.stdout, '')
+})
+
+test('audio pilot lowers and restores volume, then mutes and unmutes without other controls', async () => {
+	const { controller, options, actions, events, pauses } = fixture()
+	options.mode = 'audio'
+	options.appName = ''
+	controller.listApps = async () => assert.fail('Audio pilot does not launch an app')
+	await runAcceptance(controller, options)
+	assert.deepEqual(actions, [
+		{ kind: 'volume', percent: 45 },
+		{ kind: 'volume', percent: 50 },
+		{ kind: 'mute' },
+		{ kind: 'mute' },
+	])
+	assert.deepEqual(
+		events.filter((event) => 'volume' in event).map((event) => event.volume),
+		[50, 45, 50, 0, 50],
+	)
+	assert.equal(pauses.length, 4)
+})
+
+test('audio pilot stops after a route change or manual volume change without restoring to that output', async () => {
+	for (const changed of ['route', 'volume']) {
+		const { controller, options, actions } = fixture()
+		options.mode = 'audio'
+		options.pause = async () => {
+			if (changed === 'route') controller.audioRevision++
+			else controller.queryVolume = async () => 17
+		}
+		await assert.rejects(runAcceptance(controller, options), /changed/)
+		assert.deepEqual(actions, [{ kind: 'volume', percent: 45 }])
+	}
+})
+
+test('audio pilot does not retry a failed step or send cleanup volume', async () => {
+	const { controller, options, actions } = fixture()
+	options.mode = 'audio'
+	const perform = controller.perform
+	controller.perform = async (action) => {
+		await perform(action)
+		if (action.kind === 'mute') throw new Error('Volume confirmation failed')
+	}
+	await assert.rejects(runAcceptance(controller, options), /confirmation failed/)
+	assert.deepEqual(actions, [{ kind: 'volume', percent: 45 }, { kind: 'volume', percent: 50 }, { kind: 'mute' }])
+})
+
+test('audio CLI preview remains offline and describes its complete bounded sequence', () => {
+	const result = spawnSync(
+		process.execPath,
+		['dist/prototype/acceptance-live.js', '--mode', 'audio', '--credentials', '/unreadable/test.json'],
+		{ encoding: 'utf8', timeout: 5000 },
+	)
+	assert.equal(result.status, 0, result.stderr)
+	const preview = JSON.parse(result.stdout)
+	assert.equal(preview.mode, 'offline preview')
+	assert.ok(preview.plan.length > 0)
+})
+
+test('output-change CLI previews offline without reading credentials or creating a receipt', () => {
+	const result = spawnSync(
+		process.execPath,
+		[
+			'dist/prototype/acceptance-live.js',
+			'--mode',
+			'audio-output',
+			'--app',
+			'',
+			'--credentials',
+			'/unreadable/test.json',
+			'--report',
+			'/unwritable/output.json',
+		],
+		{ encoding: 'utf8', timeout: 5000 },
+	)
+	assert.equal(result.status, 0, result.stderr)
+	const preview = JSON.parse(result.stdout)
+	assert.equal(preview.mode, 'offline preview')
+	assert.ok(preview.plan.length > 0)
 })

@@ -1,233 +1,162 @@
-import test from 'node:test'
-import { performance } from 'node:perf_hooks'
 import assert from 'node:assert/strict'
-import { mkdtemp, writeFile, chmod, symlink, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import AppleTV from '../dist/main.js'
+import test from 'node:test'
+import AppleTV, { UpgradeScripts } from '../dist/main.js'
+import { config, saved, nextTurn, setupFixture } from './fixtures/node-setup-peer.mjs'
+
+test('completed discovery notifies an open Companion editor with the new choices', async () => {
+	const f = fixture()
+	const fieldsAtSave = []
+	f.context.saveConfig = (...args) => {
+		f.hooks.save(...args)
+		fieldsAtSave.push(f.module.getConfigFields().find((field) => field.id === 'deviceId').choices)
+	}
+	try {
+		await f.module.init({ ...config, deviceId: '' }, true, {})
+		await nextTurn()
+		assert.ok(fieldsAtSave.at(-1).some((choice) => choice.id === config.deviceId))
+		f.options.discover = async () => [
+			{
+				deviceId: 'newly-visible',
+				name: 'New TV',
+				address: '127.0.0.1',
+				model: 'AppleTV14,1',
+				port: 1,
+				companionPort: 2,
+			},
+		]
+		await f.module.configUpdated({ ...config, deviceId: '', refresh: true }, {})
+		await nextTurn()
+		assert.ok(fieldsAtSave.at(-1).some((choice) => choice.id === 'newly-visible'))
+		assert.equal(f.pairs.length, 0)
+	} finally {
+		await f.module.destroy()
+	}
+})
+
 function fixture() {
-	const module = Object.create(AppleTV.prototype)
-	Object.assign(module, {
-		generation: 1,
-		ready: true,
-		queued: 0,
-		probe: false,
-		tail: Promise.resolve(),
-		capabilities: new Set(['navigation']),
-		config: { enabled: false },
-		retryDelay: 5000,
-		lastActivity: -40000,
-	})
-	const updates = []
-	const calls = []
-	module.setVariableValues = (v) => updates.push(v)
-	module.updateStatus = () => {}
-	module.transport = {
-		request: async (v) => {
-			calls.push(v.operation)
-			return { state: 'ready', capabilities: ['navigation'] }
+	const f = setupFixture()
+	const context = {
+		_isInstanceContext: true,
+		id: 'synthetic-module',
+		label: 'Synthetic Apple TV',
+		setVariableDefinitions: (definitions) => {
+			f.definitions = definitions
 		},
-		stop: () => {},
+		setVariableValues: f.hooks.values,
+		setActionDefinitions: (actions) => {
+			f.actions = actions
+		},
+		updateStatus: (status, message) => f.states.push({ status, message }),
+		saveConfig: f.hooks.save,
 	}
-	return { module, calls, updates }
-}
-test('idle probe serializes with an arriving action', async () => {
-	const { module, calls } = fixture()
-	let finish
-	module.transport.request = async (v) => {
-		calls.push(v.operation)
-		if (v.operation === 'status') await new Promise((r) => (finish = r))
-		return { state: 'ready', capabilities: ['navigation'] }
-	}
-	const probe = module.checkHealth()
-	await Promise.resolve()
-	const action = module.dispatch('up')
-	await Promise.resolve()
-	assert.deepEqual(calls, ['status'])
-	finish()
-	await Promise.all([probe, action])
-	assert.deepEqual(calls, ['status', 'action'])
-})
-test('input expires behind a slow probe rather than playing later', async (t) => {
-	const { module, calls, updates } = fixture()
-	let now = 40000
-	t.mock.method(performance, 'now', () => now)
-	let finish
-	module.transport.request = async (v) => {
-		calls.push(v.operation)
-		await new Promise((r) => (finish = r))
-		return { state: 'ready', capabilities: ['navigation'] }
-	}
-	const probe = module.checkHealth()
-	await Promise.resolve()
-	const action = module.dispatch('up')
-	now += 1001
-	finish()
-	await Promise.all([probe, action])
-	assert.deepEqual(calls, ['status'])
-	assert.equal(updates.at(-1).last_result, 'expired; not sent')
-})
-test('failed probe discards queued action and invalidates session', async () => {
-	const { module, calls } = fixture()
-	let fail
-	module.transport.request = async (v) => {
-		calls.push(v.operation)
-		return new Promise((_, reject) => (fail = reject))
-	}
-	const probe = module.checkHealth()
-	await Promise.resolve()
-	const action = module.dispatch('up')
-	fail(new Error('offline'))
-	await Promise.all([probe, action])
-	assert.deepEqual(calls, ['status'])
-	assert.equal(module.ready, false)
-	assert.equal(module.generation, 2)
-})
-test('busy queue suppresses probe and rejects inputs beyond eight', async () => {
-	const { module, calls, updates } = fixture()
-	module.queued = 8
-	await module.checkHealth()
-	await module.dispatch('up')
-	assert.deepEqual(calls, [])
-	assert.equal(updates.at(-1).last_result, 'busy; not sent')
-})
-test('destroy prevents a late probe reply from restoring readiness', async () => {
-	const { module } = fixture()
-	let finish
-	module.transport.request = async () => new Promise((r) => (finish = r))
-	const probe = module.checkHealth()
-	await Promise.resolve()
-	await module.destroy()
-	finish({ state: 'ready', capabilities: ['navigation'] })
-	await probe
-	assert.equal(module.ready, false)
-	assert.equal(module.capabilities.size, 0)
-})
-
-for (const kind of ['public', 'symlink', 'oversized'])
-	test('credential loader rejects ' + kind + ' before worker spawn', async () => {
-		const { module } = fixture()
-		const dir = await mkdtemp(join(tmpdir(), 'apple-tv-test-'))
-		try {
-			const source = join(dir, 'secret.json')
-			await writeFile(source, kind === 'oversized' ? 'x'.repeat(8193) : '{}', { mode: 0o600 })
-			if (kind === 'public') await chmod(source, 0o644)
-			let path = source
-			if (kind === 'symlink') {
-				path = join(dir, 'link')
-				await symlink(source, path)
-			}
-			let started = false
-			module.transport.start = () => {
-				started = true
-			}
-			module.config = { enabled: false, python: process.execPath, credentialFile: path }
-			await module.connect()
-			assert.equal(started, false)
-			assert.equal(module.ready, false)
-		} finally {
-			await rm(dir, { recursive: true, force: true })
-		}
-	})
-
-test('duplicate offline notification does not inflate scheduled backoff', async () => {
-	const { module } = fixture()
-	module.config.enabled = true
-	module.offline()
-	const delay = module.retryDelay
-	const timer = module.timer
-	module.offline()
-	assert.equal(module.retryDelay, delay)
-	assert.equal(module.timer, timer)
-	await module.destroy()
-})
-test('successful real action resets retry backoff during active use', async () => {
-	const { module } = fixture()
-	module.retryDelay = 60000
-	await module.dispatch('up')
-	assert.equal(module.retryDelay, 5000)
-})
-
-test('unsupported health query stops reconnect attempts', async () => {
-	const { module, updates } = fixture()
-	module.config.enabled = true
-	module.transport.request = async () => ({ state: 'unknown', error: 'healthUnsupported' })
-	await module.checkHealth()
-	assert.equal(module.ready, false)
-	assert.equal(module.timer, undefined)
-	assert.equal(updates.at(-1).connection, 'unsupported')
-})
-test('successful action refreshes capabilities', async () => {
-	const { module } = fixture()
-	module.transport.request = async () => ({ state: 'ready', capabilities: ['navigation', 'select'] })
-	await module.dispatch('up')
-	assert.equal(module.capabilities.has('select'), true)
-})
-
-test('omitted action capability field preserves last known capabilities', async () => {
-	const { module } = fixture()
-	module.transport.request = async () => ({ state: 'ready' })
-	await module.dispatch('up')
-	assert.equal(module.capabilities.has('navigation'), true)
-})
-
-for (const [command, delta] of [
-	['seekForward', 10],
-	['seekBackward', -10],
-	['seekForward30', 30],
-	['seekBackward30', -30],
-]) {
-	test(command + ' dispatches once even when cached seek availability is stale', async () => {
-		const { module } = fixture()
-		const requests = []
-		module.transport.request = async (request) => {
-			requests.push(request)
-			return { state: 'ready' }
-		}
-		await module.dispatch(command)
-		assert.deepEqual(requests, [{ operation: 'action', action: { action: 'relativeSeek', delta } }])
-	})
-	test(command + ' reports a current worker rejection without replay', async () => {
-		const { module, calls, updates } = fixture()
-		module.transport.request = async (request) => {
-			calls.push(request.operation)
-			return { state: 'ready', error: 'unsupportedAction' }
-		}
-		await module.dispatch(command)
-		assert.deepEqual(calls, ['action'])
-		assert.equal(updates.at(-1).last_result, 'unsupported by current playback')
-		assert.equal(module.ready, true)
-		assert.equal(module.timer, undefined)
-	})
+	return { ...f, module: new AppleTV(context, f.options), context, source: f }
 }
 
-for (const [command, direction] of [
-	['swipeUp', 'up'],
-	['swipeDown', 'down'],
-	['swipeLeft', 'left'],
-	['swipeRight', 'right'],
-]) {
-	test(command + ' dispatches one bounded cardinal swipe', async () => {
-		const { module } = fixture()
-		const requests = []
-		module.transport.request = async (request) => {
-			requests.push(request)
-			return { state: 'ready' }
-		}
-		await module.dispatch(command)
-		assert.deepEqual(requests, [{ operation: 'action', action: { action: 'swipe', direction } }])
-	})
-}
+test('Companion entrypoint restores saved pairing and routes existing button IDs through Node', async () => {
+	const f = fixture()
+	try {
+		await f.module.init(config, false, saved())
+		await nextTurn()
+		const actions = f.source.actions
+		for (const command of ['select', 'seekBackward', 'seekForward30', 'swipeUp', 'toggleMute', 'power'])
+			await actions.command.callback({ options: { command } })
+		await actions.launchApp.callback({ options: { appId: 'synthetic.app' } })
+		assert.deepEqual(f.controllers[0].actions, [
+			{ kind: 'button', button: 'select' },
+			{ kind: 'seek', seconds: -10 },
+			{ kind: 'seek', seconds: 30 },
+			{ kind: 'swipe', direction: 'up' },
+			{ kind: 'mute' },
+			{ kind: 'power' },
+			{ kind: 'launch', bundleId: 'synthetic.app' },
+		])
+		const before = f.controllers[0].actions.length
+		await actions.command.callback({ options: { command: '__proto__' } })
+		assert.equal(f.controllers[0].actions.length, before)
+		assert.equal(f.values.last_result, 'unknown command; not sent')
+		assert.equal(f.values.power, 'On')
+		assert.equal(f.values.title, 'Synthetic title')
+		assert.equal(f.pairs.length, 0)
+	} finally {
+		await f.module.destroy()
+	}
+	assert.equal(f.controllers[0].stops, 1)
+})
 
-for (const [ready, command, reason] of [
-	[false, 'seekForward30', 'not connected; not sent'],
-	[true, 'notACommand', 'unknown command; not sent'],
-]) {
-	test(reason, async () => {
-		const { module, calls, updates } = fixture()
-		module.ready = ready
-		await module.dispatch(command)
-		assert.deepEqual(calls, [])
-		assert.equal(updates.at(-1).last_result, reason)
-	})
-}
+test('configuration and secret callbacks complete one pairing and preserve the pending attempt across Save', async () => {
+	const f = fixture()
+	try {
+		await f.module.init({ ...config, pair: true }, true, {})
+		await nextTurn()
+		assert.equal(f.pairs.length, 1)
+		await f.module.configUpdated(config, {})
+		await nextTurn()
+		assert.equal(f.pairs.length, 1)
+		await f.module.configUpdated(config, { pin: '0123' })
+		await nextTurn()
+		assert.equal(f.saves.at(-1).secrets.pairing.deviceId, config.deviceId)
+		assert.equal(Object.hasOwn(f.saves.at(-1).config, 'pin'), false)
+		assert.equal(Object.hasOwn(f.saves.at(-1).secrets, 'pin'), false)
+		assert.equal(f.values.connection, 'ready')
+	} finally {
+		await f.module.destroy()
+	}
+})
+
+test('legacy upgrade preserves button options and old paths while requiring explicit new setup', async () => {
+	const old = { enabled: true, python: '/not-read/python', credentialFile: '/not-read/credentials.json' }
+	const action = { id: 'old-button', controlId: 'old-control', actionId: 'command', options: { command: 'select' } }
+	const result = UpgradeScripts[0]({}, { config: old, secrets: null, actions: [action], feedbacks: [] })
+	assert.equal(result.updatedConfig.enabled, false)
+	assert.equal(result.updatedConfig.python, old.python)
+	assert.equal(result.updatedConfig.credentialFile, old.credentialFile)
+	assert.deepEqual(action.options, { command: 'select' })
+	const f = fixture()
+	try {
+		await f.module.init(result.updatedConfig, false, {})
+		await nextTurn()
+		assert.equal(f.controllers.length, 0)
+		assert.equal(f.pairs.length, 0)
+		assert.equal(f.scans.length, 0)
+		assert.equal(f.values.connection, 'disabled')
+	} finally {
+		await f.module.destroy()
+	}
+	assert.equal(UpgradeScripts[0]({}, { config, secrets: saved(), actions: [], feedbacks: [] }).updatedConfig, null)
+})
+
+test('Save returns while discovery is pending and disable cancels it before late results can publish', async () => {
+	const f = fixture()
+	const gate = Promise.withResolvers()
+	let signal
+	f.options.discover = async (options) => {
+		signal = options.signal
+		return gate.promise
+	}
+	try {
+		await f.module.init({ enabled: true, deviceId: '' }, true, {})
+		await nextTurn()
+		assert.equal(f.values.connection, 'discovering')
+		await f.module.configUpdated({ enabled: false, deviceId: '' }, {})
+		await nextTurn()
+		assert.equal(signal.aborted, true)
+		assert.equal(f.values.connection, 'disabled')
+		gate.resolve([])
+		await nextTurn()
+		assert.equal(f.values.connection, 'disabled')
+		assert.equal(f.controllers.length, 0)
+	} finally {
+		gate.resolve([])
+		await f.module.destroy()
+	}
+})
+
+test('destroy during schema preflight cannot start a late backend', async () => {
+	const f = fixture()
+	const starting = f.module.init(config, false, saved())
+	await f.module.destroy()
+	await starting
+	await nextTurn()
+	assert.equal(f.scans.length, 0)
+	assert.equal(f.controllers.length, 0)
+})

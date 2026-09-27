@@ -19,7 +19,9 @@
 			"node": "yarn build"
 		},
 		"package": {
-			"module": "yarn package"
+			"module": "yarn package",
+			"smoke": "yarn test:package",
+			"pairing": "uv run --python 3.13 --locked python experiments/node-library/loopback-peer.py --package pkg/apple-tv/main.js"
 		},
 		"inspection": {
 			"tool": "jetbrains",

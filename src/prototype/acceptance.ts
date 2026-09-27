@@ -2,13 +2,29 @@
 import { setTimeout as delay } from 'node:timers/promises'
 import type { NodeController, RemoteAction } from './controller.js'
 
-type Controller = Pick<NodeController, 'perform' | 'state' | 'reconnects' | 'queryPower' | 'queryVolume' | 'listApps'>
-export type AcceptanceMode = 'close-app' | 'power' | 'wake' | 'volume' | 'remaining'
+type Controller = Pick<
+	NodeController,
+	| 'perform'
+	| 'state'
+	| 'reconnects'
+	| 'audioRevision'
+	| 'audioOutputIdentity'
+	| 'feedback'
+	| 'observe'
+	| 'queryPower'
+	| 'queryVolume'
+	| 'listApps'
+>
+export type AcceptanceMode = 'close-app' | 'power' | 'wake' | 'volume' | 'audio' | 'audio-output' | 'remaining'
 type Event = {
 	stage: string
 	result: string
 	action?: RemoteAction
-	volume?: number
+	volume?: number | null
+	mute?: 'Muted' | 'Unmuted' | 'Unavailable'
+	output?: 'original' | 'different' | 'unavailable'
+	audioRevision?: number
+	clearedBeforeOutputChange?: boolean
 	expected?: 'On' | 'Off'
 	attempt?: number
 }
@@ -39,6 +55,21 @@ export function previewAcceptance(
 	const sleepMs = sleepWait(mode, sleepSeconds)
 	const powerOnly = mode === 'power' || mode === 'wake'
 	return [
+		...(mode === 'audio-output'
+			? [
+					'Mute once, then observe the owner switching to another audio output and back within three minutes',
+					'Record volume and output report order; require the saved mute level to be cleared on the changed output and on return',
+					'An early volume update keeps observation running; only a reported output departure and return count, followed by five seconds',
+					'Require a recovered authenticated volume reading on the returned output',
+					'No further volume or routing controls are sent; restore a comfortable volume with the normal remote afterward',
+				]
+			: []),
+		...(mode === 'audio'
+			? [
+					'Keep the same audio output: lower volume five percentage points, restore it, mute, then unmute',
+					'Each volume write needs a new matching TV volume report; any output change stops the remaining steps',
+				]
+			: []),
 		...(mode === 'remaining' || mode === 'volume'
 			? ['Volume down one step, then up one step; report before and after each step']
 			: []),
@@ -118,6 +149,152 @@ export async function runAcceptance(controller: Controller, options: Options): P
 		check()
 		options.record({ stage: 'final volume', result: 'reported; physical result unverified', volume: after })
 	}
+	const audioSequence = async (): Promise<void> => {
+		const revision = controller.audioRevision
+		const sameOutput = (): void => {
+			check()
+			if (revision < 0 || controller.audioRevision !== revision)
+				throw new PilotStopped('Audio output changed; remaining controls were not sent')
+		}
+		const initial = await controller.queryVolume()
+		sameOutput()
+		if (!Number.isFinite(initial) || initial < 10 || initial > 95)
+			throw new PilotStopped('Start with authenticated volume between 10 and 95 percent')
+		options.record({ stage: 'initial volume', result: 'authenticated report', volume: initial })
+		const actions: [string, RemoteAction, number][] = [
+			['lower absolute volume', { kind: 'volume', percent: initial - 5 }, initial - 5],
+			['restore initial volume', { kind: 'volume', percent: initial }, initial],
+			['mute', { kind: 'mute' }, 0],
+			['unmute', { kind: 'mute' }, initial],
+		]
+		for (const [stage, action, expected] of actions) {
+			sameOutput()
+			await step(stage, action)
+			sameOutput()
+			const volume = await controller.queryVolume()
+			sameOutput()
+			options.record({ stage, result: 'authenticated report; physical result unverified', volume })
+			if (Math.abs(volume - expected) >= 0.01)
+				throw new PilotStopped('Volume changed during the observation pause; remaining controls were not sent')
+		}
+	}
+	const outputSequence = async (): Promise<void> => {
+		const originalOutput = controller.audioOutputIdentity
+		const revision = controller.audioRevision
+		const initial = await controller.queryVolume()
+		check()
+		if (originalOutput === undefined || revision < 0 || controller.audioRevision !== revision)
+			throw new PilotStopped('Start with one stable authenticated audio output')
+		if (!Number.isFinite(initial) || initial < 10 || initial > 95)
+			throw new PilotStopped('Start with authenticated volume between 10 and 95 percent')
+		options.record({ stage: 'initial volume', result: 'authenticated report', volume: initial })
+		const action: RemoteAction = { kind: 'mute' }
+		options.record({ stage: 'mute original output', result: 'sending', action })
+		await controller.perform(action)
+		check()
+		if (
+			controller.audioRevision !== revision ||
+			controller.feedback?.mute !== 'Muted' ||
+			controller.feedback.volume !== 0
+		)
+			throw new PilotStopped('Initial mute was not confirmed on the original output')
+		options.record({ stage: 'mute original output', result: 'confirmed; saved level armed', volume: 0, mute: 'Muted' })
+		options.record({ stage: 'manual output round trip', result: 'waiting up to 180 seconds; no further controls' })
+		let changedOutput = false
+		let returned = false
+		let savedLevelCleared = false
+		let clearedBeforeOutputChange = false
+		let previousObservation = ''
+		let failure: Error | undefined
+		const inspectOutput = (): void => {
+			check()
+			const identity = controller.audioOutputIdentity
+			const feedback = controller.feedback
+			if (!feedback) throw new PilotStopped('Audio feedback became unavailable')
+			const output = identity === undefined ? 'unavailable' : identity === originalOutput ? 'original' : 'different'
+			const observation = {
+				volume: feedback.volume,
+				mute: feedback.mute,
+				output,
+				audioRevision: controller.audioRevision,
+			} as const
+			const observationKey = JSON.stringify(observation)
+			if (observationKey !== previousObservation) {
+				previousObservation = observationKey
+				options.record({ stage: 'audio observation', result: 'reported; observation only', ...observation })
+			}
+			if (savedLevelCleared && feedback.mute === 'Muted')
+				throw new PilotStopped('Saved mute level reappeared without another mute command')
+			if ((changedOutput || (identity !== undefined && identity !== originalOutput)) && feedback.mute === 'Muted')
+				throw new PilotStopped('Saved mute level survived an output change')
+			if (feedback.volume !== null && feedback.volume > 0 && feedback.mute === 'Muted')
+				throw new PilotStopped('Saved mute level survived a nonzero volume report')
+			if (!savedLevelCleared && feedback.mute !== 'Muted') {
+				savedLevelCleared = true
+				clearedBeforeOutputChange = !changedOutput && output !== 'different'
+				options.record({
+					stage: 'saved mute level cleared',
+					result: 'observation continues; a volume update alone does not confirm an output switch',
+					...observation,
+					clearedBeforeOutputChange,
+				})
+			}
+			if (identity === undefined) return
+			if (identity !== originalOutput) {
+				if (returned) throw new PilotStopped('Audio output changed again after returning')
+				if (!changedOutput) {
+					changedOutput = true
+					options.record({ stage: 'changed output', result: 'saved mute level cleared', mute: feedback.mute })
+				}
+			} else if (changedOutput && !returned) {
+				returned = true
+				options.record({
+					stage: 'original output returned',
+					result: 'saved mute level remains cleared',
+					mute: feedback.mute,
+				})
+			}
+		}
+		// Never throw through the metadata emitter; surface errors in the awaited pilot.
+		const observe = (): void => {
+			if (failure) return
+			try {
+				inspectOutput()
+			} catch (error) {
+				failure = error instanceof Error ? error : new PilotStopped('Output observation failed', { cause: error })
+			}
+		}
+		const checkObservation = (): void => {
+			observe()
+			if (failure) throw failure
+		}
+		const unsubscribe = controller.observe(observe)
+		try {
+			for (let elapsed = 0; elapsed < 180000 && !returned; elapsed += 500) {
+				checkObservation()
+				if (!returned) await pause(500)
+			}
+			checkObservation()
+			if (!returned) throw new PilotStopped('No complete output round trip was observed within 180 seconds')
+			await pause(5000)
+			checkObservation()
+			if (controller.audioOutputIdentity !== originalOutput)
+				throw new PilotStopped('Original audio output is not confirmed at the end of observation')
+			const volume = await controller.queryVolume()
+			checkObservation()
+			if (controller.audioOutputIdentity !== originalOutput)
+				throw new PilotStopped('Audio output changed during the final volume check')
+			options.record({
+				stage: 'output round trip complete',
+				result: 'volume feedback recovered; saved level stayed cleared; physical result unverified',
+				volume,
+				mute: controller.feedback?.mute,
+				clearedBeforeOutputChange,
+			})
+		} finally {
+			unsubscribe()
+		}
+	}
 
 	check()
 	if (options.mode === 'power') return powerSequence()
@@ -128,10 +305,11 @@ export async function runAcceptance(controller: Controller, options: Options): P
 		if (current !== 'Off') throw new PilotStopped('Start with the Apple TV already asleep')
 		return wakeSequence()
 	}
-	if (options.mode === 'volume') {
+	if (options.mode === 'volume' || options.mode === 'audio' || options.mode === 'audio-output') {
 		if ((await controller.queryPower()) !== 'On') throw new PilotStopped('Start with the Apple TV awake')
 		check()
-		return volumeSequence()
+		if (options.mode === 'audio-output') return outputSequence()
+		return options.mode === 'audio' ? audioSequence() : volumeSequence()
 	}
 	if (!options.appName.trim()) throw new PilotStopped('Choose an app to close')
 	const apps = (await controller.listApps()).filter((app) => app.name === options.appName)

@@ -41,6 +41,34 @@ jobs:
         run: uv run --python 3.13 --locked python experiments/node-library/mrp_fixtures.py | node experiments/node-library/metadata-oracle.mjs
       - name: Build Companion package
         run: yarn package
+      - name: Test the bundled module with package-only filesystem permissions
+        run: yarn test:package
+      - name: Test bundled pairing, expired sessions and identity rejection against pyatv
+        run: uv run --python 3.13 --locked python experiments/node-library/loopback-peer.py --package pkg/apple-tv/main.js
+
+  package-platforms:
+    name: Packaged Node runtime (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22.x
+      - name: Enable Corepack
+        run: corepack enable
+      - name: Install locked dependencies
+        run: yarn install --immutable
+      - name: Build Companion package
+        run: yarn package
+      - name: Test setup, saved restart, cancellation, upgrade and playback time
+        run: node --test tests/session.test.mjs tests/node-setup.test.mjs tests/playback.test.mjs
+      - name: Test the bundled module with package-only filesystem permissions
+        run: yarn test:package
 
   python:
     name: Python worker tests
@@ -61,13 +89,15 @@ jobs:
   validation-gate:
     name: validation-gate
     if: ${{ always() }}
-    needs: [node, python]
+    needs: [node, python, package-platforms]
     runs-on: ubuntu-latest
     steps:
       - name: Require all validation jobs
         env:
           NODE_RESULT: ${{ needs.node.result }}
           PYTHON_RESULT: ${{ needs.python.result }}
+          PACKAGE_RESULT: ${{ needs.package-platforms.result }}
         run: |
           test "$NODE_RESULT" = success
           test "$PYTHON_RESULT" = success
+          test "$PACKAGE_RESULT" = success

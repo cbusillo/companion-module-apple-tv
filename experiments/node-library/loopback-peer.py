@@ -164,7 +164,60 @@ class Peer(CompanionServerAuth, asyncio.Protocol):
         })
 
 
+class BadSignaturePeer(Peer):
+    """Keep SRP and encryption valid but corrupt the authenticated M6 identity."""
+
+    def _m5_setup(self, pairing_data: dict[int, bytes]) -> None:
+        original = self.keys
+
+        class CorruptSigner:
+            @staticmethod
+            def sign(data: bytes) -> bytes:
+                signature = original.sign.sign(data)
+                return bytes([signature[0] ^ 1]) + signature[1:]
+
+        self.keys = original._replace(sign=CorruptSigner())
+        try:
+            super()._m5_setup(pairing_data)
+        finally:
+            self.keys = original
+
+
+class ClosedPairingPeer(Peer):
+    """A TV may close a displayed PIN session before the module's own timeout."""
+
+    def send_to_client(self, frame_type: FrameType, data: object) -> None:
+        super().send_to_client(frame_type, data)
+        self.transport.close()
+
+
+async def check_package(bundle: str) -> None:
+    root = Path(__file__).resolve().parents[2]
+    for peer_type, mode in ((Peer, "success"), (ClosedPairingPeer, "closed"), (BadSignaturePeer, "invalid-identity")):
+        failures: list[Exception] = []
+        state: PeerState = {"right_down": 0, "drop_next_right": False, "swipes": 0}
+        server = await asyncio.get_running_loop().create_server(lambda: peer_type(failures, state), "127.0.0.1", 0)
+        process = None
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "node", str(root / "tests/fixtures/packaged-pair-peer.mjs"), bundle,
+                str(server.sockets[0].getsockname()[1]), str(PIN_CODE), mode,
+            )
+            await asyncio.wait_for(process.wait(), 30)
+            if process.returncode or failures:
+                raise RuntimeError(f"Packaged pairing failed: {mode}")
+        finally:
+            if process is not None and process.returncode is None:
+                process.kill()
+                await process.wait()
+            server.close()
+            await server.wait_closed()
+
+
 async def main() -> None:
+    if len(sys.argv) == 3 and sys.argv[1] == "--package":
+        await check_package(sys.argv[2])
+        return
     failures: list[Exception] = []
     state: PeerState = {"right_down": 0, "drop_next_right": False, "swipes": 0}
     server = await asyncio.get_running_loop().create_server(lambda: Peer(failures, state), "127.0.0.1", 0)
@@ -181,6 +234,18 @@ async def main() -> None:
                 raise RuntimeError("Independent loopback protocol test failed")
         assert state["right_down"] == 1, "A failed action was replayed"
         assert state["swipes"] == 4, "Missing complete swipe gestures"
+        bad_server = await asyncio.get_running_loop().create_server(lambda: BadSignaturePeer(failures, state), "127.0.0.1", 0)
+        try:
+            bad_port = bad_server.sockets[0].getsockname()[1]
+            process = await asyncio.create_subprocess_exec(
+                "node", str(root / "tests/fixtures/node-pair-rejection.mjs"), str(bad_port), str(PIN_CODE),
+            )
+            await asyncio.wait_for(process.wait(), 30)
+            if process.returncode or failures:
+                raise RuntimeError("Invalid pairing signature was not rejected")
+        finally:
+            bad_server.close()
+            await bad_server.wait_closed()
     finally:
         if process is not None and process.returncode is None:
             process.kill()

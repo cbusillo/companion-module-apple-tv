@@ -2,6 +2,7 @@
 type Fields = Record<string, unknown>
 type Player = { state?: number; items: Fields[]; location: number }
 type Output = { id: string; name: string }
+export type AudioRead = { generation: number; outputId: string }
 
 export type MetadataSnapshot = {
 	connected: boolean
@@ -13,8 +14,19 @@ export type MetadataSnapshot = {
 		album?: string
 		duration?: number
 		reportedPosition?: number
+		positionTimestamp?: number
+		playbackRate?: number
+		itemId?: string
+		playerId?: string
 	}
-	audio: { volume?: number; absolute: boolean; relative: boolean; outputId?: string; outputs?: Output[] }
+	audio: {
+		volume?: number
+		volumeRevision?: number
+		absolute: boolean
+		relative: boolean
+		outputId?: string
+		outputs?: Output[]
+	}
 }
 
 function fields(value: unknown): Fields | undefined {
@@ -49,7 +61,34 @@ export class MetadataState {
 	private outputs?: Output[]
 	private capabilities?: Fields
 	private outputCapabilities = new Map<string, Fields>()
-	private volumes = new Map<string, number>()
+	private volumes = new Map<string, { value: number; revision: number }>()
+	private volumeRevision = 0
+	private outputGeneration = 0
+	private refreshingAudio = false
+
+	get audioGeneration(): number {
+		return this.outputGeneration
+	}
+
+	/** Hide audio while renewing its subscription and reading the selected output. */
+	beginAudioRead(): AudioRead | undefined {
+		if (!this.connected || !this.outputId) return undefined
+		this.refreshingAudio = true
+		this.volumes.clear()
+		this.capabilities = undefined
+		this.outputCapabilities.clear()
+		return { generation: this.outputGeneration, outputId: this.outputId }
+	}
+
+	finishAudioRead(read: AudioRead, response: Fields | undefined): void {
+		if (!this.connected || read.generation !== this.outputGeneration || read.outputId !== this.outputId) return
+		this.refreshingAudio = false
+		this.volumes.clear()
+		const result = fields(own(response, '.getVolumeResultMessage'))
+		const volume = own(response, 'type') === 50 ? finite(own(result, 'volume')) : undefined
+		if (volume !== undefined && volume <= 1)
+			this.volumes.set(read.outputId, { value: Math.round(volume * 10000) / 100, revision: ++this.volumeRevision })
+	}
 
 	setConnected(): void {
 		this.connected = true
@@ -57,6 +96,8 @@ export class MetadataState {
 
 	invalidate(): void {
 		this.connected = false
+		this.outputGeneration++
+		this.refreshingAudio = false
 		this.selectedClient = undefined
 		this.selectionReceived = false
 		this.clients.clear()
@@ -101,6 +142,7 @@ export class MetadataState {
 				const identity = (devices: Output[] | undefined): string =>
 					JSON.stringify(devices?.map((device) => device.id).sort())
 				if (this.outputId !== id || identity(this.outputs) !== identity(outputs)) {
+					this.outputGeneration++
 					this.volumes.clear()
 					this.capabilities = undefined
 					this.outputCapabilities.clear()
@@ -123,7 +165,8 @@ export class MetadataState {
 				const update = fields(message['.volumeDidChangeMessage'])
 				const id = text(update?.outputDeviceUID)
 				const volume = finite(own(update, 'volume'))
-				if (id && volume !== undefined && volume <= 1) this.volumes.set(id, Math.round(volume * 10000) / 100)
+				if (id && volume !== undefined && volume <= 1)
+					this.volumes.set(id, { value: Math.round(volume * 10000) / 100, revision: ++this.volumeRevision })
 				return
 			}
 			case 46:
@@ -160,7 +203,13 @@ export class MetadataState {
 				for (const item of update.contentItems) {
 					const record = fields(item)
 					const existing = player?.items.find((entry) => entry.identifier === text(record?.identifier))
-					if (existing) existing.metadata = { ...fields(existing.metadata), ...fields(record?.metadata) }
+					if (existing) {
+						const update = fields(record?.metadata)
+						const merged = { ...fields(existing.metadata), ...update }
+						if (own(update, 'elapsedTime') !== undefined && own(update, 'elapsedTimeTimestamp') === undefined)
+							delete merged.elapsedTimeTimestamp
+						existing.metadata = merged
+					}
 				}
 				return
 			}
@@ -192,11 +241,15 @@ export class MetadataState {
 		}
 		if (!this.connected) return result
 		const capabilities = (this.outputId && this.outputCapabilities.get(this.outputId)) || this.capabilities
-		if (this.outputId && own(capabilities, 'volumeControlAvailable') === true) {
+		if (!this.refreshingAudio && this.outputId && own(capabilities, 'volumeControlAvailable') === true) {
 			const kind = own(capabilities, 'volumeCapabilities')
 			result.audio.absolute = kind === 2 || kind === 3
 			result.audio.relative = kind === 1 || kind === 3
-			if (result.audio.absolute) result.audio.volume = this.volumes.get(this.outputId)
+			if (result.audio.absolute) {
+				const observation = this.volumes.get(this.outputId)
+				result.audio.volume = observation?.value
+				result.audio.volumeRevision = observation?.revision
+			}
 		}
 		result.audio.outputId = this.outputId
 		result.audio.outputs = this.outputs?.map((output) => ({ ...output }))
@@ -224,6 +277,11 @@ export class MetadataState {
 		result.nowPlaying.album = text(own(metadata, 'albumName'))
 		result.nowPlaying.duration = finite(own(metadata, 'duration'))
 		result.nowPlaying.reportedPosition = finite(own(metadata, 'elapsedTime'))
+		const timestamp = finite(own(metadata, 'elapsedTimeTimestamp'))
+		result.nowPlaying.positionTimestamp = timestamp === undefined ? undefined : timestamp + 978307200
+		result.nowPlaying.playbackRate = finite(own(metadata, 'playbackRate'))
+		result.nowPlaying.itemId = text(player.items[player.location]?.identifier)
+		result.nowPlaying.playerId = selected ?? undefined
 		return result
 	}
 }
