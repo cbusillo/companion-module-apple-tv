@@ -52,6 +52,7 @@ Start audible playback with authenticated volume 10-95%. After it mutes, select 
 The test requires the saved mute level to be cleared on the changed output and to stay cleared on return.
 Volume can arrive before output identity: keep observing and record the order without sending another control.
 The receipt distinguishes an earlier saved-level clear from one first observed on the changed output.
+After return, fresh volume feedback must recover during the five-second observation window.
 It sends no further volume or routing controls. Restore volume with the normal remote afterward.
 Capability loss alone does not count as an output switch. Connection loss stops the test.
 Power and remaining modes briefly blank the TV; rapid sleep/wake remains unqualified.

@@ -2,6 +2,7 @@
 type Fields = Record<string, unknown>
 type Player = { state?: number; items: Fields[]; location: number }
 type Output = { id: string; name: string }
+export type AudioRead = { generation: number; outputId: string }
 
 export type MetadataSnapshot = {
 	connected: boolean
@@ -58,6 +59,32 @@ export class MetadataState {
 	private outputCapabilities = new Map<string, Fields>()
 	private volumes = new Map<string, { value: number; revision: number }>()
 	private volumeRevision = 0
+	private outputGeneration = 0
+	private refreshingAudio = false
+
+	get audioGeneration(): number {
+		return this.outputGeneration
+	}
+
+	/** Hide audio while renewing its subscription and reading the selected output. */
+	beginAudioRead(): AudioRead | undefined {
+		if (!this.connected || !this.outputId) return undefined
+		this.refreshingAudio = true
+		this.volumes.clear()
+		this.capabilities = undefined
+		this.outputCapabilities.clear()
+		return { generation: this.outputGeneration, outputId: this.outputId }
+	}
+
+	finishAudioRead(read: AudioRead, response: Fields | undefined): void {
+		if (!this.connected || read.generation !== this.outputGeneration || read.outputId !== this.outputId) return
+		this.refreshingAudio = false
+		this.volumes.clear()
+		const result = fields(own(response, '.getVolumeResultMessage'))
+		const volume = own(response, 'type') === 50 ? finite(own(result, 'volume')) : undefined
+		if (volume !== undefined && volume <= 1)
+			this.volumes.set(read.outputId, { value: Math.round(volume * 10000) / 100, revision: ++this.volumeRevision })
+	}
 
 	setConnected(): void {
 		this.connected = true
@@ -65,6 +92,8 @@ export class MetadataState {
 
 	invalidate(): void {
 		this.connected = false
+		this.outputGeneration++
+		this.refreshingAudio = false
 		this.selectedClient = undefined
 		this.selectionReceived = false
 		this.clients.clear()
@@ -109,6 +138,7 @@ export class MetadataState {
 				const identity = (devices: Output[] | undefined): string =>
 					JSON.stringify(devices?.map((device) => device.id).sort())
 				if (this.outputId !== id || identity(this.outputs) !== identity(outputs)) {
+					this.outputGeneration++
 					this.volumes.clear()
 					this.capabilities = undefined
 					this.outputCapabilities.clear()
@@ -201,7 +231,7 @@ export class MetadataState {
 		}
 		if (!this.connected) return result
 		const capabilities = (this.outputId && this.outputCapabilities.get(this.outputId)) || this.capabilities
-		if (this.outputId && own(capabilities, 'volumeControlAvailable') === true) {
+		if (!this.refreshingAudio && this.outputId && own(capabilities, 'volumeControlAvailable') === true) {
 			const kind = own(capabilities, 'volumeCapabilities')
 			result.audio.absolute = kind === 2 || kind === 3
 			result.audio.relative = kind === 1 || kind === 3

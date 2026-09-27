@@ -37,6 +37,11 @@ def main() -> None:
     volume.volume = 0.3
     volume.outputDeviceUID = "cluster-output"
 
+    query = message("volumeQuery", pb.GET_VOLUME_MESSAGE)
+    query.outputDeviceUID = "cluster-output"
+    queried_volume = message("volumeResult", pb.GET_VOLUME_RESULT_MESSAGE)
+    queried_volume.volume = 0.375
+
     client = message("client", pb.SET_NOW_PLAYING_CLIENT_MESSAGE)
     client.client.bundleIdentifier = "test.player"
     client.client.displayName = "Synthetic player"

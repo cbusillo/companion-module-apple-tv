@@ -60,6 +60,7 @@ export function previewAcceptance(
 					'Mute once, then observe the owner switching to another audio output and back within three minutes',
 					'Record volume and output report order; require the saved mute level to be cleared on the changed output and on return',
 					'An early volume update keeps observation running; only a reported output departure and return count, followed by five seconds',
+					'Require a recovered authenticated volume reading on the returned output',
 					'No further volume or routing controls are sent; restore a comfortable volume with the normal remote afterward',
 				]
 			: []),
@@ -279,9 +280,14 @@ export async function runAcceptance(controller: Controller, options: Options): P
 			checkObservation()
 			if (controller.audioOutputIdentity !== originalOutput)
 				throw new PilotStopped('Original audio output is not confirmed at the end of observation')
+			const volume = await controller.queryVolume()
+			checkObservation()
+			if (controller.audioOutputIdentity !== originalOutput)
+				throw new PilotStopped('Audio output changed during the final volume check')
 			options.record({
 				stage: 'output round trip complete',
-				result: 'saved level stayed cleared; restore volume with the normal remote; physical result unverified',
+				result: 'volume feedback recovered; saved level stayed cleared; physical result unverified',
+				volume,
 				mute: controller.feedback?.mute,
 				clearedBeforeOutputChange,
 			})

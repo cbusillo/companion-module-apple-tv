@@ -1,9 +1,12 @@
-import { AirPlayConnection, type HAPCredentials } from 'node-appletv-remote'
+import { AirPlayConnection, MRPMessage, MessageType, type HAPCredentials } from 'node-appletv-remote'
 import { MetadataState, type MetadataSnapshot } from './metadata.js'
 import { bounded } from './session.js'
 
 export type MetadataTarget = { address: string; port: number }
-export type MetadataConnection = Pick<AirPlayConnection, 'connect' | 'close' | 'on' | 'off'>
+export type MetadataConnection = Pick<
+	AirPlayConnection,
+	'connect' | 'close' | 'on' | 'off' | 'sendMRPMessage' | 'sendMRPMessageAndWait'
+>
 
 /** One authenticated lifetime. The operation must honor its signal and finish cleanup before returning. */
 export async function withMetadataSession<T>(
@@ -23,6 +26,9 @@ export async function withMetadataSession<T>(
 	let closing = false
 	let reportFailed = false
 	let lastSnapshot = ''
+	let started = false
+	let refresh: Promise<void> | undefined
+	let refreshRequested = false
 	const publish = (): void => {
 		if (reportFailed) return
 		const snapshot = state.snapshot()
@@ -42,9 +48,52 @@ export async function withMetadataSession<T>(
 		publish()
 		stop.abort(new Error('Metadata connection lost'))
 	}
+	const refreshAudio = (): void => {
+		refreshRequested = true
+		if (refresh) return
+		refresh = Promise.resolve()
+			.then(async () => {
+				while (refreshRequested && !signal.aborted && !closing) {
+					refreshRequested = false
+					const read = state.beginAudioRead()
+					if (!read) continue
+					publish()
+					signal.throwIfAborted()
+					// Repeating true does not refresh tvOS reports. Toggle only this session's
+					// volume subscription; the other subscriptions stay enabled throughout.
+					for (const volumeUpdates of [false, true]) {
+						const request = await MRPMessage.clientUpdatesConfig({
+							artworkUpdates: true,
+							nowPlayingUpdates: true,
+							volumeUpdates,
+							keyboardUpdates: true,
+							outputDeviceUpdates: true,
+						})
+						signal.throwIfAborted()
+						await connection!.sendMRPMessage(request)
+					}
+					const request = await MRPMessage.getVolume(read.outputId)
+					signal.throwIfAborted()
+					const response = await connection!.sendMRPMessageAndWait(request, MessageType.GetVolumeResult, 3000)
+					if (signal.aborted || closing) return
+					state.finishAudioRead(read, response)
+					publish()
+				}
+			})
+			.catch(() => onLost())
+			.finally(() => {
+				refresh = undefined
+				if (refreshRequested && !signal.aborted && !closing) refreshAudio()
+			})
+	}
 	const onMessage = (message: Record<string, unknown>): void => {
 		if (closing || signal.aborted) return
+		const generation = state.audioGeneration
 		state.receive(message)
+		if (generation !== state.audioGeneration && (started || generation > 0)) {
+			if (started) refreshAudio()
+			else refreshRequested = true
+		}
 		publish()
 	}
 	let result: T
@@ -56,6 +105,8 @@ export async function withMetadataSession<T>(
 		await bounded(async () => connection!.connect({ signal }), 10000, signal)
 		signal.throwIfAborted()
 		state.setConnected()
+		started = true
+		if (refreshRequested) refreshAudio()
 		publish()
 		signal.throwIfAborted()
 		result = await operation(signal)
@@ -69,6 +120,7 @@ export async function withMetadataSession<T>(
 		stop.abort()
 		try {
 			connection?.close()
+			await refresh
 		} finally {
 			connection?.off('mrp-message', onMessage)
 			connection?.off('error', onLost)

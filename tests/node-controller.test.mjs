@@ -441,12 +441,14 @@ test('output pilot observes a slow round trip and sends only the initial mute', 
 					metadataPeers[0].capability()
 					metadataPeers[0].volume(0)
 				}
+				if (elapsed === 165000) await until(() => controller.feedback.volume === 0)
 			},
 		})
 		assert.equal(elapsed, 165000)
 		assert.equal(controller.audioOutputIdentity, original)
 		assert.equal(controller.feedback.mute, 'Unavailable')
 		assert.equal(events.at(-1).clearedBeforeOutputChange, false)
+		await until(() => controller.feedback.volume === 0)
 		await assert.rejects(controller.perform({ kind: 'mute' }), /No saved volume/)
 		assert.deepEqual(
 			peers[0].requests.filter(({ id }) => id === '_mcc').map(({ content }) => content.get('_vol').value),
@@ -498,6 +500,7 @@ test('output pilot keeps tracing when volume arrives before output identity', as
 					peer.capability()
 					peer.volume(0)
 				}
+				if (pauses === 5) await until(() => controller.feedback.volume === 0)
 			},
 		})
 		const earlyVolume = events.findIndex(
@@ -508,6 +511,7 @@ test('output pilot keeps tracing when volume arrives before output identity', as
 		assert.equal(events.find((event) => event.stage === 'saved mute level cleared').clearedBeforeOutputChange, true)
 		assert.equal(events.at(-1).clearedBeforeOutputChange, true)
 		assert.equal(controller.feedback.mute, 'Unavailable')
+		await until(() => controller.feedback.volume === 0)
 		await assert.rejects(controller.perform({ kind: 'mute' }), /No saved volume/)
 		assert.deepEqual(
 			peers[0].requests.filter(({ id }) => id === '_mcc').map(({ content }) => content.get('_vol').value),

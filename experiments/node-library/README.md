@@ -226,14 +226,31 @@ comfortable level, with authenticated volume between 10 and 95 percent. Once
 muted, select the other output, return to the original one, then restore volume
 with the normal remote after the result. The pilot requires the saved mute level
 to be cleared on the changed output and to stay cleared after returning,
-including five more seconds of observation. It records volume, mute-save state,
-and output phase in arrival order. A volume update before changed output identity
+including five more seconds of observation and a recovered authenticated volume
+reading on return. It records volume, mute-save state, and output phase in arrival
+order. A volume update before changed output identity
 keeps observation running; the receipt separately records whether the saved
 level was already cleared before that identity changed. This establishes the
 observed sequence without attributing an earlier clear to the later output event.
 Neither a volume update nor capability loss alone counts as an output change.
 Output identity comparisons stay inside the process; the receipt uses output
 phases and revision numbers rather than device identifiers.
+
+After a changed output identity, the metadata session renews its own volume
+subscription (false, then true) and sends a correlated MRP `GetVolume` request.
+Other metadata subscriptions remain enabled. Repeating an unchanged subscription
+did not refresh the tested TV; toggling the volume subscription produced fresh
+capability and volume reports. A separate read-only probe returned the same level.
+These probes did not change volume, playback, power, or output selection.
+
+While recovery is pending, numeric audio feedback and mute restoration stay
+unavailable. Each result belongs to the output generation that requested it;
+switching away and back cannot make an old reply current. Recovery is serialized,
+and a further output change schedules one fresh read after the pending one ends.
+Missing or invalid result fields remain unavailable rather than becoming zero.
+The final read never rearms a saved mute level. Synthetic regressions cover
+ordering, rapid round trips, absent/zero results, capability loss, failure and
+cancellation. Qualification across a real output switch is still pending.
 
 ```sh
 node dist/prototype/acceptance-live.js --mode audio-output

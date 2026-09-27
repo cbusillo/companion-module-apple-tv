@@ -57,7 +57,7 @@ export class NodeController {
 		this.discover =
 			options.discover ??
 			(async () => {
-				const devices = (await scan({ timeout: 5000 })).filter(
+				const devices = (await scan({ timeout: 5000, signal: this.stopSignal.signal })).filter(
 					(device) => device.deviceId === this.deviceId && device.model.startsWith('AppleTV'),
 				)
 				if (devices.length !== 1 || !devices[0].companionPort || !devices[0].port)

@@ -1,8 +1,8 @@
 diff --git a/README.md b/README.md
-index 1fc2eb1..c97b4fc 100644
+index 1fc2eb1..b0ae500 100644
 --- a/README.md
 +++ b/README.md
-@@ -277,6 +277,62 @@ src/
+@@ -277,6 +277,67 @@ src/
 
  ## Development
 
@@ -36,6 +36,11 @@ index 1fc2eb1..c97b4fc 100644
 +The metadata fixtures come from locked pyatv encoders using synthetic data only.
 +The receive-path regression verifies a fragmented encrypted pair of batches.
 +
++Correlated read-only volume queries use `MRPMessage.getVolume(outputDeviceUID)`
++and reply type `MessageType.GetVolumeResult`. Missing result fields remain absent;
++they are not interpreted as zero. Callers must bind a result to the output
++generation that issued the request, since the reply itself has no output ID.
++
 +Consumers must track explicit active player/output selection and invalidate
 +feedback on connection loss; these extensions do not provide a complete reducer.
 +
@@ -65,7 +70,7 @@ index 1fc2eb1..c97b4fc 100644
  ```bash
  # Install dependencies
  npm install
-@@ -291,4 +347,4 @@ npm test
+@@ -291,4 +352,4 @@ npm test
  npm run test:watch
  ```
 
@@ -2028,8 +2033,50 @@ index 0000000..ba93f12
 +    expect(await decode('error')).toMatchObject({ errorCode: 6, errorDescription: 'Synthetic rejection' });
 +  });
 +});
+diff --git a/src/mrp/__tests__/volume-query.test.ts b/src/mrp/__tests__/volume-query.test.ts
+new file mode 100644
+index 0000000..a1c862a
+--- /dev/null
++++ b/src/mrp/__tests__/volume-query.test.ts
+@@ -0,0 +1,36 @@
++import { describe, expect, it } from 'vitest';
++import { MRPMessage } from '../messages.js';
++
++// Independently encoded by pyatv 0.18.0, using synthetic identifiers only.
++const fixtures = {
++  volume: '0832120b726561642d766f6c756d65b203050d0000c03e',
++  zero: '0832120b726561642d766f6c756d65b203050d00000000',
++  absent: '0832120b726561642d766f6c756d65b20300',
++  request: '0831120b726561642d766f6c756d65aa03120a1073796e7468657469632d6f7574707574',
++};
++
++describe('read-only volume queries', () => {
++  it('encodes an explicit output request with a fresh correlation identifier', async () => {
++    const reference = await MRPMessage.decode(Buffer.from(fixtures.request, 'hex'));
++    const first = await MRPMessage.getVolume('synthetic-output');
++    const decoded = await MRPMessage.decode(first);
++    expect(decoded.type).toBe(reference.type);
++    expect(decoded['.getVolumeMessage']).toEqual(reference['.getVolumeMessage']);
++    expect(first.subarray(-20)).toEqual(Buffer.from(fixtures.request, 'hex').subarray(-20));
++    expect(decoded.identifier).toBeTruthy();
++    expect((await MRPMessage.decode(await MRPMessage.getVolume('synthetic-output'))).identifier)
++      .not.toBe(decoded.identifier);
++    await expect(MRPMessage.getVolume('')).rejects.toThrow(/identifier/);
++  });
++
++  it('decodes a result while keeping missing volume distinct from an observed zero', async () => {
++    const result = await MRPMessage.decode(Buffer.from(fixtures.volume, 'hex'));
++    expect(result.type).toBe(50);
++    expect(result.identifier).toBe('read-volume');
++    expect(result['.getVolumeResultMessage']).toMatchObject({ volume: 0.375 });
++    const zero = (await MRPMessage.decode(Buffer.from(fixtures.zero, 'hex')))['.getVolumeResultMessage'] as object;
++    const absent = (await MRPMessage.decode(Buffer.from(fixtures.absent, 'hex')))['.getVolumeResultMessage'] as object;
++    expect(Object.hasOwn(zero, 'volume')).toBe(true);
++    expect(Object.hasOwn(absent, 'volume')).toBe(false);
++  });
++});
 diff --git a/src/mrp/messages.ts b/src/mrp/messages.ts
-index 499a60a..984914b 100644
+index 499a60a..0d88958 100644
 --- a/src/mrp/messages.ts
 +++ b/src/mrp/messages.ts
 @@ -7,6 +7,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -2040,11 +2087,13 @@ index 499a60a..984914b 100644
    SendCommand = 1,
    SendCommandResult = 2,
    GetState = 3,
-@@ -47,8 +48,13 @@ export enum MessageType {
+@@ -47,8 +48,15 @@ export enum MessageType {
    GenericMessage = 42,
    SendButtonEvent = 43,
    SetNowPlayingClient = 46,
 +  SetNowPlayingPlayer = 47,
++  GetVolume = 49,
++  GetVolumeResult = 50,
 +  VolumeDidChange = 52,
 +  RemoveClient = 53,
 +  RemovePlayer = 54,
@@ -2054,11 +2103,13 @@ index 499a60a..984914b 100644
  }
 
  let rootPromise: Promise<protobuf.Root> | null = null;
-@@ -74,6 +80,11 @@ const PROTO_FILES = [
+@@ -74,6 +82,13 @@ const PROTO_FILES = [
    'SetConnectionStateMessage.proto',
    'SetHiliteModeMessage.proto',
    'SetNowPlayingClientMessage.proto',
 +  'SetNowPlayingPlayerMessage.proto',
++  'GetVolumeMessage.proto',
++  'GetVolumeResultMessage.proto',
 +  'VolumeDidChangeMessage.proto',
 +  'VolumeControlCapabilitiesDidChangeMessage.proto',
 +  'RemoveClientMessage.proto',
@@ -2066,6 +2117,23 @@ index 499a60a..984914b 100644
    'PlaybackQueueRequestMessage.proto',
    'TransactionMessage.proto',
    'UpdateClientMessage.proto',
+@@ -163,6 +178,16 @@ async function encodeMessage(
+ }
+
+ export class MRPMessage {
++  /** Read the current level for one authenticated output without changing it. */
++  static async getVolume(outputDeviceUID: string): Promise<Buffer> {
++    if (!outputDeviceUID) throw new TypeError('An output device identifier is required');
++    return encodeMessage(MessageType.GetVolume, {
++      key: '.getVolumeMessage',
++      typeName: 'GetVolumeMessage',
++      fields: { outputDeviceUID },
++    });
++  }
++
+   static async deviceInfo(options: DeviceInfoOptions): Promise<Buffer> {
+     return encodeMessage(MessageType.DeviceInfo, {
+       key: '.deviceInfoMessage',
 diff --git a/src/proto/DeviceInfoMessage.proto b/src/proto/DeviceInfoMessage.proto
 index 923aca0..086513e 100644
 --- a/src/proto/DeviceInfoMessage.proto
@@ -2102,8 +2170,42 @@ index 923aca0..086513e 100644
    optional string linkAgent = 34;
 +  optional string clusterID = 35;
  }
+diff --git a/src/proto/GetVolumeMessage.proto b/src/proto/GetVolumeMessage.proto
+new file mode 100644
+index 0000000..e272463
+--- /dev/null
++++ b/src/proto/GetVolumeMessage.proto
+@@ -0,0 +1,11 @@
++syntax = "proto2";
++
++import "ProtocolMessage.proto";
++
++extend ProtocolMessage {
++  optional GetVolumeMessage getVolumeMessage = 53;
++}
++
++message GetVolumeMessage {
++  optional string outputDeviceUID = 1;
++}
+diff --git a/src/proto/GetVolumeResultMessage.proto b/src/proto/GetVolumeResultMessage.proto
+new file mode 100644
+index 0000000..4dfa927
+--- /dev/null
++++ b/src/proto/GetVolumeResultMessage.proto
+@@ -0,0 +1,11 @@
++syntax = "proto2";
++
++import "ProtocolMessage.proto";
++
++extend ProtocolMessage {
++  optional GetVolumeResultMessage getVolumeResultMessage = 54;
++}
++
++message GetVolumeResultMessage {
++  optional float volume = 1;
++}
 diff --git a/src/proto/ProtocolMessage.proto b/src/proto/ProtocolMessage.proto
-index d1e937e..1afa51a 100644
+index d1e937e..40b61cc 100644
 --- a/src/proto/ProtocolMessage.proto
 +++ b/src/proto/ProtocolMessage.proto
 @@ -4,6 +4,7 @@ message ProtocolMessage {
@@ -2114,7 +2216,7 @@ index d1e937e..1afa51a 100644
      SEND_COMMAND_MESSAGE = 1;
      SEND_COMMAND_RESULT_MESSAGE = 2;
      GET_STATE_MESSAGE = 3;
-@@ -41,14 +42,21 @@ message ProtocolMessage {
+@@ -41,14 +42,23 @@ message ProtocolMessage {
      SET_CONNECTION_STATE_MESSAGE = 38;
      SET_HILITE_MODE_MESSAGE = 40;
      WAKE_DEVICE_MESSAGE = 41;
@@ -2122,6 +2224,8 @@ index d1e937e..1afa51a 100644
      SEND_PACKED_VIRTUAL_TOUCH_EVENT_MESSAGE = 43;
      SET_NOW_PLAYING_CLIENT_MESSAGE = 46;
 +    SET_NOW_PLAYING_PLAYER_MESSAGE = 47;
++    GET_VOLUME_MESSAGE = 49;
++    GET_VOLUME_RESULT_MESSAGE = 50;
 +    VOLUME_DID_CHANGE_MESSAGE = 52;
 +    REMOVE_CLIENT_MESSAGE = 53;
 +    REMOVE_PLAYER_MESSAGE = 54;
