@@ -87,7 +87,10 @@ export default class AppleTV extends InstanceBase<ModuleSchema> {
 					this.config = updated
 					this.saveConfig(updated, saved)
 				},
-				status: (state, message) => this.updateStatus(statuses[state], message),
+				status: (state, message) => {
+					this.updateStatus(statuses[state], message)
+					if (state === 'error') this.log('warn', message)
+				},
 				values: (values) => this.setVariableValues(values),
 				apps: (apps) => {
 					this.apps = apps

@@ -520,6 +520,11 @@ button/variable IDs and disables old Python-config connections until a new PIN
 pairing. Package tests load actual bundled schemas under package-only read
 permissions. Now Playing uses reported position, timestamp and rate to advance
 elapsed time; this is distinct from the CLI's raw reported-position observation.
+Peer closure while awaiting a PIN immediately ends the prompt in Companion;
+the TV can close earlier than the module's three-minute limit. Failures report
+the PIN, identity or new-connection verification stage without logging private
+protocol payloads. The independent peer exercises these paths through the
+actual bundle as well as the installed patched library.
 
 One earlier synthetic M4 failure remains unexplained at the exact-input level.
 A retained diagnostic found that srptools and fast-srp-hap differ when an SRP

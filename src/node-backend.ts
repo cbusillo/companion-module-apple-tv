@@ -12,7 +12,7 @@ type Controller = Pick<
 	NodeController,
 	'state' | 'feedback' | 'nowPlaying' | 'start' | 'stop' | 'waitUntilReady' | 'observe' | 'perform' | 'listApps'
 >
-type Pairing = Pick<CompanionPairSetup, 'start' | 'finish' | 'destroy'>
+type Pairing = Pick<CompanionPairSetup, 'start' | 'finish' | 'destroy' | 'closed' | 'stage'>
 export type SetupState =
 	| 'disabled'
 	| 'unpaired'
@@ -168,6 +168,11 @@ export class NodeBackend {
 				this.pending = pending
 				await bounded(async () => pair.start({ signal }), 15000, signal)
 				if (generation !== this.generation) return
+				void pair.closed.then(() => {
+					if (this.pending !== pending || pending.finishing || generation !== this.generation) return
+					this.clearPairing()
+					this.status('error', 'Apple TV closed the pairing session. Start pairing again to request a new PIN')
+				})
 				pending.timer = setTimeout(() => {
 					if (this.pending !== pending) return
 					pending.abort.abort()
@@ -217,9 +222,11 @@ export class NodeBackend {
 		clearTimeout(pending.timer)
 		this.status('verifying', 'Verifying the new pairing')
 		let candidate: Controller | undefined
+		let verifyingConnection = false
 		try {
 			const credentials = await bounded(async () => pending.pair.finish(pin), 15000, pending.abort.signal)
 			pending.abort.signal.throwIfAborted()
+			verifyingConnection = true
 			candidate = this.makeController(pending.deviceId, credentials)
 			candidate.start()
 			await bounded(async () => candidate!.waitUntilReady(20000), 22000, pending.abort.signal)
@@ -235,10 +242,14 @@ export class NodeBackend {
 			if (generation === this.generation) {
 				this.secrets = previousSecrets
 				this.clearPairing()
-				this.status(
-					'error',
-					'Pairing or verification failed. Previous credentials were kept; start pairing again to retry',
-				)
+				const failure = verifyingConnection
+					? 'The PIN exchange completed, but the new connection could not be verified.'
+					: pending.pair.stage === 'identity'
+						? 'Apple TV identity verification failed.'
+						: pending.pair.stage === 'proof'
+							? 'The PIN could not be verified with Apple TV.'
+							: 'The pairing session closed before the PIN could be verified.'
+				this.status('error', `${failure} Previous credentials were kept. Start pairing again to retry`)
 			}
 		} finally {
 			await candidate?.stop()

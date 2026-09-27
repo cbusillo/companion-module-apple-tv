@@ -43,6 +43,8 @@ jobs:
         run: yarn package
       - name: Test the bundled module with package-only filesystem permissions
         run: yarn test:package
+      - name: Test bundled pairing, expired sessions and identity rejection against pyatv
+        run: uv run --python 3.13 --locked python experiments/node-library/loopback-peer.py --package pkg/apple-tv/main.js
 
   package-platforms:
     name: Packaged Node runtime (${{ matrix.os }})

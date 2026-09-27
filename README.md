@@ -11,7 +11,7 @@ prepare a credential file.
 2. Enable the connection and Save. Select your Apple TV from the discovered list.
    If needed, check **Refresh device list when saving** and Save again.
 3. While watching that TV, check **Start pairing when saving** and Save.
-4. Enter the four-digit PIN shown on the TV and Save again within three minutes.
+4. Enter the four-digit PIN shown on the TV and Save while the prompt is still open.
 5. Wait for **Connected**. Keys are saved in Companion's connection secrets after
    a fresh connection verifies remote control and metadata access.
 
@@ -20,7 +20,9 @@ discovery available. A saved pairing uses the TV's discovered identifier, so a
 changed IP address does not require editing the connection. A PIN appears only
 after an explicit pairing request; reconnects never start pairing automatically.
 
-The PIN clears after submission. If pairing fails or expires, explicitly start a
+The PIN clears after submission. The module waits up to three minutes, but the
+TV can close its session earlier. Companion reports that closure immediately.
+If pairing fails or expires, explicitly start a
 new attempt. Previous saved keys are retained until a replacement verifies.
 Disabling the connection cancels a pending attempt. Failed pairing can leave a
 controller registration on the TV; remove only the abandoned registration from
@@ -98,13 +100,16 @@ yarn test:package
 uv sync --locked
 uv run python -m unittest discover -s tests -p 'test_*.py' -v
 uv run --python 3.13 --locked python experiments/node-library/loopback-peer.py
+uv run --python 3.13 --locked python experiments/node-library/loopback-peer.py --package pkg/apple-tv/main.js
 uv run --python 3.13 --locked python experiments/node-library/mrp_fixtures.py | node experiments/node-library/metadata-oracle.mjs
 ```
 
 CI checks the bundle on Linux, macOS and Windows. Synthetic tests cover setup,
 secret persistence, restart, cancellation, migration, encryption, metadata,
 queue expiry and reconnect without replay. The package test loads the real bundle
-and schemas with filesystem access restricted to the package. Hardware testing
+and schemas with filesystem access restricted to the package. The independent
+pyatv peer also exercises real bundled PIN pairing, closure while awaiting a PIN
+and rejection of an invalid identity signature. Hardware testing
 so far covers one Apple TV; this does not establish compatibility with every tvOS
 version, app, audio route or operating-system installation.
 

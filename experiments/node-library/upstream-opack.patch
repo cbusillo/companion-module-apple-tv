@@ -747,10 +747,10 @@ index 0000000..fb9a21e
 +});
 diff --git a/src/companion/__tests__/pairing-lifecycle.test.ts b/src/companion/__tests__/pairing-lifecycle.test.ts
 new file mode 100644
-index 0000000..358c141
+index 0000000..adc2669
 --- /dev/null
 +++ b/src/companion/__tests__/pairing-lifecycle.test.ts
-@@ -0,0 +1,73 @@
+@@ -0,0 +1,87 @@
 +import { createServer, type Socket, type AddressInfo } from 'node:net';
 +import { once } from 'node:events';
 +import { describe, expect, it } from 'vitest';
@@ -821,6 +821,20 @@ index 0000000..358c141
 +      await rejected;
 +      pair.destroy();
 +      await expect(pair.finish('1234')).rejects.toThrow(/start/);
++    }, true);
++  });
++
++  it('notifies the caller when the peer closes while waiting for the PIN', async () => {
++    await peer(async (port, sockets) => {
++      const pair = new CompanionPairSetup('127.0.0.1', port);
++      await pair.start();
++      expect(pair.stage).toBe('pin');
++      for (const socket of sockets) socket.destroy();
++      await pair.closed;
++      await expect(pair.finish('1234')).rejects.toThrow(/start/);
++      expect(pair.stage).toBe('pin');
++      pair.destroy();
++      await pair.closed;
 +    }, true);
 +  });
 +});
@@ -1150,7 +1164,7 @@ index 7641ce2..0918c4b 100644
      dict.set(key.value, val.value);
    }
 diff --git a/src/companion/pair-setup.ts b/src/companion/pair-setup.ts
-index e3b1fed..615c5ed 100644
+index e3b1fed..b666e5d 100644
 --- a/src/companion/pair-setup.ts
 +++ b/src/companion/pair-setup.ts
 @@ -6,15 +6,17 @@
@@ -1172,7 +1186,7 @@ index e3b1fed..615c5ed 100644
 
  export class CompanionPairSetup {
    private socket: Socket | undefined;
-@@ -31,12 +33,17 @@ export class CompanionPairSetup {
+@@ -31,12 +33,23 @@ export class CompanionPairSetup {
 
    /** Queued frames that arrived before anyone was waiting for them. */
    private frameQueue: Frame[] = [];
@@ -1180,6 +1194,12 @@ index e3b1fed..615c5ed 100644
 +  private pending = new PendingRequests(error => this.shutdown(error), 'Companion pairing');
 +  private phase: 'new' | 'starting' | 'pin' | 'finishing' | 'closed' = 'new';
 +  private removeAbortListener?: () => void;
++  private resolveClosed!: () => void;
++  /** Settles on every shutdown, including peer closure while awaiting the user's PIN. */
++  readonly closed = new Promise<void>(resolve => { this.resolveClosed = resolve; });
++  private pairingStage: 'connect' | 'pin' | 'proof' | 'identity' | 'complete' = 'connect';
++  /** Last pairing stage, retained after shutdown without exposing protocol payloads. */
++  get stage(): typeof this.pairingStage { return this.pairingStage; }
 
    constructor(
      private host: string,
@@ -1191,7 +1211,7 @@ index e3b1fed..615c5ed 100644
      this.clientId = randomUUID();
 
      const { publicKey, privateKey } = generateKeyPairSync('ed25519');
-@@ -52,28 +59,58 @@ export class CompanionPairSetup {
+@@ -52,28 +65,59 @@ export class CompanionPairSetup {
     * Open socket and send M1. The Apple TV should display the PIN after this.
     * Call finish(pin) after the user reads the PIN.
     */
@@ -1218,6 +1238,7 @@ index e3b1fed..615c5ed 100644
 +      this.salt = salt;
 +      this.serverPublicKey = serverPublicKey;
 +      this.phase = 'pin';
++      this.pairingStage = 'pin';
 +    } catch (error) {
 +      this.shutdown(new Error('Companion pairing startup failed'));
 +      throw error;
@@ -1266,7 +1287,7 @@ index e3b1fed..615c5ed 100644
    }
 
    /**
-@@ -99,6 +136,7 @@ export class CompanionPairSetup {
+@@ -99,6 +143,7 @@ export class CompanionPairSetup {
     */
    private async receivePairingData(): Promise<Buffer> {
      const frame = await this.waitForAnyFrame();
@@ -1274,7 +1295,23 @@ index e3b1fed..615c5ed 100644
      const decoded = opackDecode(frame.payload);
      if (!(decoded instanceof Map)) {
        throw new Error(`Companion PS: expected OPACK dict response, got frame type 0x${frame.type.toString(16)}`);
-@@ -225,10 +263,19 @@ export class CompanionPairSetup {
+@@ -135,6 +180,7 @@ export class CompanionPairSetup {
+   }
+
+   async sendM3(pin: string, salt: Buffer, serverPublicKey: Buffer): Promise<void> {
++    this.pairingStage = 'proof';
+     this.srp.init(salt, pin);
+     this.srp.setServerPublicKey(serverPublicKey);
+
+@@ -162,6 +208,7 @@ export class CompanionPairSetup {
+   }
+
+   async sendM5(): Promise<HAPCredentials> {
++    this.pairingStage = 'identity';
+     if (!this.sessionKey) {
+       throw new Error('Session key not available; call sendM3 first');
+     }
+@@ -225,10 +272,21 @@ export class CompanionPairSetup {
      const serverInfo = tlvDecode(decrypted);
      const serverId = serverInfo[TlvTag.Identifier];
      const serverLTPK = serverInfo[TlvTag.PublicKey];
@@ -1293,10 +1330,12 @@ index e3b1fed..615c5ed 100644
 +      throw new Error('Companion PS M6 signature verification failed');
 +    this.assertOpen();
 +
++    this.pairingStage = 'complete';
++
      return {
        clientId: this.clientId,
        clientLTSK: this.edPrivateKeyRaw,
-@@ -243,9 +290,11 @@ export class CompanionPairSetup {
+@@ -243,9 +301,11 @@ export class CompanionPairSetup {
     * start() must have been called first (sends M1, receives M2).
     */
    async finish(pin: string): Promise<HAPCredentials> {
@@ -1309,7 +1348,7 @@ index e3b1fed..615c5ed 100644
      try {
        await this.sendM3(pin, this.salt, this.serverPublicKey);
        return await this.sendM5();
-@@ -255,35 +304,36 @@ export class CompanionPairSetup {
+@@ -255,35 +315,37 @@ export class CompanionPairSetup {
    }
 
    destroy(): void {
@@ -1327,6 +1366,7 @@ index e3b1fed..615c5ed 100644
 +    this.buffer = Buffer.alloc(0);
 +    this.frameQueue = [];
 +    this.salt = this.serverPublicKey = this.sessionKey = undefined;
++    this.resolveClosed();
    }
 
    private writeFrame(type: FrameType, payload: Buffer): void {
@@ -1363,7 +1403,7 @@ index e3b1fed..615c5ed 100644
    }
 
    private processFrames(): void {
-@@ -291,10 +341,10 @@ export class CompanionPairSetup {
+@@ -291,10 +353,10 @@ export class CompanionPairSetup {
      this.buffer = remainder;
 
      for (const frame of frames) {

@@ -83,12 +83,55 @@ test('verification failure retains previous credentials and closes the candidate
 		await f.backend.configure({ ...config, pair: true }, saved())
 		await f.backend.configure(config, { ...saved(), pin: '1234' })
 		assert.equal(f.states.at(-1).state, 'error')
+		assert.match(f.states.at(-1).message, /new connection could not be verified/)
 		assert.deepEqual(f.saves.at(-1).secrets, saved())
 		assert.equal(candidate.stops, 1)
 		assert.equal(f.pairs.length, 1)
 		assert.equal(JSON.stringify([f.states, f.values]).includes('provider-private-payload'), false)
 	} finally {
 		await f.backend.stop()
+	}
+})
+
+test('a closed PIN session stops prompting immediately and a late PIN cannot finish or re-pair', async () => {
+	const f = fixture()
+	try {
+		await f.backend.configure({ ...config, pair: true }, saved())
+		f.pairs[0].destroy()
+		await nextTurn()
+		assert.equal(f.states.at(-1).state, 'error')
+		assert.match(f.states.at(-1).message, /closed the pairing session/)
+		await f.backend.configure(config, { ...saved(), pin: '1234' })
+		assert.deepEqual(f.pairs[0].finishes, [])
+		assert.equal(f.pairs.length, 1)
+		assert.deepEqual(f.saves.at(-1).secrets, saved())
+	} finally {
+		await f.backend.stop()
+	}
+})
+
+test('failed pairing reports its stage without exposing the PIN or provider payload', async () => {
+	for (const [stage, message] of [
+		['proof', /PIN could not be verified/],
+		['identity', /identity verification failed/],
+	]) {
+		const f = fixture()
+		try {
+			await f.backend.configure({ ...config, pair: true }, saved())
+			f.pairs[0].stage = stage
+			f.pairs[0].finish = async () => {
+				throw new Error('provider-private-payload 9876')
+			}
+			await f.backend.configure(config, { ...saved(), pin: '9876' })
+			assert.equal(f.states.at(-1).state, 'error')
+			assert.match(f.states.at(-1).message, message)
+			assert.equal(JSON.stringify([f.states, f.values]).includes('provider-private-payload'), false)
+			assert.equal(JSON.stringify([f.states, f.values]).includes('9876'), false)
+			assert.deepEqual(f.saves.at(-1).secrets, saved())
+			assert.equal(f.controllers.length, 0)
+		} finally {
+			await f.backend.stop()
+		}
 	}
 })
 

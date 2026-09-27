@@ -6,11 +6,13 @@ on the same local network.
 1. Enable the connection and Save. Select your Apple TV from the list. Use
    **Refresh device list when saving** if it is missing.
 2. Watch the TV, check **Start pairing when saving**, and Save.
-3. Enter the TV's four-digit PIN and Save again within three minutes.
+3. Enter the TV's four-digit PIN and Save while the prompt is still open.
 4. Wait for **Connected**. The PIN clears after submission; verified keys are
    saved in Companion's connection secrets for future restarts.
 
-Pairing never starts automatically. If it fails or expires, explicitly start a
+Pairing never starts automatically. The module waits up to three minutes, but
+the TV can close the session earlier; Companion reports when that happens.
+If pairing fails or expires, explicitly start a
 new attempt. Disabling the connection cancels a pending attempt. Upgrading from
 the Python module requires new PIN pairing; existing button mappings remain.
 Keep a backup and the previous package, Python environment and credential file

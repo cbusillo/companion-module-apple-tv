@@ -82,7 +82,10 @@ export function setupFixture(overrides = {}) {
 			return [device()]
 		},
 		pairing: (target) => {
+			const closure = Promise.withResolvers()
 			const pair = {
+				closed: closure.promise,
+				stage: 'proof',
 				target,
 				starts: 0,
 				finishes: [],
@@ -98,6 +101,7 @@ export function setupFixture(overrides = {}) {
 				},
 				destroy() {
 					this.destroys++
+					closure.resolve()
 				},
 			}
 			pairs.push(pair)

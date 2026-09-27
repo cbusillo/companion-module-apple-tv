@@ -43,6 +43,8 @@ const options = {
 		},
 	],
 	pairing: () => ({
+		closed: new Promise(() => {}),
+		stage: 'proof',
 		async start() {
 			prompts++
 		},
