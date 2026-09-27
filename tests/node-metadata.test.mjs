@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict'
-import { EventEmitter } from 'node:events'
+import { EventEmitter, once } from 'node:events'
 import { spawnSync } from 'node:child_process'
-import { Worker } from 'node:worker_threads'
 import test from 'node:test'
 import { MetadataState } from '../dist/prototype/metadata.js'
 import { observeMetadata } from '../dist/prototype/metadata-pilot.js'
@@ -196,10 +195,19 @@ test('disconnect clears metadata and never restores stale state on reconnect', (
 })
 
 class Observer extends EventEmitter {
-	terminations = 0
-	async terminate() {
-		this.terminations++
-		return 0
+	closes = 0
+	async connect() {
+		const receiver = { receive: (message) => this.emit('mrp-message', message) }
+		select(receiver)
+		playing(receiver)
+		device(receiver)
+		capability(receiver)
+		volume(receiver, 'tv-output', 0.3)
+		this.emit('test-ready')
+	}
+	close() {
+		this.closes++
+		this.emit('close')
 	}
 }
 const options = (signal = new AbortController().signal) => ({
@@ -208,60 +216,51 @@ const options = (signal = new AbortController().signal) => ({
 	signal,
 	onSnapshot() {},
 })
-
-test('cancelled or invalid pilots create no worker', async () => {
-	let created = 0
-	const factory = () => {
-		created++
-		return new Observer()
+function dependencies(connection) {
+	return {
+		load: async () => ({ deviceId: 'synthetic-id', credentials: {} }),
+		discover: async () => [{ deviceId: 'synthetic-id', model: 'AppleTV', address: '127.0.0.1', port: 1 }],
+		createConnection: () => connection,
 	}
-	await assert.rejects(observeMetadata(options(AbortSignal.abort()), factory))
-	await assert.rejects(observeMetadata({ ...options(), seconds: 0 }, factory))
+}
+
+test('cancelled or invalid pilots do no discovery or connection work', async () => {
+	let created = 0
+	const fake = dependencies(new Observer())
+	fake.discover = async () => {
+		created++
+		return []
+	}
+	await assert.rejects(observeMetadata(options(AbortSignal.abort()), fake))
+	await assert.rejects(observeMetadata({ ...options(), seconds: 0 }, fake))
 	assert.equal(created, 0)
 })
 
-test('a stuck startup is terminated, not retried', async () => {
-	const worker = new Observer()
-	await assert.rejects(
-		observeMetadata(options(), () => worker, 10),
-		/timed out/,
-	)
-	assert.equal(worker.terminations, 1)
+test('stuck startup closes the connection once without retrying', async () => {
+	const connection = new Observer()
+	connection.connect = async () => new Promise(() => {})
+	await assert.rejects(observeMetadata(options(), dependencies(connection), 10), /timed out/)
+	assert.equal(connection.closes, 1)
 })
 
-test('a real worker with pending handles is reaped after successful observation', async () => {
-	let worker
-	let count = 0
-	await observeMetadata(
-		{
-			...options(),
-			onSnapshot() {
-				count++
-			},
-		},
-		() => {
-			worker = new Worker(
-				new URL(
-					`data:text/javascript,${encodeURIComponent(`
-			import { parentPort } from 'node:worker_threads';
-			setInterval(() => {}, 1000);
-			parentPort.postMessage({kind:'snapshot',snapshot:{connected:true}});
-			parentPort.postMessage({kind:'ready'});
-		`)}`,
-				),
-			)
-			return worker
-		},
-	)
-	assert.equal(count, 1)
-	assert.equal(worker.threadId, -1)
+test('successful observation publishes live state then clears it on native close', async () => {
+	const connection = new Observer()
+	const received = []
+	await observeMetadata({ ...options(), onSnapshot: (snapshot) => received.push(snapshot) }, dependencies(connection))
+	assert.equal(connection.closes, 1)
+	assert.equal(received.find((snapshot) => snapshot.connected).audio.volume, 30)
+	assert.equal(received.find((snapshot) => snapshot.connected).nowPlaying.title, 'Synthetic title')
+	assert.equal(received.at(-1).connected, false)
+	assert.equal(received.at(-1).audio.volume, undefined)
+	assert.equal(connection.listenerCount('mrp-message'), 0)
 })
 
-test('loss, cancellation, worker exit and report failure all terminate the observer', async () => {
-	for (const event of ['failed', 'cancel', 'exit', 'report']) {
-		const worker = new Observer()
+test('loss, cancellation and report failure all close and invalidate metadata', async () => {
+	for (const event of ['error', 'close', 'cancel', 'report']) {
+		const connection = new Observer()
 		const controller = new AbortController()
 		const received = []
+		const ready = once(connection, 'test-ready')
 		const pending = observeMetadata(
 			{
 				...options(controller.signal),
@@ -270,18 +269,48 @@ test('loss, cancellation, worker exit and report failure all terminate the obser
 					received.push(snapshot)
 				},
 			},
-			() => worker,
+			dependencies(connection),
 		)
-		worker.emit('message', { kind: 'ready' })
+		const rejected = assert.rejects(pending)
+		await ready
 		if (event === 'cancel') controller.abort()
-		else if (event === 'exit') worker.emit('exit', 0)
-		else if (event === 'report') worker.emit('message', { kind: 'snapshot', snapshot: {} })
-		else worker.emit('message', { kind: 'failed' })
-		worker.emit('message', { kind: 'snapshot', snapshot: {} })
-		await assert.rejects(pending)
-		assert.equal(worker.terminations, 1)
-		assert.deepEqual(received, [])
+		else if (event === 'error') connection.emit('error', new Error('Lost connection'))
+		else if (event === 'close') connection.emit('close')
+		await rejected
+		assert.equal(connection.closes, 1)
+		const count = received.length
+		connection.emit('mrp-message', message(46, 'setNowPlayingClientMessage', {}))
+		assert.equal(received.length, count)
+		if (event !== 'report') assert.equal(received.at(-1).connected, false)
 	}
+})
+
+test('ambiguous discovery opens no connection', async () => {
+	const connection = new Observer()
+	const fake = dependencies(connection)
+	const target = (await fake.discover())[0]
+	fake.discover = async () => [target, target]
+	await assert.rejects(observeMetadata(options(), fake), /connection failed/)
+	assert.equal(connection.closes, 0)
+})
+
+test('failure writing the final invalidated snapshot does not report success', async () => {
+	const connection = new Observer()
+	let connected = false
+	await assert.rejects(
+		observeMetadata(
+			{
+				...options(),
+				onSnapshot(snapshot) {
+					if (!snapshot.connected && connected) throw new Error('Report unavailable')
+					connected ||= snapshot.connected
+				},
+			},
+			dependencies(connection),
+		),
+		/report failed/,
+	)
+	assert.equal(connection.closes, 1)
 })
 
 test('metadata CLI preview does not open the supplied credential/report paths', () => {
