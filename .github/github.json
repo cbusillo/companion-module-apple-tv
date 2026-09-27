@@ -8,7 +8,8 @@
 		},
 		"tests": {
 			"node": "yarn test",
-			"python": "uv run python -m unittest discover -s tests -p 'test_*.py' -v"
+			"python": "uv run python -m unittest discover -s tests -p 'test_*.py' -v",
+			"protocol": "uv run --python 3.13 --locked python experiments/node-library/loopback-peer.py"
 		},
 		"lint": {
 			"node": "yarn lint"

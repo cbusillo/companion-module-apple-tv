@@ -36,6 +36,28 @@ starts request IDs at one; a regression exercises successive request correlation
 The harness keeps its client session ID within the positive signed-32-bit range:
 high-bit client IDs were accepted at startup but rejected at teardown by the TV.
 The remote half still preserves all 32 bits in the combined unsigned-64-bit ID.
+The controls stage also fixes three reproduced library failures: an unsolicited
+event could consume a pending request with the same transaction ID; outbound
+events omitted transaction IDs; and discovery lost the Companion port when that
+mDNS advertisement arrived before AirPlay. Regression tests cover both service
+orders and event/request collisions.
+
+The upward close gesture initially bounced back on the real TV. The replacement
+now matches the locked pyatv implementation's motion, timestamp origin, and
+release sequence. An independent test executes pyatv itself with controlled
+clocks and compares all four directions under normal, jittered, and stalled
+timers (12 traces); the old Node implementation fails this comparison. Companion
+TCP sockets also disable Nagle buffering, matching Python asyncio's low-latency
+socket behavior. That owner-observed repeat still left the YouTube card visible.
+The subsequent correction registers the
+touch surface before starting tvremoteservices, following pyatv's session order,
+and preserves that timestamp origin until disconnect. Previously the first swipe
+registered touch lazily, after the remote session was already active. This
+startup correction passed a supervised comparison at `60234aa`: the owner
+confirmed that both the unchanged Python worker mapping and the Node candidate
+removed the YouTube card using the same separate test pairing. The Node round
+had zero reconnects. This qualifies closing on the tested TV; it does not isolate
+startup order from timestamp age as the precise reason for the earlier failure.
 
 Eight regression tests reproduced the numeric, reference, and framing failures
 before the changes. The extended library suite passes with the candidate.
@@ -68,9 +90,17 @@ uv run --python 3.13 --locked python experiments/node-library/loopback-peer.py
 ```
 
 The last command runs a synthetic, loopback-only pyatv peer against the Node
-library's real TCP pairing and encryption path. It checks pairing and two fresh
-sessions with app discovery, power reads, and teardown. Python is the independent
+library's real TCP pairing and encryption path. It checks pairing, fresh sessions,
+navigation/media commands, power, exact seeks, volume, mute restoration with a
+synthetic output identity, all four swipes, events, and teardown. A second client
+has TCP dropped after a button-down reaches the peer; it reconnects, never replays
+that action, and accepts new input. Python is the independent
 test oracle here; the live Node harness does not invoke it. CI runs this check.
+
+Queue regressions also cover a response timeout while TCP stays open: pending
+input is invalidated before the queue advances after control, volume, or health
+failures. A failed release cannot mask uncertain delivery of a button-down, and
+stopping a controller prevents already-scheduled volume refreshes.
 
 To verify the library source patch in a separate checkout of the exact upstream
 commit, apply `upstream-opack.patch`, then run the upstream `npm install`,
@@ -119,13 +149,209 @@ file does not revoke that registration; remove only the test controller in the
 TV's paired-device settings when retiring the experiment. Preserve existing
 controller registrations and the production credentials.
 
+## Controls and persistent-session pilot
+
+`controller.ts` serializes complete gestures, bounds the queue to eight operations,
+and expires input after 500 ms waiting in the queue. A failed or lost session
+invalidates queued input and feedback. Reconnection rediscovers the selected TV
+with bounded backoff; it never repeats a control. Idle health checks share the
+queue, so they cannot interrupt a button-down/up pair or swipe.
+
+The command layer supports navigation, Select, Back, Home, Home hold, App Switcher,
+Control Center, play/pause, play, pause, next/previous, relative and absolute volume,
+explicit seek intervals, reported-state power toggling, and 100 ms cardinal swipes.
+Power events remain subscribed when the initial power query is rejected. Unknown
+power never becomes a guessed toggle. Status display may fall back to pushed
+state for up to 30 seconds, but Wake and Toggle require a successful current
+query. Wake sends one Home down/up pair only when the TV reports Off. It sends no
+button when already On and stops for Unknown or a failed query. Explicit sleep
+retains its dedicated command. Acknowledgements never set power to On; a later
+query or pushed event must confirm it. Playback capability updates can reject
+unavailable media commands before transmission.
+
+Use the existing separate pairing for a read-only status pilot:
+
+```sh
+node dist/prototype/controls-live.js --credentials /private/directory/test.json --seconds 10
+```
+
+For a supervised test, add exactly one explicit action, for example `--button up`,
+`--button appSwitcher`, `--swipe left`, or `--seek 10`. `--help` lists the actions.
+The output distinguishes completed dispatch from unverified physical effect.
+
+Mute restoration is implemented and tested against synthetic outputs, including
+output changes, external volume changes, and disconnects. It is deliberately
+unavailable in the live pilot until a separate authenticated metadata connection
+identifies the current audio output. The Companion-only volume reply does not
+establish that identity. Now Playing and that metadata connection are not yet
+wired into this pilot.
+
+The normal Companion entry point still uses Python. The new controller and CLI
+are development tools, not an installed replacement or the final pairing UI.
+
+### Prepare before asking for physical observation
+
+Build and test the code first, then finish the conversation turn with the exact
+sequence and wait for the owner to say they are watching. Do not start a device
+test or ask the owner to watch partway through a coding turn.
+
+The acceptance runner previews offline by default. This command does not
+read credentials, discover devices, or open a network connection:
+
+```sh
+node dist/prototype/acceptance-live.js --app YouTube
+```
+
+After the owner confirms they are watching, run the already-prepared command:
+
+```sh
+node dist/prototype/acceptance-live.js --app YouTube --mode close-app --run --credentials /private/directory/test.json --report /private/directory/close-app.json
+```
+
+The default `close-app` mode checks that the TV reports On and the app name
+uniquely matches an installed app. It foregrounds that app, opens App Switcher,
+swipes up, and stops. Every control has a five-second observation pause. It does
+not require volume support or send volume or power controls.
+
+The explicit `--mode remaining` sequence also requires reported volume between
+5 and 95 percent. It tests volume down/up before closing the app, then explicit
+sleep followed by explicit wake. Every power poll is recorded, including unknown
+or unchanged values. Uncertain state cannot become a reversed power toggle.
+The five-second sleep/wake cycle remains unresolved; use focused modes when
+qualifying individual controls.
+
+The focused `--mode volume` pilot requires an awake TV and reported volume
+between 5 and 95 percent. Start audible playback manually before the supervised
+run. It sends volume down once, waits five seconds, reads the reported level,
+then sends volume up once, waits five seconds, and reads the final level. The
+report retains the initial, intermediate, and final values separately from the
+owner's audible observation. It sends no app, playback, swipe, power, mute, or
+absolute-volume controls. A query error or connection change stops remaining
+input without a compensating command.
+
+```sh
+node dist/prototype/acceptance-live.js --mode volume
+node dist/prototype/acceptance-live.js --mode volume --run --credentials /private/directory/test.json --report /private/directory/volume.json
+```
+
+The focused `--mode power` pilot requires only an awake TV and tests sleep/wake
+without app or volume controls. Preview it offline before requesting observation:
+
+```sh
+node dist/prototype/acceptance-live.js --mode power
+```
+
+After the owner is watching, run the prepared command with a new report:
+
+```sh
+node dist/prototype/acceptance-live.js --mode power --run --credentials /private/directory/test.json --report /private/directory/power.json
+```
+
+It sends sleep once, checks Off, requests Wake once, and checks On. Wake now uses
+one Home press gated by a successful current query showing Off. After On is
+confirmed, the pilot requests Wake again to check that an already-awake TV stays
+unchanged; this second request must send no button. There is no extra Home
+recovery. Unknown state, cancellation, connection change, or request failure
+stops input. This power cycle failed its first physical run; see the evidence below.
+
+For a supervised timing comparison, `--sleep-seconds 20` waits twenty seconds
+after the Sleep acknowledgement before checking Off and requesting Wake. The
+option accepts whole seconds from 5 to 30, defaults to 5, and is valid only for
+power/remaining modes. Other observation pauses remain five seconds. Cancellation
+or connection loss during the wait prevents Wake. This is a test setting, not a
+delay or retry in the command layer.
+
+```sh
+node dist/prototype/acceptance-live.js --mode power --sleep-seconds 20
+node dist/prototype/acceptance-live.js --mode power --sleep-seconds 20 --run --credentials /private/directory/test.json --report /private/directory/power-timing.json
+```
+
+The separate `--mode wake` pilot starts with the TV already Off. It sends no Sleep,
+app, swipe, or volume control: request Wake, require reported On, then request
+Wake while already On and check that the screen stays unchanged. It stops after
+one unsuccessful wake. This isolates the wake action from a preceding sleep
+transition; it does not add a delay or retry to the command layer.
+
+```sh
+node dist/prototype/acceptance-live.js --mode wake
+node dist/prototype/acceptance-live.js --mode wake --run --credentials /private/directory/test.json --report /private/directory/wake.json
+```
+
+Cancellation, a failed command, or connection loss stops remaining controls.
+Nothing is retried, including the wake command. If it stops after sleep, use the
+normal remote to wake the TV. The private report is created before controls and
+never overwrites another report. Command acknowledgements and reported power
+remain separate from owner-observed results.
+
+For a controlled comparison, the prepared Python reference runner uses the
+unchanged worker's action mapping and the same separate Node test pairing. It
+resolves the saved AirPlay device ID to the matching Companion service, validates
+an awake TV and unique app, then performs the same three actions with five-second
+gaps. It does not read or restart the installed module. Preview is offline:
+
+```sh
+uv run --python 3.13 --locked python experiments/node-library/close_baseline.py --app YouTube
+```
+
+After the owner agrees to watch **both** rounds, run the Python reference first:
+
+```sh
+uv run --python 3.13 --locked python experiments/node-library/close_baseline.py --app YouTube --run --credentials /private/directory/test.json --report /private/directory/python-close.json
+```
+
+If that command completes, run the prepared Node `close-app` command with a new
+report path. Stop on a failed command; do not retry a control. In each round the
+observable result is whether the YouTube card disappears. Remaining in App
+Switcher is expected because neither sequence sends Home or Back afterward.
+Record Python and Node acceptance separately. This reference is a developer
+diagnostic; it adds no Python dependency to the candidate Node runtime.
+
 ### Pilot evidence (September 26, 2026)
 
 Separate PIN pairing completed on one Apple TV. Fresh Node sessions discovered
 22 apps, reported power as `On`, and received session-teardown acknowledgements.
 One Plex launch request was acknowledged and its session closed cleanly; physical
-screen confirmation is tracked separately in the draft PR. The normal Companion
+screen confirmation was provided by the owner and recorded in the draft PR. The normal Companion
 module, its credentials, and its packaged artifact were not replaced.
+
+The controls-stage read-only pilot received live power, capability, and volume
+updates without reconnects. Closing only that test client's socket then exercised
+rediscovery and automatic reconnection to the real TV. No control was sent during
+those checks. Later supervised runs supplied the physical results below.
+
+The owner subsequently accepted navigation, horizontal swipes, Select, Home,
+Control Center/Back, Twitch Play/Pause, and YouTube -10/+10-second seeks. The
+remaining-controls run failed: the owner saw the YouTube card bounce instead of
+close, and the TV stayed off after the acknowledged wake. Volume was not
+physically confirmed. One separately requested Home press recovered reported
+power to On in fresh Node and installed-module checks. The owner later reported
+YouTube playing. After the touch-startup correction, the owner separately
+confirmed Python and Node removed the YouTube card in the two-round comparison.
+The focused power test at `00b8eec` then reproduced the direct-Wake failure:
+the acknowledged command left power Off through all ten polls. A fresh Off check
+gated one Home recovery, which reported On. The owner confirmed that the screen
+turned off and came back on. Sleep and Home recovery are accepted on this TV;
+the direct-Wake test remains failed. There were zero reconnects. The replacement
+Wake now uses the observed Home behavior with an Off-state guard, but that
+integrated action failed the next power cycle at `73cf295`: it ran five seconds
+after Sleep, all ten polls stayed Off, and the owner confirmed the TV remained
+off. The already-On check was not sent. The possible brief screen flicker was
+uncertain and is not accepted as a wake. The earlier successful Home recovery
+ran about twenty seconds after Sleep. This timing difference is a hypothesis,
+not an established cause. A wake-only test from an already-asleep TV was then used
+to separate those cases. It passed at `11a1dda`: reported power changed
+from Off to On after about six seconds, remained On after the already-On check,
+and the owner confirmed the screen woke and then stayed unchanged. There were
+zero reconnects. Wake from the existing off state and already-On behavior are
+accepted on this TV. The twenty-second Sleep observation test then passed at
+`6bf0565`: Sleep reported Off, Wake reported On about six seconds after its
+request, and the already-On check remained On, with zero reconnects. The owner
+confirmed the sequence worked and explicitly accepted waking to the Home screen
+instead of returning to the Twitch stream. Wake does not resume the previous
+stream. The earlier five-second cycle failure remains unresolved: no minimum
+safe interval or cause is established, and no command-layer timing change is
+claimed as a fix. Physical volume acceptance remains pending.
+No automatic control retry or installed-module change was made.
 
 This qualifies an initial developer pilot on that device. It does not qualify
 all controls, tvOS versions, supported operating systems, or end-user installation.
@@ -140,12 +366,9 @@ A returned request acknowledgement is not physical confirmation.
 Before this can replace the worker, it still needs:
 
 - Discovery and PIN pairing inside Companion, using its connection secret store.
-- Production session lifecycle beyond the single-session harness: event
-  subscriptions, capability updates, bounded queues, and reconnect behavior.
-- Touch/swipe behavior and gesture timing, plus volume restore that remains tied
-  to the same output and is invalidated when output or session state changes.
-- Power events when newer tvOS versions reject `FetchAttentionState`; an unknown
-  power value must never be guessed into a toggle.
+- Integration of the persistent controller into Companion, extended lifecycle
+  qualification, and supervised acceptance of navigation, swipes, media, and power.
+- Authenticated audio-output tracking before enabling live volume restoration.
 - Now Playing integration through the library's AirPlay/MRP connection.
 - Packaged installation tests on the intended operating systems, followed by
   supervised Apple TV acceptance with separate pairing and preserved rollback.
@@ -160,3 +383,4 @@ prototype. Fixing its existing setup instructions is a separate change.
 - [pyatv media and power commands](https://github.com/postlund/pyatv/blob/v0.18.0/pyatv/protocols/companion/__init__.py)
 - [OPACK protocol and reference examples](https://pyatv.dev/documentation/protocols/#opack)
 - [pyatv encrypted frame implementation](https://github.com/postlund/pyatv/blob/v0.18.0/pyatv/protocols/companion/connection.py)
+- [Node TCP no-delay behavior](https://nodejs.org/docs/latest-v22.x/api/net.html#socketsetnodelaynodelay)

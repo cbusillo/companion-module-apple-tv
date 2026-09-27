@@ -2,11 +2,16 @@ import { randomInt } from 'node:crypto'
 import { CompanionConnection, type HAPCredentials } from 'node-appletv-remote'
 import { CompanionPrototype, CompanionRequestRejected, companionRequest } from './companion.js'
 
-type Connection = Pick<CompanionConnection, 'connect' | 'sendRequest' | 'close' | 'on' | 'off'>
-type Target = { address: string; companionPort: number }
+export type Connection = Pick<CompanionConnection, 'connect' | 'sendRequest' | 'close' | 'on' | 'off'> &
+	Partial<Pick<CompanionConnection, 'sendMessage'>>
+export type Target = { address: string; companionPort: number }
 
 /** Bounds an operation even when the candidate library leaves a socket pending. */
-export async function bounded<T>(operation: () => Promise<T>, timeoutMs: number, signal: AbortSignal): Promise<T> {
+export async function bounded<T>(
+	operation: () => Promise<T>,
+	timeoutMs: number | undefined,
+	signal: AbortSignal,
+): Promise<T> {
 	signal.throwIfAborted()
 	let timer: ReturnType<typeof setTimeout> | undefined
 	let onAbort: () => void = () => {}
@@ -15,7 +20,7 @@ export async function bounded<T>(operation: () => Promise<T>, timeoutMs: number,
 			new Promise<never>((_resolve, reject) => {
 				onAbort = () => reject(new Error('Test cancelled or connection closed'))
 				signal.addEventListener('abort', onAbort, { once: true })
-				timer = setTimeout(() => reject(new Error('Test operation timed out')), timeoutMs)
+				if (timeoutMs !== undefined) timer = setTimeout(() => reject(new Error('Test operation timed out')), timeoutMs)
 			}),
 			operation(),
 		])
@@ -47,7 +52,18 @@ export async function withCompanionSession<T>(
 			content: Parameters<Connection['sendRequest']>[1],
 			timeoutMs: number,
 		) => bounded(async () => connection.sendRequest(identifier, content, timeoutMs), timeoutMs, active),
+		sendCompanionMessage: connection.sendMessage
+			? (identifier: string, content: Parameters<CompanionConnection['sendMessage']>[1]): void => {
+					active.throwIfAborted()
+					connection.sendMessage!(identifier, content)
+				}
+			: undefined,
 	}
+	const commands = new CompanionPrototype(client, { signal: active })
+	const onEvent = (event: Parameters<CompanionPrototype['receiveEvent']>[0]): void => commands.receiveEvent(event)
+	connection.on('event', onEvent)
+	active.addEventListener('abort', () => commands.invalidate(), { once: true })
+	let subscribed = false
 	let sessionId: bigint | undefined
 	let result: T | undefined
 	let failed = false
@@ -70,6 +86,10 @@ export async function withCompanionSession<T>(
 			['model', 'iPhone10,6'],
 			['name', 'Companion Node Test'],
 		])
+		if (connection.sendMessage) {
+			onStage('touch surface registration')
+			await commands.startTouch()
+		}
 		// Keep the client half positive when a TV treats it as a signed int32.
 		const localId = randomInt(1, 0x80000000)
 		onStage('session start')
@@ -89,7 +109,11 @@ export async function withCompanionSession<T>(
 			// Older TVs may reject this optional power-query registration.
 			if (!(error instanceof CompanionRequestRejected)) throw error
 		}
-		result = await operation(new CompanionPrototype(client))
+		if (connection.sendMessage) {
+			commands.subscribe()
+			subscribed = true
+		}
+		result = await bounded(async () => operation(commands), undefined, active)
 	} catch (error) {
 		failed = true
 		failure = error
@@ -99,13 +123,20 @@ export async function withCompanionSession<T>(
 				failed = true
 				failure = new Error('Test cancelled or connection closed')
 			}
-			if (sessionId !== undefined && !active.aborted) {
+			const cleanups: (() => Promise<unknown>)[] = [async () => commands.stopTouch()]
+			if (subscribed) cleanups.push(async () => commands.unsubscribe())
+			if (sessionId !== undefined)
+				cleanups.push(async () =>
+					companionRequest(client, '_sessionStop', [
+						['_srvT', 'com.apple.tvremoteservices'],
+						['_sid', sessionId!],
+					]),
+				)
+			for (const cleanup of cleanups) {
+				if (active.aborted) break
 				try {
 					if (!failed) onStage('session teardown')
-					await companionRequest(client, '_sessionStop', [
-						['_srvT', 'com.apple.tvremoteservices'],
-						['_sid', sessionId],
-					])
+					await cleanup()
 				} catch (error) {
 					if (!failed) {
 						failed = true
@@ -116,6 +147,8 @@ export async function withCompanionSession<T>(
 		} finally {
 			// Keep the error handler attached through socket destruction.
 			connection.close()
+			connection.off('event', onEvent)
+			commands.invalidate()
 		}
 	}
 	if (failed) throw failure
