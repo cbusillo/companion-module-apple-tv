@@ -33,6 +33,10 @@ jobs:
         run: yarn lint
       - name: Test
         run: yarn test
+      - name: Install uv for independent protocol peer
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - name: Test pairing and encrypted sessions against pyatv
+        run: uv run --python 3.13 --locked python experiments/node-library/loopback-peer.py
       - name: Build Companion package
         run: yarn package
 
