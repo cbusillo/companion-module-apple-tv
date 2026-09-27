@@ -9,7 +9,8 @@
 		"tests": {
 			"node": "yarn test",
 			"python": "uv run python -m unittest discover -s tests -p 'test_*.py' -v",
-			"protocol": "uv run --python 3.13 --locked python experiments/node-library/loopback-peer.py"
+			"protocol": "uv run --python 3.13 --locked python experiments/node-library/loopback-peer.py",
+			"metadata": "uv run --python 3.13 --locked python experiments/node-library/mrp_fixtures.py | node experiments/node-library/metadata-oracle.mjs"
 		},
 		"lint": {
 			"node": "yarn lint"

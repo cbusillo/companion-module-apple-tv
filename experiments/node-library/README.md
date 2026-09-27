@@ -183,8 +183,9 @@ Mute restoration is implemented and tested against synthetic outputs, including
 output changes, external volume changes, and disconnects. It is deliberately
 unavailable in the live pilot until a separate authenticated metadata connection
 identifies the current audio output. The Companion-only volume reply does not
-establish that identity. Now Playing and that metadata connection are not yet
-wired into this pilot.
+establish that identity. The separate read-only metadata pilot below now receives
+authenticated output identity and volume; it is not yet wired into the controls
+controller or live mute restoration.
 
 The normal Companion entry point still uses Python. The new controller and CLI
 are development tools, not an installed replacement or the final pairing UI.
@@ -350,11 +351,58 @@ confirmed the sequence worked and explicitly accepted waking to the Home screen
 instead of returning to the Twitch stream. Wake does not resume the previous
 stream. The earlier five-second cycle failure remains unresolved: no minimum
 safe interval or cause is established, and no command-layer timing change is
-claimed as a fix. Physical volume acceptance remains pending.
+claimed as a fix. The owner-run focused volume test at `1d4cdc8` is accepted:
+the owner heard the level go down and then up, and the session had zero reconnects.
+Companion numeric feedback remained 50 before, between, and after those presses.
+This accepts relative volume control only; that numeric feedback is unqualified.
 No automatic control retry or installed-module change was made.
 
 This qualifies an initial developer pilot on that device. It does not qualify
 all controls, tvOS versions, supported operating systems, or end-user installation.
+
+## Read-only metadata pilot
+
+The same separate Companion pairing also authenticates the AirPlay metadata
+connection on the tested TV; no second PIN or registration was needed. An initial
+Node request timed out while locked pyatv returned volume and output identity.
+Two library defects were reproduced: DataStream parsing discarded all but the
+first protobuf in each batch, and absent protocol definitions discarded volume,
+active-player, and removal messages. The patch preserves every message in wire
+order, decodes the missing fields, subscribes to output updates, and distinguishes
+untyped acknowledgements from media commands. DeviceInfo also accepts the shorter
+records used for grouped outputs. Corrupt DataStream input and data/event channel
+loss now surface as connection failures.
+
+Independent synthetic pyatv packets cover the patched codec and metadata reducer.
+The library's encrypted receive regression splits a coalesced pair of batches
+across TCP chunks and checks all 24 messages and both acknowledgements. The
+read-only live repeat received volume 30%, matching the Python reference, plus
+authenticated output identity and capability messages. Dynamic volume changes,
+Now Playing during real playback, and output switching still need observation.
+
+The new pilot follows explicit active-client/player selection, merges partial
+content updates, ignores other outputs' volume, requires absolute-volume
+capability for numeric feedback, and clears metadata after loss. Position is the
+last reported position, not an extrapolated clock. Missing observations remain
+unknown. It sends no app, power, playback, volume, output-routing, or pairing
+commands; the owner can use the normal remote during an observation.
+
+```sh
+node dist/prototype/metadata-live.js
+node dist/prototype/metadata-live.js --run --seconds 30 --credentials /private/directory/test.json --report /private/directory/metadata.json
+uv run --python 3.13 --locked python experiments/node-library/mrp_fixtures.py | node experiments/node-library/metadata-oracle.mjs
+```
+
+The first command is an offline preview. Observation lasts 5-60 seconds after
+connection, with a separate twenty-second startup limit. Ctrl-C or connection
+loss stops it; it never reconnects. The receipt is created with mode 0600 without
+overwriting, and can contain private titles and output identifiers. Terminal
+output omits device identifiers. Raw library logging is consumed privately by an
+isolated worker. The supervisor always terminates that worker and its pending
+handles, including late connection attempts. This bounds the development tool;
+it does not qualify the library's long-lived AirPlay lifecycle. RTSP fragmentation,
+request correlation, and cancellation still need qualification before integration.
+The installed Python-backed entry point and its package remain unchanged.
 
 ## Remaining qualification
 
@@ -368,8 +416,8 @@ Before this can replace the worker, it still needs:
 - Discovery and PIN pairing inside Companion, using its connection secret store.
 - Integration of the persistent controller into Companion, extended lifecycle
   qualification, and supervised acceptance of navigation, swipes, media, and power.
-- Authenticated audio-output tracking before enabling live volume restoration.
-- Now Playing integration through the library's AirPlay/MRP connection.
+- Dynamic metadata/output qualification before enabling live volume restoration.
+- Long-lived AirPlay lifecycle and Now Playing integration into Companion.
 - Packaged installation tests on the intended operating systems, followed by
   supervised Apple TV acceptance with separate pairing and preserved rollback.
 

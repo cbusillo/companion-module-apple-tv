@@ -37,6 +37,8 @@ jobs:
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
       - name: Test pairing and encrypted sessions against pyatv
         run: uv run --python 3.13 --locked python experiments/node-library/loopback-peer.py
+      - name: Check independent metadata packets against the Node codec and state reader
+        run: uv run --python 3.13 --locked python experiments/node-library/mrp_fixtures.py | node experiments/node-library/metadata-oracle.mjs
       - name: Build Companion package
         run: yarn package
 
