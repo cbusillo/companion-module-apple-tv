@@ -90,6 +90,13 @@ decodes a locked-pyatv packet built the same way as the supervised probe in
 Media Control Relay #114. pyatv serializes the raw enum varint after the device
 fields; this library emits canonical field order with the same decoded content.
 
+`sendMRPMessageAndWait` and the shared pending-request table accept
+`{ fatalTimeout: false }`. A timeout then rejects only that request and a late
+reply is ignored; every other request keeps the fatal timeout that closes the
+connection. The module uses it for the route acknowledgement, which tvOS can
+delay for many seconds during an AirPods takeover. Before this option, such a
+delay closed the whole AirPlay session about three seconds after the press.
+
 ## Run offline
 
 Use this repository's Node 22 and Yarn 4 toolchain:
