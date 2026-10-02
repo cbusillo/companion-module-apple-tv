@@ -1,8 +1,8 @@
 diff --git a/README.md b/README.md
-index 1fc2eb1..b0ae500 100644
+index 1fc2eb1..d0cc1d5 100644
 --- a/README.md
 +++ b/README.md
-@@ -277,6 +277,67 @@ src/
+@@ -277,6 +277,75 @@ src/
 
  ## Development
 
@@ -41,6 +41,14 @@ index 1fc2eb1..b0ae500 100644
 +they are not interpreted as zero. Callers must bind a result to the output
 +generation that issued the request, since the reply itself has no output ID.
 +
++`MRPMessage.setSystemAudioOutputs(outputDeviceUIDs)` encodes a
++`ModifyOutputContextRequestMessage` with the `SharedSystemAudio` context and the
++UIDs in both `settingDevices` and `clusterAwareSettingDevices`. This context selects
++personal outputs such as same-account AirPods; `SharedAudioPresentation` is the
++AirPlay speaker-group context. The device's reply is only an acknowledgement, so
++confirm the route from later reported output devices. Context values follow the
++MediaRemote enum recorded in pyatv#2834, and the fixtures come from pyatv 0.18.0.
++
 +Consumers must track explicit active player/output selection and invalidate
 +feedback on connection loss; these extensions do not provide a complete reducer.
 +
@@ -70,7 +78,7 @@ index 1fc2eb1..b0ae500 100644
  ```bash
  # Install dependencies
  npm install
-@@ -291,4 +352,4 @@ npm test
+@@ -291,4 +360,4 @@ npm test
  npm run test:watch
  ```
 
@@ -2260,7 +2268,7 @@ index 3f67678..9f288b2 100644
    });
  }
 diff --git a/src/index.ts b/src/index.ts
-index 8466eac..72d2fbe 100644
+index 8466eac..5402e36 100644
 --- a/src/index.ts
 +++ b/src/index.ts
 @@ -4,7 +4,7 @@ export type { KeyboardInfo, TextInputEvent, CompanionEvent } from './appletv.js'
@@ -2276,7 +2284,7 @@ index 8466eac..72d2fbe 100644
  export { NowPlayingInfo, PlaybackState } from './now-playing-info.js';
  export { SupportedCommand, Command } from './supported-command.js';
  export { Message } from './message.js';
-+export { MRPMessage, MessageType } from './mrp/messages.js';
++export { MRPMessage, MessageType, OutputContextType } from './mrp/messages.js';
  export { AirPlayConnection } from './connection.js';
 +export type { AirPlayConnectionOptions } from './connection.js';
  export type { HAPCredentials } from './auth/types.js';
@@ -2380,6 +2388,75 @@ index 0000000..ba93f12
 +    expect(await decode('error')).toMatchObject({ errorCode: 6, errorDescription: 'Synthetic rejection' });
 +  });
 +});
+diff --git a/src/mrp/__tests__/output-context.test.ts b/src/mrp/__tests__/output-context.test.ts
+new file mode 100644
+index 0000000..c861984
+--- /dev/null
++++ b/src/mrp/__tests__/output-context.test.ts
+@@ -0,0 +1,63 @@
++import { describe, expect, it } from 'vitest';
++import { MRPMessage, MessageType, OutputContextType } from '../messages.js';
++
++// Encoded by pyatv 0.18.0 with synthetic identifiers, exactly as the supervised
++// AirPods probe built them: pyatv's closed enum knows only value 1, so type 2 was
++// merged as a raw varint and serializes after the device fields.
++const fixtures = {
++  personal:
++    '0830120c726f7574652d6f7574707574a20338221973796e7468657469632d706572736f6e616c2d6f75747075743a19' +
++    '73796e7468657469632d706572736f6e616c2d6f75747075740802',
++  group:
++    '0830120c726f7574652d6f7574707574a20352221373796e7468657469632d74762d6f7574707574221173796e746865' +
++    '7469632d737065616b65723a1373796e7468657469632d74762d6f75747075743a1173796e7468657469632d73706561' +
++    '6b65720802',
++};
++const field = (tag: number, value: string): Buffer =>
++  Buffer.concat([Buffer.from([tag, value.length]), Buffer.from(value)]);
++
++describe('system audio output selection', () => {
++  it('matches the pyatv SharedSystemAudio request for one personal output', async () => {
++    const reference = await MRPMessage.decode(Buffer.from(fixtures.personal, 'hex'));
++    const encoded = await MRPMessage.setSystemAudioOutputs(['synthetic-personal-output']);
++    const decoded = await MRPMessage.decode(encoded);
++    expect(decoded.type).toBe(MessageType.ModifyOutputContextRequest);
++    expect(reference.type).toBe(48);
++    expect(decoded['.modifyOutputContextRequestMessage']).toEqual(reference['.modifyOutputContextRequestMessage']);
++    expect(decoded['.modifyOutputContextRequestMessage']).toMatchObject({
++      type: OutputContextType.SharedSystemAudio,
++      settingDevices: ['synthetic-personal-output'],
++      clusterAwareSettingDevices: ['synthetic-personal-output'],
++    });
++    // Canonical field order: type 2 first, then settingDevices (4) and clusterAwareSettingDevices (7).
++    const inner = Buffer.concat([
++      Buffer.from([0x08, 0x02]),
++      field(0x22, 'synthetic-personal-output'),
++      field(0x3a, 'synthetic-personal-output'),
++    ]);
++    const extension = Buffer.concat([Buffer.from([0xa2, 0x03, inner.length]), inner]);
++    expect(encoded.subarray(0, 2)).toEqual(Buffer.from([0x08, 0x30]));
++    expect(encoded.subarray(-extension.length)).toEqual(extension);
++    expect(decoded.identifier).toBeTruthy();
++    expect((await MRPMessage.decode(await MRPMessage.setSystemAudioOutputs(['x']))).identifier).not.toBe(
++      decoded.identifier,
++    );
++  });
++
++  it('keeps several default outputs in order and rejects empty or duplicate selections', async () => {
++    const reference = await MRPMessage.decode(Buffer.from(fixtures.group, 'hex'));
++    const decoded = await MRPMessage.decode(
++      await MRPMessage.setSystemAudioOutputs(['synthetic-tv-output', 'synthetic-speaker']),
++    );
++    const inner = decoded['.modifyOutputContextRequestMessage'] as Record<string, unknown>;
++    expect(inner.settingDevices).toEqual(['synthetic-tv-output', 'synthetic-speaker']);
++    expect(inner.clusterAwareSettingDevices).toEqual(inner.settingDevices);
++    expect(reference['.modifyOutputContextRequestMessage']).toMatchObject({
++      type: OutputContextType.SharedSystemAudio,
++      settingDevices: inner.settingDevices,
++      clusterAwareSettingDevices: inner.settingDevices,
++    });
++    for (const invalid of [[], [''], ['same', 'same']])
++      await expect(MRPMessage.setSystemAudioOutputs(invalid)).rejects.toThrow(/identifiers/);
++  });
++});
 diff --git a/src/mrp/__tests__/volume-query.test.ts b/src/mrp/__tests__/volume-query.test.ts
 new file mode 100644
 index 0000000..a1c862a
@@ -2423,7 +2500,7 @@ index 0000000..a1c862a
 +  });
 +});
 diff --git a/src/mrp/messages.ts b/src/mrp/messages.ts
-index 499a60a..f1541b4 100644
+index 499a60a..bb9d883 100644
 --- a/src/mrp/messages.ts
 +++ b/src/mrp/messages.ts
 @@ -2,11 +2,16 @@ import protobuf from 'protobufjs';
@@ -2444,11 +2521,12 @@ index 499a60a..f1541b4 100644
    SendCommand = 1,
    SendCommandResult = 2,
    GetState = 3,
-@@ -47,8 +52,15 @@ export enum MessageType {
+@@ -47,8 +52,16 @@ export enum MessageType {
    GenericMessage = 42,
    SendButtonEvent = 43,
    SetNowPlayingClient = 46,
 +  SetNowPlayingPlayer = 47,
++  ModifyOutputContextRequest = 48,
 +  GetVolume = 49,
 +  GetVolumeResult = 50,
 +  VolumeDidChange = 52,
@@ -2460,7 +2538,7 @@ index 499a60a..f1541b4 100644
  }
 
  let rootPromise: Promise<protobuf.Root> | null = null;
-@@ -74,6 +86,13 @@ const PROTO_FILES = [
+@@ -74,6 +87,14 @@ const PROTO_FILES = [
    'SetConnectionStateMessage.proto',
    'SetHiliteModeMessage.proto',
    'SetNowPlayingClientMessage.proto',
@@ -2471,13 +2549,53 @@ index 499a60a..f1541b4 100644
 +  'VolumeControlCapabilitiesDidChangeMessage.proto',
 +  'RemoveClientMessage.proto',
 +  'RemovePlayerMessage.proto',
++  'ModifyOutputContextRequestMessage.proto',
    'PlaybackQueueRequestMessage.proto',
    'TransactionMessage.proto',
    'UpdateClientMessage.proto',
-@@ -163,6 +182,16 @@ async function encodeMessage(
+@@ -162,7 +183,55 @@ async function encodeMessage(
+   return Buffer.from(ProtocolMessage.encode(message).finish());
  }
 
++/** Output context types reported by tvOS MediaRemote (values from pyatv#2834). */
++export enum OutputContextType {
++  Unknown = 0,
++  SharedAudioPresentation = 1,
++  SharedSystemAudio = 2,
++  SharedSystemScreen = 3,
++  iTunesAudio = 4,
++  Auxiliary = 5,
++}
++
  export class MRPMessage {
++  /**
++   * Replace the system audio route with the given output device UIDs.
++   *
++   * Uses the SharedSystemAudio output context, which selects personal outputs such
++   * as same-account AirPods. SharedAudioPresentation is the AirPlay speaker-group
++   * context and does not reliably select them. The reply is only an acknowledgement;
++   * confirm the route from the reported output devices.
++   */
++  static async setSystemAudioOutputs(outputDeviceUIDs: readonly string[]): Promise<Buffer> {
++    if (
++      !Array.isArray(outputDeviceUIDs) ||
++      outputDeviceUIDs.length === 0 ||
++      !outputDeviceUIDs.every((uid) => typeof uid === 'string' && uid.length > 0) ||
++      new Set(outputDeviceUIDs).size !== outputDeviceUIDs.length
++    )
++      throw new TypeError('One or more distinct output device identifiers are required');
++    const devices = [...outputDeviceUIDs];
++    return encodeMessage(MessageType.ModifyOutputContextRequest, {
++      key: '.modifyOutputContextRequestMessage',
++      typeName: 'ModifyOutputContextRequestMessage',
++      fields: {
++        type: OutputContextType.SharedSystemAudio,
++        settingDevices: devices,
++        clusterAwareSettingDevices: devices,
++      },
++    });
++  }
++
 +  /** Read the current level for one authenticated output without changing it. */
 +  static async getVolume(outputDeviceUID: string): Promise<Buffer> {
 +    if (!outputDeviceUID) throw new TypeError('An output device identifier is required');
@@ -2561,8 +2679,42 @@ index 0000000..4dfa927
 +message GetVolumeResultMessage {
 +  optional float volume = 1;
 +}
+diff --git a/src/proto/ModifyOutputContextRequestMessage.proto b/src/proto/ModifyOutputContextRequestMessage.proto
+new file mode 100644
+index 0000000..b4af483
+--- /dev/null
++++ b/src/proto/ModifyOutputContextRequestMessage.proto
+@@ -0,0 +1,28 @@
++syntax = "proto2";
++
++import "ProtocolMessage.proto";
++
++extend ProtocolMessage {
++  optional ModifyOutputContextRequestMessage modifyOutputContextRequestMessage = 52;
++}
++
++message ModifyOutputContextRequestType {
++  enum Enum {
++    Unknown = 0;
++    SharedAudioPresentation = 1;
++    SharedSystemAudio = 2;
++    SharedSystemScreen = 3;
++    iTunesAudio = 4;
++    Auxiliary = 5;
++  }
++}
++
++message ModifyOutputContextRequestMessage {
++  optional ModifyOutputContextRequestType.Enum type = 1;
++  repeated string addingDevices = 2;
++  repeated string removingDevices = 3;
++  repeated string settingDevices = 4;
++  repeated string clusterAwareAddingDevices = 5;
++  repeated string clusterAwareRemovingDevices = 6;
++  repeated string clusterAwareSettingDevices = 7;
++}
 diff --git a/src/proto/ProtocolMessage.proto b/src/proto/ProtocolMessage.proto
-index d1e937e..40b61cc 100644
+index d1e937e..f338c87 100644
 --- a/src/proto/ProtocolMessage.proto
 +++ b/src/proto/ProtocolMessage.proto
 @@ -4,6 +4,7 @@ message ProtocolMessage {
@@ -2573,7 +2725,7 @@ index d1e937e..40b61cc 100644
      SEND_COMMAND_MESSAGE = 1;
      SEND_COMMAND_RESULT_MESSAGE = 2;
      GET_STATE_MESSAGE = 3;
-@@ -41,14 +42,23 @@ message ProtocolMessage {
+@@ -41,14 +42,24 @@ message ProtocolMessage {
      SET_CONNECTION_STATE_MESSAGE = 38;
      SET_HILITE_MODE_MESSAGE = 40;
      WAKE_DEVICE_MESSAGE = 41;
@@ -2581,6 +2733,7 @@ index d1e937e..40b61cc 100644
      SEND_PACKED_VIRTUAL_TOUCH_EVENT_MESSAGE = 43;
      SET_NOW_PLAYING_CLIENT_MESSAGE = 46;
 +    SET_NOW_PLAYING_PLAYER_MESSAGE = 47;
++    MODIFY_OUTPUT_CONTEXT_REQUEST_MESSAGE = 48;
 +    GET_VOLUME_MESSAGE = 49;
 +    GET_VOLUME_RESULT_MESSAGE = 50;
 +    VOLUME_DID_CHANGE_MESSAGE = 52;

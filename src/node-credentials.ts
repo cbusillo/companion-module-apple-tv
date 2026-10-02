@@ -5,7 +5,12 @@ export type SavedPairing = {
 	deviceId: string
 	credentials: { clientId: string; serverId: string; clientLTSK: string; clientLTPK: string; serverLTPK: string }
 }
-export type ModuleSecrets = { pairing?: SavedPairing; pin?: string }
+export type ModuleSecrets = {
+	pairing?: SavedPairing
+	pin?: string
+	/** Personal output learned from the TV's reported outputs by name match. */
+	personalOutput?: { match: string; id: string; name: string }
+}
 
 /** Values belong only in Companion's secret store, never in its public config. */
 export function decodePairing(value: unknown): { deviceId: string; credentials: HAPCredentials } {

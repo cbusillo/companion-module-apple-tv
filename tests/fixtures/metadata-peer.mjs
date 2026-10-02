@@ -7,6 +7,9 @@ export class MetadataPeer extends EventEmitter {
 	level = 35
 	available = true
 	requests = []
+	/** How the synthetic TV handles an output-route request: apply, ignore, reject, or silent (no reply). */
+	routeMode = 'apply'
+	routeRequests = []
 	async connect() {
 		this.route()
 		this.capability()
@@ -22,7 +25,9 @@ export class MetadataPeer extends EventEmitter {
 			name: 'Synthetic TV',
 			isGroupLeader: true,
 			isProxyGroupPlayer: false,
-			groupedDevices: extraOutputs.map((id) => ({ deviceUID: id, name: id })),
+			groupedDevices: extraOutputs.map((output) =>
+				typeof output === 'string' ? { deviceUID: output, name: output } : { deviceUID: output.id, name: output.name },
+			),
 		})
 	}
 	capability(available = true) {
@@ -44,8 +49,20 @@ export class MetadataPeer extends EventEmitter {
 			this.volume(this.level)
 		}
 	}
-	async sendMRPMessageAndWait(data) {
-		this.requests.push(await MRPMessage.decode(data))
+	async sendMRPMessageAndWait(data, _responseType, timeoutMs) {
+		const request = await MRPMessage.decode(data)
+		this.requests.push(request)
+		const route = request['.modifyOutputContextRequestMessage']
+		if (request.type === 48 && route) {
+			this.routeRequests.push(route)
+			if (this.routeMode === 'reject') throw new Error('AirPlay MRP error 6')
+			if (this.routeMode === 'silent') throw new Error(`AirPlay MRP request timed out after ${timeoutMs}`)
+			if (this.routeMode === 'apply') {
+				const extra = route.settingDevices.filter((id) => id !== 'tv-output')
+				setImmediate(() => this.route(extra.map((id) => ({ id, name: this.names?.[id] ?? id }))))
+			}
+			return { type: 0, identifier: request.identifier }
+		}
 		return { type: 50, '.getVolumeResultMessage': { volume: this.level / 100 } }
 	}
 	close() {

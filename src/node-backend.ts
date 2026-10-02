@@ -7,11 +7,13 @@ import { decodePairing, encodePairing, type ModuleSecrets, type SavedPairing } f
 import { displayDefaults, displayValues, type DisplayValues } from './display.js'
 import { PlaybackClock } from './playback.js'
 import type { DeviceChoice, ModuleConfig } from './config.js'
+import { PersonalOutputRouter, type OutputLink, type PersonalRoute, type RouteTarget } from './personal-output.js'
 
 type Controller = Pick<
 	NodeController,
 	'state' | 'feedback' | 'nowPlaying' | 'start' | 'stop' | 'waitUntilReady' | 'observe' | 'perform' | 'listApps'
->
+> &
+	Partial<Pick<NodeController, 'audioOutputs' | 'routeAudio'>>
 type Pairing = Pick<CompanionPairSetup, 'start' | 'finish' | 'destroy' | 'closed' | 'stage'>
 export type SetupState =
 	| 'disabled'
@@ -24,17 +26,22 @@ export type SetupState =
 	| 'ready'
 	| 'reconnecting'
 	| 'error'
+export type PersonalOutputValues = { personal_output_route: PersonalRoute; personal_output_name: string }
 export type BackendHooks = {
 	save(config: ModuleConfig, secrets: ModuleSecrets): void
 	status(state: SetupState, message: string): void
-	values(values: Partial<DisplayValues> & { connection?: string; last_result?: string }): void
+	values(values: Partial<DisplayValues & PersonalOutputValues> & { connection?: string; last_result?: string }): void
 	apps(apps: { id: string; name: string }[]): void
+	/** Personal output feedback may have changed. */
+	feedback?(): void
 }
 export type BackendOptions = {
 	discover?: typeof scan
 	pairing?: (device: DiscoveredDevice) => Pairing
 	controller?: (deviceId: string, credentials: HAPCredentials) => Controller
 	pinTimeoutMs?: number
+	personalOutputConfirmationMs?: number
+	personalOutputFailedHoldMs?: number
 }
 
 type PendingPair = {
@@ -62,10 +69,49 @@ export class NodeBackend {
 	private activeRecord?: string
 	private appsGeneration = 0
 	private verification?: Promise<void>
+	private controllerSerial = 0
+	private lastRoute = ''
+	private readonly router: PersonalOutputRouter
 	constructor(
 		private readonly hooks: BackendHooks,
 		private readonly options: BackendOptions = {},
-	) {}
+	) {
+		this.router = new PersonalOutputRouter(
+			{
+				changed: () => this.publishRoute(),
+				learned: (output) => {
+					this.secrets = { ...this.secrets, personalOutput: output }
+					this.save()
+				},
+				result: (message) => this.hooks.values({ last_result: message }),
+			},
+			{
+				confirmationMs: options.personalOutputConfirmationMs,
+				failedHoldMs: options.personalOutputFailedHoldMs,
+			},
+		)
+	}
+
+	/** True while the configured personal output is in the TV's reported route. */
+	get personalOutputActive(): boolean {
+		return this.router.active
+	}
+	private publishRoute(): void {
+		const values: PersonalOutputValues = {
+			personal_output_route: this.router.route,
+			personal_output_name: this.router.name,
+		}
+		const encoded = JSON.stringify([values, this.router.active])
+		if (encoded === this.lastRoute) return
+		this.lastRoute = encoded
+		this.hooks.values(values)
+		this.hooks.feedback?.()
+	}
+	/** One request toward the chosen route, decided from the live reported outputs. */
+	async selectPersonalOutput(target: RouteTarget): Promise<void> {
+		const message = await this.router.select(target)
+		this.hooks.values({ last_result: message })
+	}
 
 	private status(state: SetupState, message: string): void {
 		this.state = state
@@ -105,6 +151,10 @@ export class NodeBackend {
 		}
 		this.secrets = { ...secrets }
 		delete this.secrets.pin
+		this.router.configure(
+			{ match: this.config.personalOutputName, id: this.config.personalOutputId },
+			this.secrets.personalOutput,
+		)
 		if (pairRequested || refreshRequested || secrets.pin !== undefined) this.save()
 		if (!config.enabled) {
 			const generation = this.generation + 1
@@ -233,7 +283,7 @@ export class NodeBackend {
 			if (generation !== this.generation) return
 			// Save only after fresh sessions authenticate both protocols and pass read-only health.
 			const pairing = encodePairing(pending.deviceId, credentials)
-			this.secrets = { pairing }
+			this.secrets = { ...this.secrets, pairing }
 			this.save()
 			this.clearPairing()
 			this.attach(candidate, pairing)
@@ -266,6 +316,7 @@ export class NodeBackend {
 	}
 	private attach(controller: Controller, pairing: SavedPairing): void {
 		this.controller = controller
+		this.controllerSerial++
 		this.activeRecord = JSON.stringify(pairing)
 		this.unsubscribe = controller.observe(() => this.publish())
 		this.timer = setInterval(() => this.publish(), 1000)
@@ -297,11 +348,28 @@ export class NodeBackend {
 			position: position === undefined || !Number.isFinite(position) ? '' : String(Math.floor(position)),
 			duration: playing.duration === undefined ? '' : String(playing.duration),
 		}
+		this.router.observe(this.outputLink(controller, ready))
 		const displayed = { ...values, ...displayValues(values) }
 		const encoded = JSON.stringify(displayed)
 		if (encoded !== this.lastValues) {
 			this.lastValues = encoded
 			this.hooks.values(displayed)
+		}
+	}
+	private outputLink(controller: Controller, ready: boolean): OutputLink | undefined {
+		const audio = ready ? controller.audioOutputs : undefined
+		if (!audio) return undefined
+		const { epoch } = audio
+		return {
+			session: `${this.controllerSerial}:${epoch}`,
+			outputs: audio.outputs,
+			send:
+				audio.routable && controller.routeAudio
+					? async (outputDeviceUIDs) => {
+							if (this.controller !== controller) throw new CommandNotSent('Connection changed; output change not sent')
+							return controller.routeAudio!(epoch, outputDeviceUIDs)
+						}
+					: undefined,
 		}
 	}
 	private loadApps(controller: Controller): void {
@@ -353,6 +421,7 @@ export class NodeBackend {
 		this.activeRecord = undefined
 		this.clock = new PlaybackClock()
 		this.lastValues = ''
+		this.router.stop()
 		this.hooks.values({ ...displayDefaults, metadata_state: 'Offline', volume: '', position: '', duration: '' })
 		this.hooks.apps([])
 		await controller?.stop()

@@ -69,6 +69,13 @@ def main() -> None:
     remove_client = message("removeClient", pb.REMOVE_CLIENT_MESSAGE)
     remove_client.client.CopyFrom(client.client)
 
+    # pyatv's closed enum defines only SharedAudioPresentation (1), so SharedSystemAudio (2) is
+    # merged as a raw varint, exactly as the supervised AirPods probe built the request.
+    route = message("systemAudioRoute", pb.MODIFY_OUTPUT_CONTEXT_REQUEST_MESSAGE)
+    route.MergeFromString(bytes([0x08, 0x02]))
+    route.settingDevices.append("personal-output")
+    route.clusterAwareSettingDevices.append("personal-output")
+
     packets["ack"] = pb.ProtocolMessage(identifier="request-1")
     packets["error"] = pb.ProtocolMessage(identifier="request-2", errorCode=6, errorDescription="Synthetic rejection")
     batch = BaseDataStreamChannel.encode_message(DataStreamMessage(

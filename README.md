@@ -45,7 +45,7 @@ Switcher, Screensaver, play/pause, previous/next, ten- or thirty-second seeks,
 relative volume, mute save/restore, power toggle and four swipe directions.
 Launch App lists applications reported by the TV and accepts existing bundle
 identifiers. Playback commands depend on the active app's advertised capabilities.
-Text entry and selecting personal AirPods are not implemented.
+Text entry is not implemented.
 
 Power toggle requires a current known state. Wake sends Home only while the TV
 reports Off, so it opens the Home screen rather than resuming the previous stream.
@@ -63,13 +63,46 @@ Output changes are observable only when reported by the TV; numeric volume does
 not prove perceived loudness or per-output accuracy.
 
 Variables include connection, title, artist, app, playback state, elapsed and
-remaining time, progress, volume, mute-save state, power and `last_result`.
+remaining time, progress, volume, mute-save state, power, personal output route
+and name, and `last_result`.
 Elapsed time advances from the selected player's reported position, timestamp
 and playback rate; it freezes on pause and clears on connection loss. Streams
 without a duration have no invented remaining time. Metadata availability depends
 on the playing app. `last_result` describes dispatch, rejection or uncertain
 delivery, never physical confirmation. Its wording changed from the Python
 version; update custom comparisons if used.
+
+## Personal audio output
+
+The **Personal audio output** action selects a personal output, such as
+same-account AirPods, as the TV's system audio route. Enable it by setting
+**Personal output name contains** (for example `AirPods`); an empty value
+disables it. The TV must report the AirPods once, for example after selecting
+them from its Control Center. The module then remembers their output UID in the
+connection secrets, not the public configuration. If several reported outputs
+match, nothing is learned. **Personal output identifier** overrides the match.
+
+| Item                                               | ID                      | Values                                                       |
+| -------------------------------------------------- | ----------------------- | ------------------------------------------------------------ |
+| Action **Personal audio output**, option **Route** | `personalOutput`        | `target`: `toggle`, `personal` or `default`                  |
+| Route variable                                     | `personal_output_route` | `Personal`, `Default`, `Connecting`, `Failed`, `Unavailable` |
+| Name variable                                      | `personal_output_name`  | Remembered output name                                       |
+| Boolean feedback **Personal audio output active**  | `personalOutputActive`  | True while the AirPods are in the reported route             |
+
+The module sends one MRP `ModifyOutputContextRequest` with the `SharedSystemAudio`
+context over the authenticated AirPlay session. Toggle chooses the direction
+from the live output list. Returning to default selects the other outputs the
+TV currently reports. Requests are never retried. The TV's acknowledgement is
+not treated as success; only the reported output list confirms the route.
+`Connecting` lasts until confirmation or 20 seconds. `Failed` follows a timeout
+or rejection and clears after 10 seconds or on the next route change. A late
+connection or a change made on the TV therefore still updates the variable.
+Reconnects cancel a pending request without replaying it.
+
+Taking over AirPods connected to another Apple device on the same account can
+take more than 8 seconds; idle nearby AirPods confirmed in 0.2-0.5 seconds on
+the test TV. The older `SharedAudioPresentation` speaker-group request is not
+used because it did not reliably select AirPods.
 
 ## Failure and lifecycle contract
 

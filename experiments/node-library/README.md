@@ -77,6 +77,19 @@ maps to the published npm package. This makes the experiment reproducible withou
 a local filesystem dependency or an unpublished package. No upstream submission
 or permanent fork decision is implied.
 
+## System audio output selection
+
+`MRPMessage.setSystemAudioOutputs(outputDeviceUIDs)` encodes MRP message type 48
+(`ModifyOutputContextRequestMessage`, extension field 52) with context type
+`SharedSystemAudio` (2) and the UIDs in both `settingDevices` and
+`clusterAwareSettingDevices`. The context enum follows the Ghidra-derived protos
+in pyatv#2834; pyatv 0.18.0 defines only `SharedAudioPresentation` (1), the
+AirPlay speaker-group context that did not reliably select AirPods. Library tests
+compare the encoding with pyatv-generated packets, and the metadata oracle
+decodes a locked-pyatv packet built the same way as the supervised probe in
+Media Control Relay #114. pyatv serializes the raw enum varint after the device
+fields; this library emits canonical field order with the same decoded content.
+
 ## Run offline
 
 Use this repository's Node 22 and Yarn 4 toolchain:
