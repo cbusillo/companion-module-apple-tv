@@ -5,7 +5,9 @@ import test from 'node:test'
 import { NodeController } from '../dist/prototype/controller.js'
 import { withCompanionSession } from '../dist/prototype/session.js'
 import { CommandNotSent } from '../dist/prototype/queue.js'
-import { withMetadataSession } from '../dist/prototype/metadata-session.js'
+import { withMetadataSession, OutputRouteRejected } from '../dist/prototype/metadata-session.js'
+import { NodeBackend } from '../dist/node-backend.js'
+import { saved } from './fixtures/node-setup-peer.mjs'
 import { MetadataPeer } from './fixtures/metadata-peer.mjs'
 import { runAcceptance } from '../dist/prototype/acceptance.js'
 
@@ -603,3 +605,101 @@ for (const [scenario, expected] of [
 		}
 	})
 }
+
+test('system audio routing sends one SharedSystemAudio request on the metadata session', async () => {
+	const { controller, peers, metadataPeers } = fixture()
+	controller.start()
+	try {
+		await controller.waitUntilReady(2000)
+		const before = controller.audioOutputs
+		assert.deepEqual(before.outputs, [{ id: 'tv-output', name: 'Synthetic TV' }])
+		assert.equal(before.routable, true)
+		assert.equal(await controller.routeAudio(before.epoch, ['synthetic-airpods']), true)
+		const [request] = metadataPeers[0].requests.filter((message) => message.type === 48)
+		assert.equal(request['.modifyOutputContextRequestMessage'].type, 2)
+		assert.deepEqual(request['.modifyOutputContextRequestMessage'].settingDevices, ['synthetic-airpods'])
+		assert.deepEqual(request['.modifyOutputContextRequestMessage'].clusterAwareSettingDevices, ['synthetic-airpods'])
+		assert.deepEqual(request['.modifyOutputContextRequestMessage'].addingDevices, [])
+		await until(() => controller.audioOutputs?.outputs.length === 2)
+		metadataPeers[0].routeMode = 'silent'
+		assert.equal(await controller.routeAudio(before.epoch, ['tv-output']), false)
+		metadataPeers[0].routeMode = 'reject'
+		await assert.rejects(controller.routeAudio(before.epoch, ['tv-output']), OutputRouteRejected)
+		assert.equal(metadataPeers[0].routeRequests.length, 3)
+		assert.equal(controller.state, 'ready', 'a rejected or unacknowledged route does not reconnect')
+		assert.equal(peers.length, 1)
+		assert.equal(peers[0].requests.filter(({ id }) => id === '_hidC').length, 0)
+	} finally {
+		await controller.stop()
+	}
+})
+
+test('a route request from a previous session is rejected after reconnect and never replayed', async () => {
+	const { controller, metadataPeers } = fixture()
+	controller.start()
+	try {
+		await controller.waitUntilReady(2000)
+		const { epoch } = controller.audioOutputs
+		metadataPeers[0].close()
+		assert.equal(controller.audioOutputs, undefined)
+		await until(() => controller.reconnects === 1)
+		await assert.rejects(controller.routeAudio(epoch, ['synthetic-airpods']), CommandNotSent)
+		assert.ok(controller.audioOutputs.epoch > epoch)
+		assert.equal(metadataPeers.flatMap((peer) => peer.routeRequests).length, 0)
+	} finally {
+		await controller.stop()
+	}
+	await assert.rejects(controller.routeAudio(1, ['synthetic-airpods']), CommandNotSent)
+})
+
+test('backend toggles a learned personal output and keeps its identifier out of public config', async () => {
+	const f = fixture()
+	const values = {}
+	const saves = []
+	let feedbackChecks = 0
+	const backend = new NodeBackend(
+		{
+			save: (config, secrets) => saves.push(structuredClone({ config, secrets })),
+			status: () => {},
+			values: (update) => Object.assign(values, update),
+			apps: () => {},
+			feedback: () => feedbackChecks++,
+		},
+		{ controller: () => f.controller, personalOutputConfirmationMs: 2000 },
+	)
+	const names = { 'synthetic-airpods': "Someone's AirPods" }
+	try {
+		await backend.configure(
+			{ enabled: true, deviceId: 'synthetic-tv', personalOutputName: 'airpods' },
+			saved('synthetic-tv'),
+		)
+		await until(() => values.connection === 'ready')
+		assert.equal(values.personal_output_route, 'Unavailable')
+		await backend.selectPersonalOutput('toggle')
+		assert.match(values.last_result, /not identified/)
+		// The owner selects the AirPods once on the TV; the module learns the reported UID.
+		f.metadataPeers[0].names = names
+		f.metadataPeers[0].route([{ id: 'synthetic-airpods', name: names['synthetic-airpods'] }])
+		await until(() => values.personal_output_route === 'Personal')
+		assert.equal(values.personal_output_name, names['synthetic-airpods'])
+		assert.equal(backend.personalOutputActive, true)
+		const learned = saves.at(-1)
+		assert.equal(learned.secrets.personalOutput.id, 'synthetic-airpods')
+		assert.ok(learned.secrets.pairing, 'learning keeps the saved pairing')
+		assert.equal(JSON.stringify(learned.config).includes('synthetic-airpods'), false)
+
+		await backend.selectPersonalOutput('toggle')
+		await until(() => values.personal_output_route === 'Default')
+		assert.deepEqual(f.metadataPeers[0].routeRequests.at(-1).settingDevices, ['tv-output'])
+		assert.equal(backend.personalOutputActive, false)
+		await backend.selectPersonalOutput('toggle')
+		await until(() => values.personal_output_route === 'Personal')
+		assert.match(values.last_result, /personal output confirmed/)
+		assert.deepEqual(f.metadataPeers[0].routeRequests.at(-1).settingDevices, ['synthetic-airpods'])
+		assert.equal(f.metadataPeers[0].routeRequests.length, 2)
+		assert.ok(feedbackChecks >= 3)
+	} finally {
+		await backend.stop()
+	}
+	assert.equal(values.personal_output_route, 'Unavailable')
+})

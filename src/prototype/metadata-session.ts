@@ -3,18 +3,24 @@ import { MetadataState, type MetadataSnapshot } from './metadata.js'
 import { bounded } from './session.js'
 
 export type MetadataTarget = { address: string; port: number }
+/** Sends one system-audio route request; resolves true when the TV acknowledged it. */
+export type RouteAudio = (outputDeviceUIDs: readonly string[]) => Promise<boolean>
+export class OutputRouteRejected extends Error {}
 export type MetadataConnection = Pick<
 	AirPlayConnection,
 	'connect' | 'close' | 'on' | 'off' | 'sendMRPMessage' | 'sendMRPMessageAndWait'
 >
 
-/** One authenticated lifetime. The operation must honor its signal and finish cleanup before returning. */
+/**
+ * One authenticated lifetime. The operation must honor its signal and finish cleanup before returning.
+ * The connection is read-only except for the explicit audio-route sender passed to the operation.
+ */
 export async function withMetadataSession<T>(
 	target: MetadataTarget,
 	credentials: HAPCredentials,
 	ownerSignal: AbortSignal,
 	onSnapshot: (snapshot: MetadataSnapshot) => void,
-	operation: (signal: AbortSignal) => Promise<T>,
+	operation: (signal: AbortSignal, routeAudio: RouteAudio) => Promise<T>,
 	createConnection: (target: MetadataTarget, credentials: HAPCredentials) => MetadataConnection = (device, keys) =>
 		new AirPlayConnection(device.address, device.port, keys, { logger: () => {} }),
 ): Promise<T> {
@@ -96,6 +102,22 @@ export async function withMetadataSession<T>(
 		}
 		publish()
 	}
+	// One write and no retry. The acknowledgement only proves receipt; callers confirm the
+	// route from later reported output devices.
+	const routeAudio: RouteAudio = async (outputDeviceUIDs) => {
+		signal.throwIfAborted()
+		const request = await MRPMessage.setSystemAudioOutputs(outputDeviceUIDs)
+		if (closing || signal.aborted || !connection) throw new Error('Metadata connection closed')
+		try {
+			await connection.sendMRPMessageAndWait(request, undefined, 3000)
+			return true
+		} catch (error) {
+			if (closing || signal.aborted) throw new Error('Metadata connection closed', { cause: error })
+			if (error instanceof Error && error.message.startsWith('AirPlay MRP error'))
+				throw new OutputRouteRejected('Apple TV rejected the output change')
+			return false
+		}
+	}
 	let result: T
 	try {
 		connection = createConnection(target, credentials)
@@ -109,7 +131,7 @@ export async function withMetadataSession<T>(
 		if (refreshRequested) refreshAudio()
 		publish()
 		signal.throwIfAborted()
-		result = await operation(signal)
+		result = await operation(signal, routeAudio)
 	} catch {
 		if (reportFailed) throw new Error('Metadata report failed')
 		if (ownerSignal.aborted) throw new Error('Metadata observation cancelled')

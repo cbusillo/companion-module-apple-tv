@@ -12,7 +12,7 @@ import {
 } from './companion.js'
 import { bounded, withCompanionSession, type Target } from './session.js'
 import { CommandNotSent, CommandQueue } from './queue.js'
-import { withMetadataSession } from './metadata-session.js'
+import { withMetadataSession, type RouteAudio } from './metadata-session.js'
 import type { MetadataSnapshot } from './metadata.js'
 
 export type RemoteAction =
@@ -49,6 +49,8 @@ export class NodeController {
 	private readonly discover: () => Promise<ControllerTarget>
 	private epoch = 0
 	private playing: MetadataSnapshot['nowPlaying'] = { state: 'Unknown' }
+	private outputs: { id: string; name: string }[] | undefined
+	private route: RouteAudio | undefined
 	reconnects = 0
 	constructor(
 		private readonly deviceId: string,
@@ -80,6 +82,18 @@ export class NodeController {
 	}
 	get audioOutputIdentity(): string | undefined {
 		return this.commands?.audioOutputIdentity
+	}
+	/** Authenticated output list for the current session; `epoch` identifies that session. */
+	get audioOutputs(): { epoch: number; outputs: { id: string; name: string }[]; routable: boolean } | undefined {
+		if (this.phase !== 'ready' || !this.outputs?.length) return undefined
+		return { epoch: this.epoch, outputs: this.outputs.map((output) => ({ ...output })), routable: !!this.route }
+	}
+	/** Send one system-audio route request on the given session. Never retried or replayed. */
+	async routeAudio(epoch: number, outputDeviceUIDs: readonly string[]): Promise<boolean> {
+		const route = this.route
+		if (this.stopRequested || this.phase !== 'ready' || epoch !== this.epoch || !route)
+			throw new CommandNotSent('Not connected; output change not sent')
+		return route(outputDeviceUIDs)
 	}
 	observe(listener: () => void): () => void {
 		this.listeners.add(listener)
@@ -231,11 +245,13 @@ export class NodeController {
 						if (epoch !== this.epoch) return
 						snapshot = next
 						this.playing = { ...next.nowPlaying }
+						this.outputs = next.connected ? next.audio.outputs?.map((output) => ({ ...output })) : undefined
 						this.commands?.observeMetadata(next)
+						this.changed()
 						if (!next.connected && this.endSession && !this.stopRequested)
 							this.failSession(this.endSession, 'Metadata connection lost')
 					},
-					async (metadataSignal) => {
+					async (metadataSignal, routeAudio) => {
 						await (this.options.session ?? withCompanionSession)(
 							target,
 							this.credentials,
@@ -251,6 +267,7 @@ export class NodeController {
 								if (this.stopRequested || epoch !== this.epoch || !commands.active) return
 								commands.observeMetadata(snapshot)
 								this.commands = commands
+								this.route = routeAudio
 								const end = Promise.withResolvers<void>()
 								this.endSession = end
 								if (connectedBefore) this.reconnects++
@@ -290,6 +307,8 @@ export class NodeController {
 				this.queue.invalidate()
 				this.commands?.invalidate()
 				this.commands = undefined
+				this.route = undefined
+				this.outputs = undefined
 				this.playing = { state: 'Unknown' }
 				this.endSession?.resolve()
 				this.endSession = undefined

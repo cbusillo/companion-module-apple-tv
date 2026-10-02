@@ -6,6 +6,8 @@ export type ModuleConfig = {
 	refresh?: boolean
 	python?: string
 	credentialFile?: string
+	personalOutputName?: string
+	personalOutputId?: string
 }
 export type DeviceChoice = { id: string; label: string }
 export function GetConfigFields(devices: DeviceChoice[] = [], selected = ''): SomeCompanionConfigField[] {
@@ -26,6 +28,23 @@ export function GetConfigFields(devices: DeviceChoice[] = [], selected = ''): So
 			width: 12,
 			description:
 				'Select your TV, check Start pairing and Save. Then enter the TV PIN here and Save again. The PIN is cleared after submission.',
+		},
+		{
+			type: 'textinput',
+			id: 'personalOutputName',
+			label: 'Personal output name contains',
+			default: '',
+			width: 6,
+			description:
+				'For example AirPods. Leave empty to disable personal output selection. Matching is case-insensitive; the output must appear once in the TV output list, for example by selecting it once on the TV.',
+		},
+		{
+			type: 'textinput',
+			id: 'personalOutputId',
+			label: 'Personal output identifier (optional)',
+			default: '',
+			width: 6,
+			description: 'Overrides the name match. Use the output device UID reported by the TV.',
 		},
 		{
 			type: 'static-text',

@@ -19,6 +19,8 @@ const context = {
 	label: 'Bundle wire test',
 	setVariableDefinitions() {},
 	setActionDefinitions() {},
+	setFeedbackDefinitions() {},
+	checkFeedbacks() {},
 	setVariableValues(update) {
 		Object.assign(values, update)
 	},

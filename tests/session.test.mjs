@@ -48,6 +48,12 @@ function fixture() {
 		},
 		updateStatus: (status, message) => f.states.push({ status, message }),
 		saveConfig: f.hooks.save,
+		setFeedbackDefinitions: (feedbacks) => {
+			f.feedbacks = feedbacks
+		},
+		checkFeedbacks: (types) => {
+			f.feedbackChecks = [...(f.feedbackChecks ?? []), ...types]
+		},
 	}
 	return { ...f, module: new AppleTV(context, f.options), context, source: f }
 }
@@ -81,6 +87,32 @@ test('Companion entrypoint restores saved pairing and routes existing button IDs
 		await f.module.destroy()
 	}
 	assert.equal(f.controllers[0].stops, 1)
+})
+
+test('personal output action, variables and feedback stay Unavailable without route capability', async () => {
+	const f = fixture()
+	try {
+		await f.module.init({ ...config, personalOutputName: 'AirPods' }, false, saved())
+		await nextTurn()
+		assert.ok(f.source.definitions.personal_output_route)
+		assert.ok(f.source.definitions.personal_output_name)
+		assert.equal(f.source.feedbacks.personalOutputActive.type, 'boolean')
+		assert.equal(f.source.feedbacks.personalOutputActive.callback(), false)
+		assert.deepEqual(
+			f.source.actions.personalOutput.options[0].choices.map((choice) => choice.id),
+			['toggle', 'personal', 'default'],
+		)
+		assert.equal(f.values.personal_output_route, 'Unavailable')
+		await f.source.actions.personalOutput.callback({ options: { target: 'toggle' } })
+		assert.match(f.values.last_result, /not connected|unavailable/)
+		await f.source.actions.personalOutput.callback({ options: { target: '__proto__' } })
+		assert.equal(f.values.last_result, 'unknown output route; not sent')
+		assert.deepEqual(f.controllers[0].actions, [])
+		assert.ok(f.module.getConfigFields().some((field) => field.id === 'personalOutputName'))
+		assert.ok(f.module.getConfigFields().some((field) => field.id === 'personalOutputId'))
+	} finally {
+		await f.module.destroy()
+	}
 })
 
 test('configuration and secret callbacks complete one pairing and preserve the pending attempt across Save', async () => {

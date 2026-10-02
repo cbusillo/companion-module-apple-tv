@@ -10,6 +10,7 @@ const states = []
 const saves = []
 const controllers = []
 let actions
+let feedbacks
 let prompts = 0
 const config = { enabled: true, deviceId: 'synthetic-tv' }
 const credentials = {
@@ -28,6 +29,10 @@ const context = {
 	setActionDefinitions: (definitions) => {
 		actions = definitions
 	},
+	setFeedbackDefinitions: (definitions) => {
+		feedbacks = definitions
+	},
+	checkFeedbacks() {},
 	updateStatus: (status, message) => states.push({ status, message }),
 	saveConfig: (config, secrets) => saves.push(structuredClone({ config, secrets })),
 }
@@ -110,6 +115,11 @@ try {
 	assert.ok(saves.every((save) => !Object.hasOwn(save.secrets, 'pin') && !Object.hasOwn(save.config, 'pin')))
 	await actions.command.callback({ options: { command: 'select' } })
 	assert.deepEqual(controllers[0].actions, [{ kind: 'button', button: 'select' }])
+	// Disabled personal output: the bundled action and feedback exist but cannot appear to work.
+	assert.equal(feedbacks.personalOutputActive.callback(), false)
+	assert.equal(values.personal_output_route, 'Unavailable')
+	await actions.personalOutput.callback({ options: { target: 'toggle' } })
+	assert.equal(values.last_result, 'personal output not configured; not sent')
 } finally {
 	await module.destroy()
 }
