@@ -6,6 +6,7 @@ export type MetadataTarget = { address: string; port: number }
 /** Sends one system-audio route request; resolves true when the TV acknowledged it. */
 export type RouteAudio = (outputDeviceUIDs: readonly string[]) => Promise<boolean>
 export class OutputRouteRejected extends Error {}
+const ROUTE_ACKNOWLEDGEMENT_MS = 3000
 export type MetadataConnection = Pick<
 	AirPlayConnection,
 	'connect' | 'close' | 'on' | 'off' | 'sendMRPMessage' | 'sendMRPMessageAndWait'
@@ -103,13 +104,15 @@ export async function withMetadataSession<T>(
 		publish()
 	}
 	// One write and no retry. The acknowledgement only proves receipt; callers confirm the
-	// route from later reported output devices.
+	// route from later reported output devices. tvOS can take well over the acknowledgement
+	// wait to answer while it takes AirPods over from another device, so a late or missing
+	// acknowledgement must reject only this wait, never fail the shared connection.
 	const routeAudio: RouteAudio = async (outputDeviceUIDs) => {
 		signal.throwIfAborted()
 		const request = await MRPMessage.setSystemAudioOutputs(outputDeviceUIDs)
 		if (closing || signal.aborted || !connection) throw new Error('Metadata connection closed')
 		try {
-			await connection.sendMRPMessageAndWait(request, undefined, 3000)
+			await connection.sendMRPMessageAndWait(request, undefined, ROUTE_ACKNOWLEDGEMENT_MS, { fatalTimeout: false })
 			return true
 		} catch (error) {
 			if (closing || signal.aborted) throw new Error('Metadata connection closed', { cause: error })

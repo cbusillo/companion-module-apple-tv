@@ -93,7 +93,9 @@ The module sends one MRP `ModifyOutputContextRequest` with the `SharedSystemAudi
 context over the authenticated AirPlay session. Toggle chooses the direction
 from the live output list. Returning to default selects the other outputs the
 TV currently reports. Requests are never retried. The TV's acknowledgement is
-not treated as success; only the reported output list confirms the route.
+not treated as success; only the reported output list confirms the route. A slow
+or missing acknowledgement, common while AirPods are taken over from another
+device, ends only that wait and never drops the connection.
 `Connecting` lasts until confirmation or 20 seconds. `Failed` follows a timeout
 or rejection and clears after 10 seconds or on the next route change. A late
 connection or a change made on the TV therefore still updates the variable.

@@ -7,9 +7,19 @@ export class MetadataPeer extends EventEmitter {
 	level = 35
 	available = true
 	requests = []
-	/** How the synthetic TV handles an output-route request: apply, ignore, reject, or silent (no reply). */
+	/**
+	 * How the synthetic TV handles an output-route request:
+	 * - apply: acknowledge and change the route at once;
+	 * - ignore: acknowledge without changing the route;
+	 * - reject: reply with an MRP error;
+	 * - late: change the route after routeApplyMs and acknowledge after routeAckMs (a slow takeover);
+	 * - never: change the route after routeApplyMs and never acknowledge.
+	 */
 	routeMode = 'apply'
+	routeAckMs = 5000
+	routeApplyMs = 0
 	routeRequests = []
+	timers = new Set()
 	async connect() {
 		this.route()
 		this.capability()
@@ -49,25 +59,53 @@ export class MetadataPeer extends EventEmitter {
 			this.volume(this.level)
 		}
 	}
-	async sendMRPMessageAndWait(data, _responseType, timeoutMs) {
+	later(ms, callback) {
+		const timer = setTimeout(() => {
+			this.timers.delete(timer)
+			if (!this.closed) callback()
+		}, ms)
+		this.timers.add(timer)
+	}
+	/** Mirrors the patched library: a reply timeout fails the connection unless fatalTimeout is false. */
+	async sendMRPMessageAndWait(data, _responseType, timeoutMs = 5000, options = {}) {
 		const request = await MRPMessage.decode(data)
 		this.requests.push(request)
 		const route = request['.modifyOutputContextRequestMessage']
-		if (request.type === 48 && route) {
-			this.routeRequests.push(route)
-			if (this.routeMode === 'reject') throw new Error('AirPlay MRP error 6')
-			if (this.routeMode === 'silent') throw new Error(`AirPlay MRP request timed out after ${timeoutMs}`)
-			if (this.routeMode === 'apply') {
-				const extra = route.settingDevices.filter((id) => id !== 'tv-output')
-				setImmediate(() => this.route(extra.map((id) => ({ id, name: this.names?.[id] ?? id }))))
-			}
-			return { type: 0, identifier: request.identifier }
+		if (request.type !== 48 || !route) return { type: 50, '.getVolumeResultMessage': { volume: this.level / 100 } }
+		this.routeRequests.push(route)
+		const ack = { type: 0, identifier: request.identifier }
+		const apply = () => {
+			const extra = route.settingDevices.filter((id) => id !== 'tv-output')
+			this.route(extra.map((id) => ({ id, name: this.names?.[id] ?? id })))
 		}
-		return { type: 50, '.getVolumeResultMessage': { volume: this.level / 100 } }
+		if (this.routeMode === 'reject') throw new Error('AirPlay MRP error 6')
+		if (this.routeMode === 'ignore') return ack
+		if (this.routeMode === 'apply') {
+			setImmediate(apply)
+			return ack
+		}
+		this.later(this.routeApplyMs, apply)
+		const reply = Promise.withResolvers()
+		let settled = false
+		this.later(timeoutMs, () => {
+			if (settled) return
+			settled = true
+			reply.reject(new Error('AirPlay request timed out'))
+			if (options.fatalTimeout !== false) this.close()
+		})
+		if (this.routeMode === 'late')
+			this.later(this.routeAckMs, () => {
+				if (settled) return // A late reply is ignored, as in the library.
+				settled = true
+				reply.resolve(ack)
+			})
+		return reply.promise
 	}
 	close() {
 		if (this.closed) return
 		this.closed = true
+		for (const timer of this.timers) clearTimeout(timer)
+		this.timers.clear()
 		this.emit('close')
 	}
 }

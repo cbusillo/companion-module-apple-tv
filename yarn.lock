@@ -1631,7 +1631,7 @@ __metadata:
 
 "node-appletv-remote@patch:node-appletv-remote@npm%3A0.3.2#~/experiments/node-library/patches/node-appletv-remote-npm-0.3.2-9e89db7504.patch":
   version: 0.3.2
-  resolution: "node-appletv-remote@patch:node-appletv-remote@npm%3A0.3.2#~/experiments/node-library/patches/node-appletv-remote-npm-0.3.2-9e89db7504.patch::version=0.3.2&hash=d6e16c"
+  resolution: "node-appletv-remote@patch:node-appletv-remote@npm%3A0.3.2#~/experiments/node-library/patches/node-appletv-remote-npm-0.3.2-9e89db7504.patch::version=0.3.2&hash=270d2f"
   dependencies:
     "@noble/ciphers": "npm:^1.3.0"
     bonjour-service: "npm:^1.3.0"
@@ -1641,7 +1641,7 @@ __metadata:
     protobufjs: "npm:^8.0.0"
   bin:
     atv: dist/cli/index.js
-  checksum: 10c0/816863d06523e18d1c81d17bf728fa6b8a19e9d310ea4c133a82cc8aa1225cff3d05ffb6df14424eba6889ec73987a93c1f30190c40b5968ad12f5d7d2c776f5
+  checksum: 10c0/902c1706a73e09f6901202459da95104cc82ea1b6756c4879e63ee272d55a2f0a28a12de9fe16e6e1e22ffc5445dd67a919ccf79bf7e0f2ae4a21ca2f5de2921
   languageName: node
   linkType: hard
 
