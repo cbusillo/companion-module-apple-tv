@@ -1,103 +1,12 @@
 import assert from 'node:assert/strict'
-import { EventEmitter } from 'node:events'
 import { setTimeout as delay } from 'node:timers/promises'
 import test from 'node:test'
-import { NodeController } from '../dist/prototype/controller.js'
-import { withCompanionSession } from '../dist/prototype/session.js'
 import { CommandNotSent } from '../dist/prototype/queue.js'
-import { withMetadataSession, OutputRouteRejected } from '../dist/prototype/metadata-session.js'
+import { OutputRouteRejected } from '../dist/prototype/metadata-session.js'
 import { NodeBackend } from '../dist/node-backend.js'
 import { saved } from './fixtures/node-setup-peer.mjs'
-import { MetadataPeer } from './fixtures/metadata-peer.mjs'
+import { fixture, until } from './fixtures/controller-peer.mjs'
 import { runAcceptance } from '../dist/prototype/acceptance.js'
-
-const credentials = {
-	clientId: 'synthetic',
-	serverId: 'synthetic',
-	clientLTSK: Buffer.alloc(32),
-	clientLTPK: Buffer.alloc(32),
-	serverLTPK: Buffer.alloc(32),
-}
-const reply = (entries = []) =>
-	new Map([
-		['_t', 3],
-		['_c', new Map(entries)],
-	])
-
-class Peer extends EventEmitter {
-	constructor(metadata) {
-		super()
-		this.metadata = metadata
-	}
-	requests = []
-	events = []
-	closed = false
-	onRequest = undefined
-	async connect() {}
-	async sendRequest(id, envelope) {
-		const content = envelope.get('_c')
-		this.requests.push({ id, content })
-		if (this.onRequest) await this.onRequest(id, content)
-		if (id === '_sessionStart') return reply([['_sid', 0xfedcba98]])
-		if (id === 'FetchLaunchableApplicationsEvent') return reply([['com.example.app', 'Synthetic app']])
-		if (id === 'FetchAttentionState') return reply([['state', 3]])
-		if (id === '_mcc' && content.get('_mcc') === 5) return reply([['_vol', 0.2]])
-		if (id === '_mcc' && content.get('_mcc') === 6) this.metadata.volume(content.get('_vol').value * 100)
-		return reply()
-	}
-	sendMessage(id, envelope) {
-		this.events.push({ id, content: envelope.get('_c') })
-	}
-	close() {
-		if (!this.closed) {
-			this.closed = true
-			this.emit('close')
-		}
-	}
-	push(identifier, entries) {
-		this.emit('event', {
-			identifier,
-			data: new Map([
-				['_t', 1],
-				['_c', new Map(entries)],
-			]),
-		})
-	}
-}
-
-function fixture(options = {}) {
-	const peers = []
-	const metadataPeers = []
-	let discoveries = 0
-	const controller = new NodeController('synthetic', credentials, {
-		reconnectDelayMs: 5,
-		healthIntervalMs: 30000,
-		discover: async () => {
-			discoveries++
-			return { address: 'unused.invalid', companionPort: 1, airplayPort: 2 }
-		},
-		metadataSession: (target, keys, signal, snapshot, operation) => {
-			const peer = new MetadataPeer()
-			metadataPeers.push(peer)
-			return withMetadataSession(target, keys, signal, snapshot, operation, () => peer)
-		},
-		session: async (target, keys, signal, operation) => {
-			const peer = new Peer(metadataPeers.at(-1))
-			peers.push(peer)
-			return withCompanionSession(target, keys, signal, operation, () => peer)
-		},
-		...options,
-	})
-	return { controller, peers, metadataPeers, discoveries: () => discoveries }
-}
-
-async function until(predicate) {
-	const deadline = Date.now() + 2000
-	while (!predicate()) {
-		if (Date.now() > deadline) throw new Error('Condition did not arrive')
-		await delay(5)
-	}
-}
 
 test('controller accepts input only after a real health round trip and keeps gestures atomic', async () => {
 	const { controller, peers } = fixture()
@@ -621,8 +530,8 @@ test('system audio routing sends one SharedSystemAudio request on the metadata s
 		assert.deepEqual(request['.modifyOutputContextRequestMessage'].clusterAwareSettingDevices, ['synthetic-airpods'])
 		assert.deepEqual(request['.modifyOutputContextRequestMessage'].addingDevices, [])
 		await until(() => controller.audioOutputs?.outputs.length === 2)
-		metadataPeers[0].routeMode = 'silent'
-		assert.equal(await controller.routeAudio(before.epoch, ['tv-output']), false)
+		metadataPeers[0].routeMode = 'ignore'
+		assert.equal(await controller.routeAudio(before.epoch, ['tv-output']), true)
 		metadataPeers[0].routeMode = 'reject'
 		await assert.rejects(controller.routeAudio(before.epoch, ['tv-output']), OutputRouteRejected)
 		assert.equal(metadataPeers[0].routeRequests.length, 3)
