@@ -1,0 +1,11 @@
+<component name="InspectionProjectProfileManager">
+  <profile version="1.0">
+    <option name="myName" value="Companion Apple TV" />
+    <!-- Prettier requires parentheses around arrow-function parameters. -->
+    <inspection_tool class="JSRemoveUnnecessaryParentheses" enabled="false" level="INFORMATION" enabled_by_default="false" />
+    <inspection_tool class="JSUnusedGlobalSymbols" enabled="true" level="WARNING" enabled_by_default="true">
+      <!-- Test fakes expose members consumed through duck-typed interfaces. -->
+      <scope name="Companion Tests" level="WARNING" enabled="false" />
+    </inspection_tool>
+  </profile>
+</component>
