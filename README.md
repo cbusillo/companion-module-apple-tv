@@ -125,6 +125,11 @@ used because it did not reliably select AirPods.
 Use Node 22 and Yarn 4. Python is used only for the independent protocol oracle
 and retained reference-worker tests, not by the packaged module.
 
+The shared `Companion Apple TV` JetBrains inspection profile is selected by the
+inspection gate. It leaves arrow-parameter parentheses to Prettier and disables
+unused-global-symbol findings only under `tests/`, where duck-typed fakes expose
+members indirectly. Other IDE state remains local and ignored.
+
 ```sh
 yarn install --immutable
 yarn build

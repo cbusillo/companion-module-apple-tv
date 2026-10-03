@@ -26,6 +26,7 @@
 		"inspection": {
 			"tool": "jetbrains",
 			"ide": "PyCharm",
+			"profile": "Companion Apple TV",
 			"prepare": {
 				"python": {
 					"version": "3.13",
