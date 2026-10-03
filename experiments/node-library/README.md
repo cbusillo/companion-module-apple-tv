@@ -1,10 +1,11 @@
 # Node library extensions and qualification
 
 These are reproducible extensions to `node-appletv-remote` 0.3.2, with offline
-tests and a separate, explicit-target live harness. The version 0.5 candidate
-integrates the controller into Companion's normal entry point and bundles the
-patched library. The installed Python version remains separate until an approved
-replacement. See the root README for the normal-user discovery and PIN flow.
+tests and a separate, explicit-target live harness. Version 0.5 integrates the
+controller into Companion's normal entry point and bundles the patched library.
+Development build 0.5.0-dev.4 runs in the Director's Companion; the earlier
+Python environment, keys and package are kept as rollback material. See the root
+README for the normal-user discovery and PIN flow.
 
 The prototype composes app listing/launching, explicit seek intervals, absolute
 volume read/write, and power-state queries through the library's public
@@ -518,11 +519,12 @@ prototype controller and standalone observer now share the metadata session's
 cancellation and cleanup path. The independent encrypted Companion peer uses a
 synthetic metadata connection for its reconnect/no-replay check; it does not
 claim to reproduce an AirPlay server.
-The installed Python-backed connection remains unchanged. The version 0.5
-candidate packages the Node controller and schemas, with native cancellation
-through discovery, PIN entry, verification and shutdown. Pairing verifies the
-accessory's M6 identity signature before returning keys. An independent pyatv
-peer proves normal pairing and rejection of a deliberately corrupted signature.
+At the time of these runs the installed Python-backed connection was unchanged.
+The version 0.5 candidate packages the Node controller and schemas, with native
+cancellation through discovery, PIN entry, verification and shutdown. Pairing
+verifies the accessory's M6 identity signature before returning keys. An
+independent pyatv peer proves normal pairing and rejection of a deliberately
+corrupted signature.
 
 The prepared September 27 run at `1466163` used both native sessions. The owner
 reported lower volume immediately after returning to AirPods, then the TV went
@@ -559,13 +561,18 @@ lifecycle against a fake connection. They do not prove the TV accepts a command,
 changes physical state, or behaves correctly after reconnect.
 A returned request acknowledgement is not physical confirmation.
 
-The package candidate still requires fresh end-user PIN pairing and supervised
-installed acceptance with rollback preserved. Synthetic package coverage on an
+Development build 0.5.0-dev.4 has run in the Director's Companion since October
+2, 2026, after earlier dev builds; the Python package and keys are kept as
+rollback material. Personal audio output selection was qualified there with the
+Director present: nearby and taken-over AirPods, AirPods in the case, TV-side
+switches, sleep/wake and a Companion restart (Media Control Relay #114). There
+is no tagged release; adopting an accepted release and retiring the local
+prototype is tracked in shiny-infra-ops #313. Synthetic package coverage on an
 operating system does not establish device/firewall/discovery behavior there.
-Personal AirPods selection is not implemented. The observed short sleep/wake
-timing limitation and the SRP edge-case uncertainty remain explicit limitations
-for broader release qualification. The existing installed connection and its
-credentials are outside the separate developer harness.
+The observed short sleep/wake timing limitation and the SRP edge-case
+uncertainty remain explicit limitations for broader release qualification. The
+installed connection and its credentials are outside the separate developer
+harness.
 
 ## References
 
