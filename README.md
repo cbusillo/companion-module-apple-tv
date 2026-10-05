@@ -117,7 +117,11 @@ used because it did not reliably select AirPods.
 - A command the TV does not answer in time is dropped, not retried, and the
   session stays up; three unanswered commands in a row, a failed health check
   or a closed connection end it. Each session loss and reconnect is written to
-  the Companion log with its reason.
+  the Companion log with its reason. A lost Companion connection names how it
+  ended: a socket error with its code, or a close by the TV, with any frame the
+  library could not read just before it.
+- A frame the TV sends that the library cannot decode is dropped; it no longer
+  ends the session.
 - Disabling or destroying the connection cancels discovery, pairing, requests,
   sockets and timers. Keys remain in Companion's secret store.
 - The package needs no child-process or general filesystem permission. It reads

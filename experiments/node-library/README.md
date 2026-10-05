@@ -98,6 +98,25 @@ connection. The module uses it for the route acknowledgement, which tvOS can
 delay for many seconds during an AirPods takeover. Before this option, such a
 delay closed the whole AirPlay session about three seconds after the press.
 
+## Frames the library cannot use
+
+The published parser decoded and delivered every encrypted frame inside one
+`try` and reported any failure as a connection `error`. An authenticated frame
+with an OPACK value the decoder lacks (for example tag `0x06`, a date, which
+pyatv 0.18.0 decodes) therefore ended the Companion session, although the
+stream was still in sync. An empty frame was also passed to decryption, which
+failed and consumed a receive nonce, so every later frame failed too. pyatv
+decrypts only non-empty frames and logs, rather than fails on, a frame it
+cannot handle.
+
+The candidate skips empty frames without consuming a nonce. A frame that fails
+authentication is still a connection `error`. A frame that authenticates but
+cannot be decoded or delivered is dropped and reported as a `frame-error`
+event. `close` now carries Node's `hadError` flag. The module records the last
+dropped frame and names the close or error, with its code, in the session-loss
+log line. Which frame, if any, the TV sends at the end of a list has not been
+observed.
+
 ## Run offline
 
 Use this repository's Node 22 and Yarn 4 toolchain:

@@ -582,6 +582,82 @@ index 0000000..61ef47e
 +    } finally { connection.close(); }
 +  });
 +});
+diff --git a/src/companion/__tests__/frame-resilience.test.ts b/src/companion/__tests__/frame-resilience.test.ts
+new file mode 100644
+index 0000000..c123b55
+--- /dev/null
++++ b/src/companion/__tests__/frame-resilience.test.ts
+@@ -0,0 +1,70 @@
++import { describe, expect, it } from 'vitest';
++import { CompanionConnection } from '../connection.js';
++import { CompanionSession } from '../companion-session.js';
++import { FrameType } from '../framing.js';
++import { opackDecode, opackEncode, type OpackDict, type OpackValue } from '../opack.js';
++
++function fixture() {
++  const key = Buffer.alloc(32, 7);
++  const connection = new CompanionConnection('unused.invalid', 1, {
++    clientId: 'synthetic', serverId: 'synthetic', clientLTSK: key, clientLTPK: key, serverLTPK: key,
++  });
++  const parser = connection as unknown as {
++    session: CompanionSession;
++    socket: { write(data: Buffer): void; destroy(): void };
++    onData(data: Buffer): void;
++  };
++  parser.session = new CompanionSession(key, key);
++  const peer = new CompanionSession(key, key);
++  const requests: OpackDict[] = [];
++  parser.socket = {
++    write(data): void { requests.push(opackDecode(peer.decrypt(data.subarray(0, 4), data.subarray(4))) as OpackDict); },
++    destroy(): void {},
++  };
++  const errors: Error[] = [];
++  const dropped: Error[] = [];
++  connection.on('error', (error: Error) => errors.push(error));
++  connection.on('frame-error', (error: Error) => dropped.push(error));
++  const receiveRaw = (data: Buffer): void => parser.onData(data);
++  const reply = (id: OpackValue): void =>
++    receiveRaw(peer.encrypt(FrameType.E_OPACK, opackEncode(new Map<OpackValue, OpackValue>([['_x', id], ['_t', 3], ['_c', new Map()]]))));
++  return { connection, requests, peer, receiveRaw, reply, errors, dropped };
++}
++
++describe('Companion frames the library cannot use', () => {
++  it('drops an authenticated frame it cannot decode and keeps the stream usable', async () => {
++    const { connection, requests, peer, receiveRaw, reply, errors, dropped } = fixture();
++    try {
++      const pending = connection.sendRequest('_systemInfo', new Map<OpackValue, OpackValue>([['_t', 2], ['_c', new Map()]]));
++      // {"_t": <OPACK date>}: pyatv decodes tag 0x06; this decoder does not.
++      const dated = Buffer.concat([Buffer.from([0xe1, 0x42, 0x5f, 0x74, 0x06]), Buffer.alloc(8)]);
++      receiveRaw(peer.encrypt(FrameType.E_OPACK, dated));
++      reply(requests[0].get('_x')!);
++      expect((await pending).get('_t')).toBe(3);
++      expect(errors).toEqual([]);
++      expect(dropped).toHaveLength(1);
++      expect(dropped[0].message).toMatch(/frame type 8 .*dropped.*unknown tag 0x6/);
++    } finally { connection.close(); }
++  });
++
++  it('ignores an empty frame without consuming a receive nonce', async () => {
++    const { connection, requests, receiveRaw, reply, errors, dropped } = fixture();
++    try {
++      const pending = connection.sendRequest('_systemInfo', new Map<OpackValue, OpackValue>([['_t', 2], ['_c', new Map()]]));
++      receiveRaw(Buffer.from([0x01, 0, 0, 0])); // pyatv FrameType.NoOp
++      reply(requests[0].get('_x')!);
++      expect((await pending).get('_t')).toBe(3);
++      expect(errors).toEqual([]);
++      expect(dropped).toEqual([]);
++    } finally { connection.close(); }
++  });
++
++  it('still reports a frame that fails authentication as a connection error', () => {
++    const { connection, receiveRaw, errors } = fixture();
++    try {
++      receiveRaw(Buffer.concat([Buffer.from([FrameType.E_OPACK, 0, 0, 20]), Buffer.alloc(20, 9)]));
++      expect(errors).toHaveLength(1);
++      expect(errors[0].message).toMatch(/decrypt/);
++    } finally { connection.close(); }
++  });
++});
 diff --git a/src/companion/__tests__/framing-compatibility.test.ts b/src/companion/__tests__/framing-compatibility.test.ts
 new file mode 100644
 index 0000000..ff480cb
@@ -962,7 +1038,7 @@ index 9500d2e..5e3db8d 100644
 
      const ciphertext = encryptedPayload.subarray(0, encryptedPayload.length - AUTH_TAG_LENGTH);
 diff --git a/src/companion/connection.ts b/src/companion/connection.ts
-index 351e7fb..8ab5320 100644
+index 351e7fb..dae3e0f 100644
 --- a/src/companion/connection.ts
 +++ b/src/companion/connection.ts
 @@ -57,7 +57,8 @@ export class CompanionConnection extends EventEmitter {
@@ -975,7 +1051,7 @@ index 351e7fb..8ab5320 100644
    private pendingRequests = new Map<number, {
      resolve: (value: OpackDict) => void;
      reject: (error: Error) => void;
-@@ -79,6 +80,8 @@ export class CompanionConnection extends EventEmitter {
+@@ -79,12 +80,15 @@ export class CompanionConnection extends EventEmitter {
    private openSocket(): Promise<void> {
      return new Promise((resolve, reject) => {
        this.socket = new Socket();
@@ -984,7 +1060,15 @@ index 351e7fb..8ab5320 100644
        this.socket.connect(this.port, this.host, () => resolve());
        this.socket.on('error', (err) => {
          reject(err);
-@@ -288,6 +291,7 @@ export class CompanionConnection extends EventEmitter {
+         this.emit('error', err);
+       });
+-      this.socket.on('close', () => this.emit('close'));
++      // Listeners can tell a reset or failed socket from an orderly close by the peer.
++      this.socket.on('close', (hadError: boolean) => this.emit('close', hadError));
+       this.socket.on('data', (data: Buffer) => this.onData(data));
+     });
+   }
+@@ -288,6 +292,7 @@ export class CompanionConnection extends EventEmitter {
      }
 
      content.set('_i', identifier);
@@ -992,7 +1076,7 @@ index 351e7fb..8ab5320 100644
      const payload = opackEncode(content);
      const encrypted = this.session.encrypt(FrameType.E_OPACK, payload);
      this.writeRaw(encrypted);
-@@ -365,11 +369,10 @@ export class CompanionConnection extends EventEmitter {
+@@ -365,11 +370,10 @@ export class CompanionConnection extends EventEmitter {
 
    private processEncryptedFrames(): void {
      // Encrypted frames: 4-byte header + ciphertext + 16-byte tag
@@ -1007,7 +1091,37 @@ index 351e7fb..8ab5320 100644
 
        if (this.buffer.length < totalLen) break;
 
-@@ -395,7 +398,7 @@ export class CompanionConnection extends EventEmitter {
+@@ -377,12 +381,25 @@ export class CompanionConnection extends EventEmitter {
+       const encryptedPayload = this.buffer.subarray(4, totalLen);
+       this.buffer = Buffer.from(this.buffer.subarray(totalLen));
+
++      // An empty frame carries no ciphertext and does not consume a nonce, as in pyatv.
++      if (payloadLen === 0) continue;
++
++      let plaintext: Buffer;
++      try {
++        plaintext = this.session!.decrypt(header, encryptedPayload);
++      } catch (e) {
++        this.emit('error', new Error(`Companion decrypt error: ${e}`, { cause: e }));
++        continue;
++      }
++      // The stream is still in sync after an authenticated frame. One frame this library cannot
++      // decode or deliver is dropped and reported; it never ends the connection.
+       try {
+-        const plaintext = this.session!.decrypt(header, encryptedPayload);
+-        const decoded = opackDecode(plaintext);
+-        this.handleMessage(decoded);
++        this.handleMessage(opackDecode(plaintext));
+       } catch (e) {
+-        this.emit('error', new Error(`Companion decrypt error: ${e}`));
++        this.emit('frame-error', new Error(
++          `Companion frame type ${header[0]} (${plaintext.length} bytes) dropped: ${e instanceof Error ? e.message : String(e)}`,
++          { cause: e },
++        ));
+       }
+     }
+   }
+@@ -395,7 +412,7 @@ export class CompanionConnection extends EventEmitter {
      const identifier = dict.get('_i');
 
      // Check if this is a response to a pending request

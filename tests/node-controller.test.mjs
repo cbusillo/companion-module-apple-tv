@@ -711,3 +711,46 @@ test('a closed transport still reconnects immediately and logs the reason', asyn
 		await controller.stop()
 	}
 })
+
+test('an idle session the TV closes logs how the connection ended, not a generic cancel', async () => {
+	const { controller, peers, logs } = fixture()
+	controller.start()
+	try {
+		await controller.waitUntilReady(2000)
+		peers[0].emit('frame-error', new Error('Companion frame type 8 (13 bytes) dropped: OPACK: unknown tag 0x6'))
+		peers[0].emit('close', false)
+		await until(() => controller.reconnects === 1)
+		const lost = logs.filter(({ message }) => message.startsWith('Apple TV session lost'))
+		assert.deepEqual(
+			lost.map(({ message }) => message),
+			[
+				'Apple TV session lost: Companion connection closed by the TV; last dropped frame: ' +
+					'Companion frame type 8 (13 bytes) dropped: OPACK: unknown tag 0x6; retrying in 0.005 s',
+			],
+		)
+	} finally {
+		await controller.stop()
+	}
+})
+
+test('a socket error during a key press reaches the session-loss log with its code', async () => {
+	const { controller, peers, logs } = fixture({ requestTimeoutMs: 1000 })
+	controller.start()
+	try {
+		await controller.waitUntilReady(2000)
+		peers[0].onRequest = async (id) => {
+			if (id === '_hidC') {
+				peers[0].emit('error', Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }))
+				await new Promise(() => {})
+			}
+		}
+		await assert.rejects(controller.perform({ kind: 'button', button: 'down' }))
+		await until(() => controller.reconnects === 1)
+		assert.deepEqual(
+			logs.filter(({ level }) => level === 'warn').map(({ message }) => message),
+			['Apple TV session lost: Companion connection error: read ECONNRESET; retrying in 0.005 s'],
+		)
+	} finally {
+		await controller.stop()
+	}
+})

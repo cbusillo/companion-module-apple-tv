@@ -198,13 +198,35 @@ test('unexpected socket error aborts a pending request without an unhandled Even
 	const connection = new FakeConnection()
 	connection.sendRequest = () =>
 		new Promise(() => {
-			queueMicrotask(() => connection.emit('error', new Error('socket lost')))
+			queueMicrotask(() => connection.emit('error', Object.assign(new Error('socket lost'), { code: 'ECONNRESET' })))
 		})
 	await assert.rejects(
 		run(connection, () => assert.fail('must not run')),
-		/cancelled or connection closed/,
+		{ message: 'Companion connection error: socket lost (ECONNRESET)' },
 	)
 	assert.equal(connection.closed, true)
+})
+
+test('a session the TV closes names the close, a prior socket error and the last dropped frame', async () => {
+	for (const [hadError, dropped, expected] of [
+		[false, undefined, 'Companion connection closed by the TV'],
+		[true, undefined, 'Companion connection closed by the TV after a socket error'],
+		[
+			false,
+			'Companion frame type 8 (13 bytes) dropped: OPACK: unknown tag 0x6 at offset 4',
+			'Companion connection closed by the TV; last dropped frame: Companion frame type 8 (13 bytes) dropped: OPACK: unknown tag 0x6 at offset 4',
+		],
+	]) {
+		const connection = new FakeConnection()
+		await assert.rejects(
+			run(connection, async () => {
+				if (dropped) connection.emit('frame-error', new Error(dropped))
+				connection.emit('close', hadError)
+				await new Promise(() => {})
+			}),
+			{ message: expected },
+		)
+	}
 })
 
 test('failed session stop cannot be reported as successful teardown', async () => {

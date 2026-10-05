@@ -7,6 +7,22 @@ export type Connection = Pick<CompanionConnection, 'connect' | 'sendRequest' | '
 export type Target = { address: string; companionPort: number }
 /** No reply arrived in time. Delivery is uncertain; the transport itself may still be healthy. */
 export class OperationTimedOut extends Error {}
+/** The Companion socket closed or failed; the message says how. */
+export class ConnectionLost extends Error {}
+
+/** The abort reason when it says why, so a log names the cause rather than a generic stop. */
+function abortError(signal: AbortSignal): Error {
+	return signal.reason instanceof ConnectionLost ? signal.reason : new Error('Test cancelled or connection closed')
+}
+
+/** One line for a socket or library error, including its system code when the message omits it. */
+function transportDetail(error: unknown): string {
+	const message = error instanceof Error ? error.message : String(error)
+	const code = (error as { code?: unknown } | null)?.code
+	return typeof code === 'string' && code && !message.includes(code)
+		? `${message} (${code})`
+		: message || 'unknown error'
+}
 
 /** Bounds an operation even when the candidate library leaves a socket pending. */
 export async function bounded<T>(
@@ -20,7 +36,7 @@ export async function bounded<T>(
 	try {
 		return await Promise.race([
 			new Promise<never>((_resolve, reject) => {
-				onAbort = () => reject(new Error('Test cancelled or connection closed'))
+				onAbort = () => reject(abortError(signal))
 				signal.addEventListener('abort', onAbort, { once: true })
 				if (timeoutMs !== undefined)
 					timer = setTimeout(() => reject(new OperationTimedOut('Operation timed out')), timeoutMs)
@@ -47,9 +63,21 @@ export async function withCompanionSession<T>(
 	const connection = createConnection(target, credentials)
 	const lost = new AbortController()
 	const active = AbortSignal.any([signal, lost.signal])
-	const onLost = (): void => lost.abort()
-	connection.on('error', onLost)
-	connection.on('close', onLost)
+	// The library drops a frame it cannot decode; remember it in case the TV then closes.
+	let dropped: string | undefined
+	const onDropped = (error: unknown): void => {
+		dropped = transportDetail(error)
+	}
+	const lose = (reason: string): void => {
+		if (!lost.signal.aborted)
+			lost.abort(new ConnectionLost(dropped ? `${reason}; last dropped frame: ${dropped}` : reason))
+	}
+	const onError = (error: unknown): void => lose(`Companion connection error: ${transportDetail(error)}`)
+	const onClose = (hadError?: unknown): void =>
+		lose(`Companion connection closed by the TV${hadError === true ? ' after a socket error' : ''}`)
+	connection.on('error', onError)
+	connection.on('close', onClose)
+	connection.on('frame-error', onDropped)
 	const client = {
 		sendCompanionRequest: async (
 			identifier: string,
@@ -129,7 +157,7 @@ export async function withCompanionSession<T>(
 		try {
 			if (!failed && active.aborted) {
 				failed = true
-				failure = new Error('Test cancelled or connection closed')
+				failure = abortError(active)
 			}
 			const cleanups: (() => Promise<unknown>)[] = [async () => commands.stopTouch()]
 			if (subscribed) cleanups.push(async () => commands.unsubscribe())
