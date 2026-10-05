@@ -5,6 +5,8 @@ import { CompanionPrototype, CompanionRequestRejected, companionRequest } from '
 export type Connection = Pick<CompanionConnection, 'connect' | 'sendRequest' | 'close' | 'on' | 'off'> &
 	Partial<Pick<CompanionConnection, 'sendMessage'>>
 export type Target = { address: string; companionPort: number }
+/** No reply arrived in time. Delivery is uncertain; the transport itself may still be healthy. */
+export class OperationTimedOut extends Error {}
 
 /** Bounds an operation even when the candidate library leaves a socket pending. */
 export async function bounded<T>(
@@ -20,7 +22,8 @@ export async function bounded<T>(
 			new Promise<never>((_resolve, reject) => {
 				onAbort = () => reject(new Error('Test cancelled or connection closed'))
 				signal.addEventListener('abort', onAbort, { once: true })
-				if (timeoutMs !== undefined) timer = setTimeout(() => reject(new Error('Test operation timed out')), timeoutMs)
+				if (timeoutMs !== undefined)
+					timer = setTimeout(() => reject(new OperationTimedOut('Operation timed out')), timeoutMs)
 			}),
 			operation(),
 		])
@@ -39,6 +42,7 @@ export async function withCompanionSession<T>(
 	createConnection: (target: Target, credentials: HAPCredentials) => Connection = (device, keys) =>
 		new CompanionConnection(device.address, device.companionPort, keys),
 	onStage: (stage: string) => void = () => {},
+	requestTimeoutMs?: number,
 ): Promise<T> {
 	const connection = createConnection(target, credentials)
 	const lost = new AbortController()
@@ -51,7 +55,11 @@ export async function withCompanionSession<T>(
 			identifier: string,
 			content: Parameters<Connection['sendRequest']>[1],
 			timeoutMs: number,
-		) => bounded(async () => connection.sendRequest(identifier, content, timeoutMs), timeoutMs, active),
+		) => {
+			const wait = requestTimeoutMs ?? timeoutMs
+			// The library's own timer stays later so a missing reply surfaces as OperationTimedOut.
+			return bounded(async () => connection.sendRequest(identifier, content, wait + 1000), wait, active)
+		},
 		sendCompanionMessage: connection.sendMessage
 			? (identifier: string, content: Parameters<CompanionConnection['sendMessage']>[1]): void => {
 					active.throwIfAborted()

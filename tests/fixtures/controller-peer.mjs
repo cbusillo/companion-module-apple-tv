@@ -60,13 +60,15 @@ export class Peer extends EventEmitter {
 	}
 }
 
-export function fixture(options = {}) {
+export function fixture({ requestTimeoutMs, ...options } = {}) {
 	const peers = []
+	const logs = []
 	const metadataPeers = []
 	let discoveries = 0
 	const controller = new NodeController('synthetic', credentials, {
 		reconnectDelayMs: 5,
 		healthIntervalMs: 30000,
+		log: (level, message) => logs.push({ level, message }),
 		discover: async () => {
 			discoveries++
 			return { address: 'unused.invalid', companionPort: 1, airplayPort: 2 }
@@ -79,11 +81,11 @@ export function fixture(options = {}) {
 		session: async (target, keys, signal, operation) => {
 			const peer = new Peer(metadataPeers.at(-1))
 			peers.push(peer)
-			return withCompanionSession(target, keys, signal, operation, () => peer)
+			return withCompanionSession(target, keys, signal, operation, () => peer, undefined, requestTimeoutMs)
 		},
 		...options,
 	})
-	return { controller, peers, metadataPeers, discoveries: () => discoveries }
+	return { controller, peers, metadataPeers, logs, discoveries: () => discoveries }
 }
 
 export async function until(predicate, timeoutMs = 2000) {

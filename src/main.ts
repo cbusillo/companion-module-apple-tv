@@ -110,6 +110,7 @@ export default class AppleTV extends InstanceBase<ModuleSchema> {
 					if (state === 'error') this.log('warn', message)
 				},
 				values: (values) => this.setVariableValues(values),
+				log: (level, message) => this.log(level, message),
 				feedback: () => this.checkFeedbacks('personalOutputActive'),
 				apps: (apps) => {
 					this.apps = apps

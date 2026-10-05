@@ -1,5 +1,5 @@
 import { CompanionPairSetup, scan, type DiscoveredDevice, type HAPCredentials } from 'node-appletv-remote'
-import { NodeController, type RemoteAction } from './prototype/controller.js'
+import { NodeController, type ControllerLog, type RemoteAction } from './prototype/controller.js'
 import { bounded } from './prototype/session.js'
 import { CommandNotSent } from './prototype/queue.js'
 import { CompanionRequestRejected, UnsupportedCommand } from './prototype/companion.js'
@@ -34,6 +34,8 @@ export type BackendHooks = {
 	apps(apps: { id: string; name: string }[]): void
 	/** Personal output feedback may have changed. */
 	feedback?(): void
+	/** One line for the Companion log, such as why a session ended. */
+	log?: ControllerLog
 }
 export type BackendOptions = {
 	discover?: typeof scan
@@ -306,7 +308,10 @@ export class NodeBackend {
 		}
 	}
 	private makeController(deviceId: string, credentials: HAPCredentials): Controller {
-		return this.options.controller?.(deviceId, credentials) ?? new NodeController(deviceId, credentials)
+		return (
+			this.options.controller?.(deviceId, credentials) ??
+			new NodeController(deviceId, credentials, { log: (level, message) => this.hooks.log?.(level, message) })
+		)
 	}
 	private async connect(deviceId: string, credentials: HAPCredentials, generation: number): Promise<void> {
 		if (generation !== this.generation) return
