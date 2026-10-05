@@ -10,7 +10,7 @@ import {
 	type MediaCommand,
 	type Power,
 } from './companion.js'
-import { bounded, withCompanionSession, type Target } from './session.js'
+import { bounded, OperationTimedOut, withCompanionSession, type Target } from './session.js'
 import { CommandNotSent, CommandQueue } from './queue.js'
 import { withMetadataSession, type RouteAudio } from './metadata-session.js'
 import type { MetadataSnapshot } from './metadata.js'
@@ -26,6 +26,7 @@ export type RemoteAction =
 	| { kind: 'mute' }
 
 type State = 'stopped' | 'connecting' | 'ready' | 'reconnecting'
+export type ControllerLog = (level: 'info' | 'warn', message: string) => void
 type ControllerTarget = Target & { airplayPort: number }
 type Options = {
 	discover?: () => Promise<ControllerTarget>
@@ -33,6 +34,17 @@ type Options = {
 	metadataSession?: typeof withMetadataSession
 	reconnectDelayMs?: number
 	healthIntervalMs?: number
+	log?: ControllerLog
+}
+/** Unanswered commands in a row before an otherwise open session is treated as dead. */
+const TIMEOUT_LIMIT = 3
+
+/** One line naming an error and the causes it wraps. */
+function describe(error: unknown): string {
+	const parts: string[] = []
+	for (let item = error; item instanceof Error && parts.length < 5; item = item.cause)
+		if (item.message && parts.at(-1) !== item.message) parts.push(item.message)
+	return parts.join(': ') || 'unknown error'
 }
 
 /** Owns a Companion/metadata pair. Reconnect restores state, never past user input. */
@@ -51,6 +63,7 @@ export class NodeController {
 	private playing: MetadataSnapshot['nowPlaying'] = { state: 'Unknown' }
 	private outputs: { id: string; name: string }[] | undefined
 	private route: RouteAudio | undefined
+	private timeouts = 0
 	reconnects = 0
 	constructor(
 		private readonly deviceId: string,
@@ -198,8 +211,18 @@ export class NodeController {
 	): Promise<T> {
 		return this.queue.run(async () => {
 			try {
-				return await operation()
+				const result = await operation()
+				this.timeouts = 0
+				return result
 			} catch (error) {
+				// A slow acknowledgement drops only this command; repeated silence means a dead session.
+				if (error instanceof OperationTimedOut && session === this.endSession && ++this.timeouts < TIMEOUT_LIMIT) {
+					this.options.log?.(
+						'warn',
+						`Apple TV did not answer in time; command dropped (${this.timeouts} of ${TIMEOUT_LIMIT} before reconnect)`,
+					)
+					throw error
+				}
 				if (!(
 					error instanceof CommandNotSent ||
 					error instanceof RangeError ||
@@ -207,18 +230,18 @@ export class NodeController {
 					error instanceof CompanionRequestRejected
 				)) {
 					// Invalidate before this operation settles and the next queued item starts.
-					this.failSession(session, failureReason)
+					this.failSession(session, failureReason, error)
 				}
 				throw error
 			}
 		})
 	}
 
-	private failSession(session: { reject(error: Error): void }, reason: string): void {
+	private failSession(session: { reject(error: Error): void }, reason: string, cause?: unknown): void {
 		if (session !== this.endSession) return
 		this.queue.invalidate()
 		this.setState('reconnecting')
-		session.reject(new Error(reason))
+		session.reject(new Error(reason, { cause }))
 	}
 
 	private async run(): Promise<void> {
@@ -226,6 +249,7 @@ export class NodeController {
 		let delayMs = this.options.reconnectDelayMs ?? 2000
 		let connectedBefore = false
 		while (!this.stopRequested) {
+			let reached = false
 			this.epoch++
 			const epoch = this.epoch
 			this.queue = new CommandQueue()
@@ -270,8 +294,13 @@ export class NodeController {
 								this.route = routeAudio
 								const end = Promise.withResolvers<void>()
 								this.endSession = end
-								if (connectedBefore) this.reconnects++
+								if (connectedBefore) {
+									this.reconnects++
+									this.options.log?.('info', 'Apple TV session reconnected')
+								}
 								connectedBefore = true
+								reached = true
+								this.timeouts = 0
 								delayMs = this.options.reconnectDelayMs ?? 2000
 								const stopObserving = commands.observe(() => this.changed())
 								this.setState('ready')
@@ -282,7 +311,7 @@ export class NodeController {
 											try {
 												await commands.listApps()
 											} catch (error) {
-												this.failSession(end, 'Health check failed')
+												this.failSession(end, 'Health check failed', error)
 												throw error
 											}
 										})
@@ -299,8 +328,13 @@ export class NodeController {
 						)
 					},
 				)
-			} catch {
+			} catch (error) {
 				// No command crosses this boundary. Only discovery and session setup repeat.
+				if (!this.stopRequested)
+					this.options.log?.(
+						'warn',
+						`Apple TV ${reached ? 'session lost' : 'connection attempt failed'}: ${describe(error)}; retrying in ${delayMs / 1000} s`,
+					)
 			} finally {
 				clearInterval(this.healthTimer)
 				this.healthTimer = undefined

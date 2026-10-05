@@ -49,11 +49,11 @@ export async function withMetadataSession<T>(
 			stop.abort(new Error('Metadata report failed'))
 		}
 	}
-	const onLost = (): void => {
+	const onLost = (cause?: unknown): void => {
 		if (closing || signal.aborted) return
 		state.invalidate()
 		publish()
-		stop.abort(new Error('Metadata connection lost'))
+		stop.abort(new Error('Metadata connection lost', { cause }))
 	}
 	const refreshAudio = (): void => {
 		refreshRequested = true
@@ -87,7 +87,7 @@ export async function withMetadataSession<T>(
 					publish()
 				}
 			})
-			.catch(() => onLost())
+			.catch((error: unknown) => onLost(error))
 			.finally(() => {
 				refresh = undefined
 				if (refreshRequested && !signal.aborted && !closing) refreshAudio()
@@ -135,11 +135,13 @@ export async function withMetadataSession<T>(
 		publish()
 		signal.throwIfAborted()
 		result = await operation(signal, routeAudio)
-	} catch {
-		if (reportFailed) throw new Error('Metadata report failed')
-		if (ownerSignal.aborted) throw new Error('Metadata observation cancelled')
+	} catch (error) {
+		if (reportFailed) throw new Error('Metadata report failed', { cause: error })
+		if (ownerSignal.aborted) throw new Error('Metadata observation cancelled', { cause: error })
 		if (stop.signal.reason instanceof Error) throw stop.signal.reason
-		throw new Error('Metadata connection failed')
+		// Keep the remote session's own reason; it is not a metadata failure.
+		if (started && error instanceof Error) throw error
+		throw new Error('Metadata connection failed', { cause: error })
 	} finally {
 		closing = true
 		stop.abort()

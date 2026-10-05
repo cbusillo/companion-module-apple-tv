@@ -612,3 +612,102 @@ test('backend toggles a learned personal output and keeps its identifier out of 
 	}
 	assert.equal(values.personal_output_route, 'Unavailable')
 })
+
+test('a burst of navigation presses survives one unanswered key acknowledgement', async () => {
+	const { controller, peers } = fixture({ requestTimeoutMs: 50 })
+	controller.start()
+	try {
+		await controller.waitUntilReady(2000)
+		let silent = true
+		peers[0].onRequest = async (id, content) => {
+			if (id === '_hidC' && content.get('_hBtS') === 1 && silent) {
+				silent = false
+				await new Promise(() => {})
+			}
+		}
+		const burst = ['down', 'down', 'down', 'right'].map((button) =>
+			controller.perform({ kind: 'button', button }).then(
+				() => 'sent',
+				() => 'dropped',
+			),
+		)
+		const results = await Promise.all(burst)
+		assert.equal(results[0], 'dropped')
+		assert.equal(controller.state, 'ready')
+		await controller.perform({ kind: 'button', button: 'down' })
+		assert.equal(peers.length, 1)
+		assert.equal(controller.reconnects, 0)
+	} finally {
+		await controller.stop()
+	}
+})
+
+test('repeated unanswered commands still end a silent session and log why', async () => {
+	const { controller, peers, logs } = fixture({ requestTimeoutMs: 20 })
+	controller.start()
+	try {
+		await controller.waitUntilReady(2000)
+		peers[0].onRequest = async (id) => {
+			if (id === '_hidC') await new Promise(() => {})
+		}
+		let attempts = 0
+		let failure
+		while (controller.state === 'ready' && attempts++ < 10)
+			failure = await controller.perform({ kind: 'button', button: 'down' }).catch((error) => error)
+		await until(() => controller.reconnects === 1)
+		assert.ok(attempts > 1)
+		assert.ok(logs.some(({ level, message }) => level === 'warn' && message.includes(failure.message)))
+	} finally {
+		await controller.stop()
+	}
+})
+
+test('an idle session that stops answering is detected by the health check', async () => {
+	const { controller, peers } = fixture({ requestTimeoutMs: 20, healthIntervalMs: 10 })
+	controller.start()
+	try {
+		await controller.waitUntilReady(2000)
+		peers[0].onRequest = async () => new Promise(() => {})
+		await until(() => controller.reconnects === 1)
+	} finally {
+		await controller.stop()
+	}
+})
+
+test('a failed session logs one line with the underlying error', async () => {
+	const { controller, peers, logs } = fixture()
+	controller.start()
+	try {
+		await controller.waitUntilReady(2000)
+		const failure = new Error('synthetic transport failure')
+		peers[0].onRequest = async (id) => {
+			if (id === '_hidC') throw failure
+		}
+		await assert.rejects(controller.perform({ kind: 'button', button: 'select' }))
+		await until(() => controller.reconnects === 1)
+		const reasons = logs.filter(({ message }) => message.includes(failure.message))
+		assert.equal(reasons.length, 1)
+	} finally {
+		await controller.stop()
+	}
+})
+
+test('a closed transport still reconnects immediately and logs the reason', async () => {
+	const { controller, peers, logs } = fixture({ requestTimeoutMs: 1000 })
+	controller.start()
+	try {
+		await controller.waitUntilReady(2000)
+		peers[0].onRequest = async (id) => {
+			if (id === '_hidC') {
+				peers[0].close()
+				await new Promise(() => {})
+			}
+		}
+		const failure = await controller.perform({ kind: 'button', button: 'down' }).catch((error) => error)
+		assert.ok(failure instanceof Error)
+		await until(() => controller.reconnects === 1)
+		assert.ok(logs.some(({ level, message }) => level === 'warn' && message.includes(failure.message)))
+	} finally {
+		await controller.stop()
+	}
+})
