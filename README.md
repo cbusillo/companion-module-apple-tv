@@ -42,13 +42,16 @@ until the new installation has been accepted.
 
 Remote command provides navigation, Select, Back, Home, Control Center, App
 Switcher, Screensaver, play/pause, previous/next, ten- or thirty-second seeks,
-relative volume, mute save/restore, power toggle and four swipe directions.
+relative volume, mute save/restore, power toggle, sleep and four swipe directions.
 Launch App lists applications reported by the TV and accepts existing bundle
 identifiers. Playback commands depend on the active app's advertised capabilities.
 Text entry is not implemented.
 
 Power toggle requires a current known state. Wake sends Home only while the TV
 reports Off, so it opens the Home screen rather than resuming the previous stream.
+Sleep (`sleep`) only ever sleeps the TV: it sends the sleep key without reading
+power first, so it never wakes a TV that is already asleep. Read the `power`
+variable to confirm the result.
 Wake from an already-asleep TV and a cycle with twenty seconds asleep passed on
 the test device. An earlier five-second cycle failed; no minimum safe interval
 has been established. Avoid immediate sleep/wake automation until it is qualified
