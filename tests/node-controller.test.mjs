@@ -7,6 +7,7 @@ import { NodeBackend } from '../dist/node-backend.js'
 import { saved } from './fixtures/node-setup-peer.mjs'
 import { fixture, until } from './fixtures/controller-peer.mjs'
 import { runAcceptance } from '../dist/prototype/acceptance.js'
+import { remoteActions } from '../dist/actions.js'
 
 test('controller accepts input only after a real health round trip and keeps gestures atomic', async () => {
 	const { controller, peers } = fixture()
@@ -205,6 +206,23 @@ test('status queries share the gesture queue and reject offline calls', async ()
 		assert.deepEqual(
 			peers[0].requests.slice(beforeWake).map(({ id }) => id),
 			['FetchAttentionState'],
+		)
+	} finally {
+		await controller.stop()
+	}
+})
+
+test('the sleep command sends one sleep key without a power query or Home', async () => {
+	const { controller, peers } = fixture()
+	controller.start()
+	try {
+		await controller.waitUntilReady(2000)
+		const before = peers[0].requests.length
+		await controller.perform(remoteActions.sleep)
+		const sent = peers[0].requests.slice(before)
+		assert.deepEqual(
+			sent.map(({ id, content }) => [id, content.get('_hidC'), content.get('_hBtS')]),
+			[['_hidC', 12, 2]],
 		)
 	} finally {
 		await controller.stop()
