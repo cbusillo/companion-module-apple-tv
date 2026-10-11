@@ -4,6 +4,7 @@ import { PersonalOutputRouter } from '../dist/personal-output.js'
 import { OutputRouteRejected } from '../dist/prototype/metadata-session.js'
 import { CommandNotSent } from '../dist/prototype/queue.js'
 
+const settle = () => new Promise((resolve) => setImmediate(resolve))
 const tv = { id: 'tv-output', name: 'Living Room' }
 const airpods = { id: 'synthetic-airpods', name: "Someone's AirPods Pro" }
 
@@ -118,12 +119,64 @@ test('an unconfirmed request fails after the window and a late success replaces 
 	assert.equal(f.router.route, 'Connecting')
 	t.mock.timers.tick(1)
 	assert.equal(f.router.route, 'Failed')
-	assert.match(f.results.at(-1), /not confirmed in time; not retried/)
+	assert.match(f.results.at(-1), /not confirmed in time; not retried further/)
 	f.router.observe(f.link([tv]))
 	assert.equal(f.router.route, 'Failed', 'an unchanged list keeps the failure visible')
 	f.router.observe(f.link([tv, airpods]))
 	assert.equal(f.router.route, 'Personal')
-	assert.equal(f.sends.length, 1, 'nothing was retried')
+	assert.equal(f.sends.length, 2, 'the request was repeated once and not again')
+})
+
+test('an unconfirmed request is repeated once, and the repeat can complete the route', async (t) => {
+	t.mock.timers.enable({ apis: ['setTimeout'] })
+	const f = fixture()
+	f.reply = async () => false
+	f.router.configure({ id: airpods.id })
+	f.router.observe(f.link([tv]))
+	assert.match(await f.router.select('toggle'), /without acknowledgement; waiting/)
+	t.mock.timers.tick(2999)
+	assert.equal(f.sends.length, 1)
+	t.mock.timers.tick(1)
+	await settle()
+	assert.deepEqual(f.sends, [
+		{ session: 'a:1', ids: [airpods.id] },
+		{ session: 'a:1', ids: [airpods.id] },
+	])
+	assert.match(f.results.at(-1), /sending it once more/)
+	assert.equal(f.router.route, 'Connecting', 'the repeat stays inside the original window')
+	f.router.observe(f.link([tv, airpods]))
+	assert.equal(f.router.route, 'Personal')
+	t.mock.timers.tick(60000)
+	assert.equal(f.sends.length, 2)
+})
+
+test('a confirmed, cancelled or rejected request is not repeated further', async (t) => {
+	t.mock.timers.enable({ apis: ['setTimeout'] })
+	const f = fixture()
+	f.router.configure({ id: airpods.id })
+	f.router.observe(f.link([tv], 'a:1'))
+	await f.router.select('personal')
+	f.router.observe(f.link([tv, airpods], 'a:1'))
+	t.mock.timers.tick(5000)
+	assert.equal(f.sends.length, 1, 'confirmation before the repeat cancels it')
+
+	await f.router.select('default')
+	f.router.observe(f.link([tv, airpods], 'a:2'))
+	t.mock.timers.tick(5000)
+	assert.equal(f.sends.length, 2, 'a new session cancels the repeat')
+
+	f.router.observe(f.link([tv], 'a:2'))
+	await f.router.select('personal')
+	f.reply = async () => {
+		throw new OutputRouteRejected('rejected')
+	}
+	t.mock.timers.tick(3000)
+	await settle()
+	assert.equal(f.sends.length, 4)
+	assert.equal(f.router.route, 'Failed')
+	assert.match(f.results.at(-1), /repeated output change rejected/)
+	t.mock.timers.tick(60000)
+	assert.equal(f.sends.length, 4)
 })
 
 test('Failed returns to the live route after its hold and a manual TV change updates the route', async (t) => {
