@@ -95,14 +95,18 @@ match, nothing is learned. **Personal output identifier** overrides the match.
 The module sends one MRP `ModifyOutputContextRequest` with the `SharedSystemAudio`
 context over the authenticated AirPlay session. Toggle chooses the direction
 from the live output list. Returning to default selects the other outputs the
-TV currently reports. Requests are never retried. The TV's acknowledgement is
+TV currently reports. If the route is still unconfirmed 3 seconds after the
+request settles, the same request is sent once more on the same session, and
+never again. On the test TV, a first request after the AirPods left their case
+connected them (the chime played) without routing audio to them, while a second
+request switched the route. The TV's acknowledgement is
 not treated as success; only the reported output list confirms the route. A slow
 or missing acknowledgement, common while AirPods are taken over from another
 device, ends only that wait and never drops the connection.
 `Connecting` lasts until confirmation or 20 seconds. `Failed` follows a timeout
 or rejection and clears after 10 seconds or on the next route change. A late
 connection or a change made on the TV therefore still updates the variable.
-Reconnects cancel a pending request without replaying it.
+Reconnects cancel a pending request, including its repeat, without replaying it.
 
 Taking over AirPods connected to another Apple device on the same account can
 take more than 8 seconds; idle nearby AirPods confirmed in 0.2-0.5 seconds on
