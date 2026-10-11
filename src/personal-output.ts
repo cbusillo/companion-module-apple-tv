@@ -18,9 +18,15 @@ export type RouterHooks = {
 	learned(output: LearnedOutput): void
 	result(message: string): void
 }
-export type RouterOptions = { confirmationMs?: number; failedHoldMs?: number }
+export type RouterOptions = { confirmationMs?: number; failedHoldMs?: number; resendMs?: number }
 
-type Pending = { want: boolean; session: string; timer: ReturnType<typeof setTimeout> }
+type Pending = {
+	want: boolean
+	session: string
+	outputs: string[]
+	timer: ReturnType<typeof setTimeout>
+	resend?: ReturnType<typeof setTimeout>
+}
 type Failure = { session: string; outputs: string; timer: ReturnType<typeof setTimeout> }
 
 const outputKey = (outputs: Output[]): string => JSON.stringify(outputs.map((output) => output.id).sort())
@@ -28,9 +34,11 @@ const outputKey = (outputs: Output[]): string => JSON.stringify(outputs.map((out
 /**
  * Selects a personal output (such as same-account AirPods) as the Apple TV's system audio route.
  *
- * The reported output list is the only confirmation. Each press sends at most one request and
- * nothing is retried. Failed is shown only after the confirmation window, and any later change in
- * the reported outputs (including a late success or a change made on the TV) replaces it.
+ * The reported output list is the only confirmation. Each press sends one request and, while it is
+ * still unconfirmed on the same session, the same request once more: tvOS can connect AirPods on
+ * the first request without routing audio to them. Failed is shown only after the confirmation
+ * window, and any later change in the reported outputs (including a late success or a change made
+ * on the TV) replaces it.
  */
 export class PersonalOutputRouter {
 	private match = ''
@@ -130,7 +138,7 @@ export class PersonalOutputRouter {
 		return reported ?? (this.learnedOutput && this.learnedOutput.id === id ? this.learnedOutput.name : '')
 	}
 
-	/** Send at most one request toward the chosen route. Returns a dispatch description. */
+	/** Send one request toward the chosen route, repeated once while unconfirmed. Returns a dispatch description. */
 	async select(target: RouteTarget): Promise<string> {
 		const link = this.link
 		if (!this.enabled) return 'personal output not configured; not sent'
@@ -152,6 +160,7 @@ export class PersonalOutputRouter {
 		const pending: Pending = {
 			want,
 			session: link.session,
+			outputs,
 			timer: setTimeout(() => this.expire(pending), this.options.confirmationMs ?? 20000),
 		}
 		this.pending = pending
@@ -159,6 +168,7 @@ export class PersonalOutputRouter {
 		try {
 			const acknowledged = await link.send(outputs)
 			if (this.pending !== pending) return 'output change finished or cancelled'
+			pending.resend = setTimeout(() => void this.resend(pending), this.options.resendMs ?? 3000)
 			return acknowledged
 				? 'output change acknowledged; waiting for Apple TV to confirm'
 				: 'output change sent without acknowledgement; waiting for Apple TV to confirm'
@@ -176,10 +186,33 @@ export class PersonalOutputRouter {
 		}
 	}
 
+	private async resend(pending: Pending): Promise<void> {
+		const send = this.link?.session === pending.session ? this.link.send : undefined
+		if (this.pending !== pending || !send) return
+		this.hooks.result('output change not confirmed yet; sending it once more')
+		try {
+			await send(pending.outputs)
+		} catch (error) {
+			if (this.pending !== pending) return
+			if (error instanceof OutputRouteRejected) {
+				this.fail(pending)
+				this.hooks.result('repeated output change rejected by Apple TV; not retried')
+				return
+			}
+			this.clearPending()
+			this.hooks.changed()
+			this.hooks.result(
+				error instanceof CommandNotSent
+					? 'repeat not sent; connection changed'
+					: 'repeated output change delivery uncertain; connection lost; not retried',
+			)
+		}
+	}
+
 	private expire(pending: Pending): void {
 		if (this.pending !== pending) return
 		this.fail(pending)
-		this.hooks.result('output change not confirmed in time; not retried')
+		this.hooks.result('output change not confirmed in time; not retried further')
 	}
 
 	private fail(pending: Pending): void {
@@ -203,6 +236,7 @@ export class PersonalOutputRouter {
 	private clearPending(): void {
 		if (!this.pending) return
 		clearTimeout(this.pending.timer)
+		clearTimeout(this.pending.resend)
 		this.pending = undefined
 	}
 

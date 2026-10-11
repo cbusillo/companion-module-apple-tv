@@ -33,7 +33,8 @@ identifier in the connection secrets. Leave the name empty to disable the featur
 
 The action's Route option is **Toggle personal output**, **Route to personal
 output** or **Route to default output**. Toggle decides the direction from the
-TV's current output list. Each press sends one request and is never retried.
+TV's current output list. Each press sends one request, and sends it once more
+if the TV has not switched 3 seconds after the request settles.
 Returning to default selects the other outputs the TV currently reports.
 
 `personal_output_route` shows `Personal`, `Default`, `Connecting`, `Failed` or
