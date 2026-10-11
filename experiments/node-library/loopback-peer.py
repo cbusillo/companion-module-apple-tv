@@ -1,6 +1,7 @@
 """Independent pyatv wire peer for the Node harness; synthetic keys, loopback only."""
 
 import asyncio
+import hashlib
 import logging
 from pathlib import Path
 import sys
@@ -9,8 +10,9 @@ from typing import Any, TypedDict
 from gesture_parity import check_gestures
 from pyatv.auth.server_auth import PIN_CODE
 from pyatv.protocols.companion.connection import FrameType
-from pyatv.protocols.companion.server_auth import CompanionServerAuth
+from pyatv.protocols.companion.server_auth import CompanionServerAuth, ServerKeys
 from pyatv.support import chacha20, opack
+from srptools import SRPContext, SRPServerSession, constants
 
 
 class PeerState(TypedDict):
@@ -176,7 +178,7 @@ class BadSignaturePeer(Peer):
                 signature = original.sign.sign(data)
                 return bytes([signature[0] ^ 1]) + signature[1:]
 
-        self.keys = original._replace(sign=CorruptSigner())
+        self.keys = ServerKeys(CorruptSigner(), original.auth, original.auth_pub, original.verify, original.verify_pub)
         try:
             super()._m5_setup(pairing_data)
         finally:
@@ -196,7 +198,19 @@ async def check_package(bundle: str) -> None:
     for peer_type, mode in ((Peer, "success"), (ClosedPairingPeer, "closed"), (BadSignaturePeer, "invalid-identity")):
         failures: list[Exception] = []
         state: PeerState = {"right_down": 0, "drop_next_right": False, "swipes": 0}
-        server = await asyncio.get_running_loop().create_server(lambda: peer_type(failures, state), "127.0.0.1", 0)
+        def packaged_peer() -> Peer:
+            peer = peer_type(failures, state)
+            # Fixed synthetic salt plus the Node fixture's reproducible client
+            # input keeps this M6 test independent of the known SRP edge case.
+            context = SRPContext("Pair-Setup", str(PIN_CODE), prime=constants.PRIME_3072,
+                                 generator=constants.PRIME_3072_GEN, hash_func=hashlib.sha512)
+            salt = int.from_bytes(b"synthetic-salt!!", "big")
+            verifier = context.get_common_password_verifier(context.get_common_password_hash(salt))
+            peer.session = SRPServerSession(context, format(verifier, "x"), peer.session.private)
+            peer.salt = format(salt, "x")
+            return peer
+
+        server = await asyncio.get_running_loop().create_server(packaged_peer, "127.0.0.1", 0)
         process = None
         try:
             process = await asyncio.create_subprocess_exec(
