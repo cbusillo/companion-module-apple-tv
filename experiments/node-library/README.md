@@ -142,6 +142,13 @@ input is invalidated before the queue advances after control, volume, or health
 failures. A failed release cannot mask uncertain delivery of a button-down, and
 stopping a controller prevents already-scheduled volume refreshes.
 
+Apple TVs read one-byte OPACK integers as signed. A request ID from 128 to 255
+therefore came back changed: 255 returned as the one-byte -1 (`0x07`), which the
+decoder rejected. The frame was dropped and the request timed out, ending the
+session about every 255 requests (roughly every two hours of health checks;
+issue #25). The patch keeps request IDs in 1 to 127, skipping any still awaiting
+a reply, and decodes `0x07` as -1.
+
 To verify the library source patch in a separate checkout of the exact upstream
 commit, apply `upstream-opack.patch`, then run the upstream `npm install`,
 `npm test`, and `npm run build` commands. The source patch includes its tests.

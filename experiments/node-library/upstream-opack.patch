@@ -3,9 +3,9 @@ index 1fc2eb1..b5c0df3 100644
 --- a/README.md
 +++ b/README.md
 @@ -277,6 +277,79 @@ src/
-
+ 
  ## Development
-
+ 
 +### OPACK values
 +
 +For low-level Companion requests, wrap integral values in `new OpackFloat(value)`
@@ -85,7 +85,7 @@ index 1fc2eb1..b5c0df3 100644
 @@ -291,4 +364,4 @@ npm test
  npm run test:watch
  ```
-
+ 
 -Requires Node.js 18+ (ES2022 target, ESM modules).
 \ No newline at end of file
 +Requires Node.js 18+ (ES2022 target, ESM modules).
@@ -403,7 +403,7 @@ index bf59292..ca09b7e 100644
 +import { HAPSession } from '../util/hap-session.js';
 +import { parseDataStreamFrame } from '../util/data-stream.js';
 +import { Message } from '../message.js';
-
+ 
  describe('AirPlayConnection', () => {
 +  it('delivers a fragmented encrypted batch without losing or reordering messages', async () => {
 +    const fixture = JSON.parse(readFileSync(new URL('../mrp/__tests__/metadata-fixtures.json', import.meta.url), 'utf8'));
@@ -515,15 +515,15 @@ index 1fb65bc..cc1c76c 100644
 +    // Header length describes the complete wire payload, including its tag.
 +    const payloadLen = header.readUIntBE(1, 3);
 +    expect(payloadLen).toBe(encrypted.length - header.length);
-
+ 
      const encryptedPayload = encrypted.subarray(4);
      const decrypted = receiver.decrypt(header, encryptedPayload);
 diff --git a/src/companion/__tests__/event-correlation.test.ts b/src/companion/__tests__/event-correlation.test.ts
 new file mode 100644
-index 0000000..61ef47e
+index 0000000..36b837c
 --- /dev/null
 +++ b/src/companion/__tests__/event-correlation.test.ts
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,92 @@
 +import { describe, expect, it } from 'vitest';
 +import { CompanionConnection } from '../connection.js';
 +import { CompanionSession } from '../companion-session.js';
@@ -552,6 +552,40 @@ index 0000000..61ef47e
 +}
 +
 +describe('Companion request and event correlation', () => {
++  it('keeps request IDs in 1..127 so a signed one-byte echo still matches', async () => {
++    const { connection, requests, receive } = fixture();
++    try {
++      for (let n = 0; n < 300; n++) {
++        const pending = connection.sendRequest('_ping', new Map<OpackValue, OpackValue>([['_t', 2], ['_c', new Map()]]));
++        const id = requests.at(-1)!.get('_x') as number;
++        expect(id).toBeGreaterThanOrEqual(1);
++        expect(id).toBeLessThanOrEqual(127);
++        receive(new Map<OpackValue, OpackValue>([['_x', id], ['_t', 3], ['_c', new Map()]]));
++        await pending;
++      }
++      expect(requests.map((r) => r.get('_x')).slice(125, 129)).toEqual([126, 127, 1, 2]);
++    } finally {
++      connection.close();
++    }
++  });
++
++  it('skips a request ID that is still awaiting its reply', async () => {
++    const { connection, requests, receive } = fixture();
++    try {
++      const held = connection.sendRequest('_held', new Map<OpackValue, OpackValue>([['_t', 2], ['_c', new Map()]]));
++      held.catch(() => {});
++      expect(requests[0].get('_x')).toBe(1);
++      for (let n = 0; n < 127; n++) {
++        const pending = connection.sendRequest('_ping', new Map<OpackValue, OpackValue>([['_t', 2], ['_c', new Map()]]));
++        receive(new Map<OpackValue, OpackValue>([['_x', requests.at(-1)!.get('_x')!], ['_t', 3], ['_c', new Map()]]));
++        await pending;
++      }
++      expect(requests.at(-1)!.get('_x')).toBe(2);
++    } finally {
++      connection.close();
++    }
++  });
++
 +  it('delivers an event with a colliding ID without resolving the pending request', async () => {
 +    const { connection, requests, receive } = fixture();
 +    const events: unknown[] = [];
@@ -856,6 +890,25 @@ index 0000000..fb9a21e
 +    expect(() => opackDecode(Buffer.from('d243666f6fc2', 'hex'))).toThrow();
 +  });
 +});
+diff --git a/src/companion/__tests__/opack.test.ts b/src/companion/__tests__/opack.test.ts
+index 7a5b665..2300d36 100644
+--- a/src/companion/__tests__/opack.test.ts
++++ b/src/companion/__tests__/opack.test.ts
+@@ -3,6 +3,14 @@ import { opackEncode, opackDecode, type OpackDict, type OpackValue } from '../op
+ 
+ describe('OPACK', () => {
+   describe('primitives', () => {
++    it('decodes 0x07 as -1, as an Apple TV echoes a request ID it read as signed 255', () => {
++      expect(opackDecode(Buffer.from([0x07]))).toBe(-1);
++      // { _x: -1, _t: 3 } with a one-byte _x, the shape of the reply that ended sessions.
++      const reply = opackDecode(Buffer.from('e2425f7807425f740b', 'hex')) as OpackDict;
++      expect(reply.get('_x')).toBe(-1);
++      expect(reply.get('_t')).toBe(3);
++    });
++
+     it('encodes and decodes null', () => {
+       const buf = opackEncode(null);
+       expect(buf).toEqual(Buffer.from([0x04]));
 diff --git a/src/companion/__tests__/pairing-lifecycle.test.ts b/src/companion/__tests__/pairing-lifecycle.test.ts
 new file mode 100644
 index 0000000..adc2669
@@ -992,13 +1045,13 @@ index 9500d2e..5e3db8d 100644
   * - Encrypts whole messages (no 1024-byte chunking)
   * - Counter-based nonce, separate TX/RX counters
   */
-
+ 
 -import { encryptChaCha20, decryptChaCha20, generateNonce } from '../util/crypto.js';
 +import { encryptChaCha20, decryptChaCha20 } from '../util/crypto.js';
  import { FrameType } from './framing.js';
-
+ 
  const AUTH_TAG_LENGTH = 16;
-
+ 
 +function companionNonce(counter: bigint): Buffer {
 +  // Companion counts from byte zero of a 12-byte little-endian nonce.
 +  // HAP/AirPlay instead put four zero bytes before their 8-byte counter.
@@ -1017,7 +1070,7 @@ index 9500d2e..5e3db8d 100644
 -    const nonce = generateNonce(this.outCounter);
 +    const nonce = companionNonce(this.outCounter);
      this.outCounter++;
-
+ 
      // Build the frame header (used as AAD)
      const header = Buffer.alloc(4);
      header[0] = frameType;
@@ -1025,7 +1078,7 @@ index 9500d2e..5e3db8d 100644
 -    header[2] = (plaintext.length >> 8) & 0xff;
 -    header[3] = plaintext.length & 0xff;
 +    header.writeUIntBE(plaintext.length + AUTH_TAG_LENGTH, 1, 3);
-
+ 
      const { ciphertext, tag } = encryptChaCha20(
        this.outKey,
 @@ -51,7 +57,7 @@ export class CompanionSession {
@@ -1035,13 +1088,20 @@ index 9500d2e..5e3db8d 100644
 -    const nonce = generateNonce(this.inCounter);
 +    const nonce = companionNonce(this.inCounter);
      this.inCounter++;
-
+ 
      const ciphertext = encryptedPayload.subarray(0, encryptedPayload.length - AUTH_TAG_LENGTH);
 diff --git a/src/companion/connection.ts b/src/companion/connection.ts
-index 351e7fb..dae3e0f 100644
+index 351e7fb..03b19c1 100644
 --- a/src/companion/connection.ts
 +++ b/src/companion/connection.ts
-@@ -57,7 +57,8 @@ export class CompanionConnection extends EventEmitter {
+@@ -53,11 +53,15 @@ function ed25519PrivateKeyFromSeed(seed: Buffer): KeyObject {
+   });
+ }
+ 
++
++/** Largest request ID an Apple TV echoes unchanged (one-byte OPACK integers are signed). */
++const MAX_TRANSFER_ID = 127;
+ export class CompanionConnection extends EventEmitter {
    private socket: Socket | undefined;
    private session: CompanionSession | undefined;
    private buffer: Buffer = Buffer.alloc(0);
@@ -1051,7 +1111,7 @@ index 351e7fb..dae3e0f 100644
    private pendingRequests = new Map<number, {
      resolve: (value: OpackDict) => void;
      reject: (error: Error) => void;
-@@ -79,12 +80,15 @@ export class CompanionConnection extends EventEmitter {
+@@ -79,12 +83,15 @@ export class CompanionConnection extends EventEmitter {
    private openSocket(): Promise<void> {
      return new Promise((resolve, reject) => {
        this.socket = new Socket();
@@ -1068,16 +1128,46 @@ index 351e7fb..dae3e0f 100644
        this.socket.on('data', (data: Buffer) => this.onData(data));
      });
    }
-@@ -288,6 +292,7 @@ export class CompanionConnection extends EventEmitter {
+@@ -252,7 +259,7 @@ export class CompanionConnection extends EventEmitter {
+       throw new Error('Companion not connected');
      }
-
+ 
+-    const tid = this.transferId++;
++    const tid = this.nextTransferId();
      content.set('_i', identifier);
-+    if (!content.has('_x')) content.set('_x', this.transferId++);
+     content.set('_x', tid);
+ 
+@@ -279,6 +286,20 @@ export class CompanionConnection extends EventEmitter {
+     });
+   }
+ 
++  /**
++   * Apple TVs read one-byte OPACK integers as signed, so an ID from 128 to 255 comes back
++   * changed (255 returns as -1) and its reply never matches. Keep IDs in 1..127, skipping
++   * any still awaiting a reply.
++   */
++  private nextTransferId(): number {
++    for (let attempt = 0; attempt < MAX_TRANSFER_ID; attempt++) {
++      const id = this.transferId;
++      this.transferId = id >= MAX_TRANSFER_ID ? 1 : id + 1;
++      if (!this.pendingRequests.has(id)) return id;
++    }
++    throw new Error('Companion has no free request ID');
++  }
++
+   /**
+    * Send an OPACK message without waiting for a response.
+    */
+@@ -288,6 +309,7 @@ export class CompanionConnection extends EventEmitter {
+     }
+ 
+     content.set('_i', identifier);
++    if (!content.has('_x')) content.set('_x', this.nextTransferId());
      const payload = opackEncode(content);
      const encrypted = this.session.encrypt(FrameType.E_OPACK, payload);
      this.writeRaw(encrypted);
-@@ -365,11 +370,10 @@ export class CompanionConnection extends EventEmitter {
-
+@@ -365,11 +387,10 @@ export class CompanionConnection extends EventEmitter {
+ 
    private processEncryptedFrames(): void {
      // Encrypted frames: 4-byte header + ciphertext + 16-byte tag
 -    // The header contains the plaintext length, so total = 4 + plaintextLen + 16
@@ -1088,13 +1178,13 @@ index 351e7fb..dae3e0f 100644
 -      const totalLen = 4 + plaintextLen + 16;
 +      const payloadLen = this.buffer.readUIntBE(1, 3);
 +      const totalLen = 4 + payloadLen;
-
+ 
        if (this.buffer.length < totalLen) break;
-
-@@ -377,12 +381,25 @@ export class CompanionConnection extends EventEmitter {
+ 
+@@ -377,12 +398,25 @@ export class CompanionConnection extends EventEmitter {
        const encryptedPayload = this.buffer.subarray(4, totalLen);
        this.buffer = Buffer.from(this.buffer.subarray(totalLen));
-
+ 
 +      // An empty frame carries no ciphertext and does not consume a nonce, as in pyatv.
 +      if (payloadLen === 0) continue;
 +
@@ -1121,9 +1211,9 @@ index 351e7fb..dae3e0f 100644
        }
      }
    }
-@@ -395,7 +412,7 @@ export class CompanionConnection extends EventEmitter {
+@@ -395,7 +429,7 @@ export class CompanionConnection extends EventEmitter {
      const identifier = dict.get('_i');
-
+ 
      // Check if this is a response to a pending request
 -    if (typeof transferId === 'number' && this.pendingRequests.has(transferId)) {
 +    if (dict.get('_t') === 3 && typeof transferId === 'number' && this.pendingRequests.has(transferId)) {
@@ -1131,7 +1221,7 @@ index 351e7fb..dae3e0f 100644
        this.pendingRequests.delete(transferId);
        pending.resolve(dict);
 diff --git a/src/companion/opack.ts b/src/companion/opack.ts
-index 7641ce2..0918c4b 100644
+index 7641ce2..73244d9 100644
 --- a/src/companion/opack.ts
 +++ b/src/companion/opack.ts
 @@ -11,11 +11,17 @@ export type OpackValue =
@@ -1141,9 +1231,9 @@ index 7641ce2..0918c4b 100644
 +  | OpackFloat
    | OpackValue[]
    | OpackDict;
-
+ 
  export type OpackDict = Map<OpackValue, OpackValue>;
-
+ 
 +/** Preserve a floating-point wire type for integral seconds and volume limits. */
 +export class OpackFloat {
 +  constructor(readonly value: number) {}
@@ -1152,9 +1242,19 @@ index 7641ce2..0918c4b 100644
  // --- Type tags (matched to pyatv) ---
  const TAG_NULL = 0x04;
  const TAG_TRUE = 0x01;
-@@ -85,7 +91,11 @@ function encodeValue(value: OpackValue, parts: Buffer[]): void {
+@@ -25,6 +31,9 @@ const TAG_TERMINATOR = 0x03;
+ // UUID: 0x05 + 16 raw bytes
+ const TAG_UUID = 0x05;
+ 
++// Minus one: Apple encodes -1 as 0x07, the slot before the small integers.
++const TAG_MINUS_ONE = 0x07;
++
+ // Small integers: 0x08 + value, for values 0..39
+ const TAG_SMALL_INT_BASE = 0x08;
+ const TAG_SMALL_INT_MAX_VALUE = 0x27; // 39
+@@ -85,7 +94,11 @@ function encodeValue(value: OpackValue, parts: Buffer[]): void {
    }
-
+ 
    if (typeof value === 'number') {
 -    if (Number.isInteger(value)) {
 +    // OPACK integers are unsigned. Negative numbers must use a float.
@@ -1165,10 +1265,10 @@ index 7641ce2..0918c4b 100644
        encodeInteger(value, parts);
      } else {
        encodeFloat(value, parts);
-@@ -93,6 +103,11 @@ function encodeValue(value: OpackValue, parts: Buffer[]): void {
+@@ -93,6 +106,11 @@ function encodeValue(value: OpackValue, parts: Buffer[]): void {
      return;
    }
-
+ 
 +  if (value instanceof OpackFloat) {
 +    encodeFloat(value.value, parts);
 +    return;
@@ -1177,7 +1277,7 @@ index 7641ce2..0918c4b 100644
    if (typeof value === 'string') {
      encodeString(value, parts);
      return;
-@@ -150,14 +165,14 @@ function encodeInteger(value: number, parts: Buffer[]): void {
+@@ -150,14 +168,14 @@ function encodeInteger(value: number, parts: Buffer[]): void {
    // Fall through to int64
    const buf = Buffer.alloc(9);
    buf[0] = TAG_INT64;
@@ -1185,7 +1285,7 @@ index 7641ce2..0918c4b 100644
 +  buf.writeBigUInt64LE(BigInt(value), 1);
    parts.push(buf);
  }
-
+ 
  function encodeBigInt(value: bigint, parts: Buffer[]): void {
    const buf = Buffer.alloc(9);
    buf[0] = TAG_INT64;
@@ -1193,20 +1293,20 @@ index 7641ce2..0918c4b 100644
 +  buf.writeBigUInt64LE(value, 1);
    parts.push(buf);
  }
-
-@@ -242,7 +257,7 @@ function encodeDict(value: OpackDict, parts: Buffer[]): void {
+ 
+@@ -242,7 +260,7 @@ function encodeDict(value: OpackDict, parts: Buffer[]): void {
  // --- Decoder ---
-
+ 
  export function opackDecode(buffer: Buffer): OpackValue {
 -  const result = decodeValue(buffer, 0);
 +  const result = decodeValue(buffer, 0, []);
    return result.value;
  }
-
-@@ -251,7 +266,29 @@ interface DecodeResult {
+ 
+@@ -251,7 +269,29 @@ interface DecodeResult {
    offset: number;
  }
-
+ 
 -function decodeValue(buf: Buffer, offset: number): DecodeResult {
 +function decodeValue(buf: Buffer, offset: number, objects: OpackValue[]): DecodeResult {
 +  const tag = buf[offset];
@@ -1234,7 +1334,18 @@ index 7641ce2..0918c4b 100644
    if (offset >= buf.length) {
      throw new Error('OPACK: unexpected end of buffer');
    }
-@@ -359,38 +396,38 @@ function decodeValue(buf: Buffer, offset: number): DecodeResult {
+@@ -277,6 +317,10 @@ function decodeValue(buf: Buffer, offset: number): DecodeResult {
+   }
+ 
+   // Small integers 0..39: tags 0x08..0x2F
++  if (tag === TAG_MINUS_ONE) {
++    return { value: -1, offset: offset + 1 };
++  }
++
+   if (tag >= TAG_SMALL_INT_BASE && tag <= TAG_SMALL_INT_BASE + TAG_SMALL_INT_MAX_VALUE) {
+     return { value: tag - TAG_SMALL_INT_BASE, offset: offset + 1 };
+   }
+@@ -359,38 +403,38 @@ function decodeValue(buf: Buffer, offset: number): DecodeResult {
    // Arrays: 0xD0..0xDE inline count, 0xDF = terminated
    if (tag >= TAG_ARRAY_BASE && tag < TAG_ARRAY_BASE + TAG_ARRAY_OVERFLOW) {
      const count = tag - TAG_ARRAY_BASE;
@@ -1245,7 +1356,7 @@ index 7641ce2..0918c4b 100644
 -    return decodeArrayTerminated(buf, offset + 1);
 +    return decodeArrayTerminated(buf, offset + 1, objects);
    }
-
+ 
    // Dicts: 0xE0..0xEE inline count, 0xEF = terminated
    if (tag >= TAG_DICT_BASE && tag < TAG_DICT_BASE + TAG_DICT_OVERFLOW) {
      const count = tag - TAG_DICT_BASE;
@@ -1256,10 +1367,10 @@ index 7641ce2..0918c4b 100644
 -    return decodeDictTerminated(buf, offset + 1);
 +    return decodeDictTerminated(buf, offset + 1, objects);
    }
-
+ 
    throw new Error(`OPACK: unknown tag 0x${tag.toString(16)} at offset ${offset}`);
  }
-
+ 
 -function decodeArrayN(buf: Buffer, offset: number, count: number): DecodeResult {
 +function decodeArrayN(buf: Buffer, offset: number, count: number, objects: OpackValue[]): DecodeResult {
    const arr: OpackValue[] = [];
@@ -1271,7 +1382,7 @@ index 7641ce2..0918c4b 100644
    }
    return { value: arr, offset };
  }
-
+ 
 -function decodeArrayTerminated(buf: Buffer, offset: number): DecodeResult {
 +function decodeArrayTerminated(buf: Buffer, offset: number, objects: OpackValue[]): DecodeResult {
    const arr: OpackValue[] = [];
@@ -1281,10 +1392,10 @@ index 7641ce2..0918c4b 100644
      arr.push(item.value);
      offset = item.offset;
    }
-@@ -400,24 +437,24 @@ function decodeArrayTerminated(buf: Buffer, offset: number): DecodeResult {
+@@ -400,24 +444,24 @@ function decodeArrayTerminated(buf: Buffer, offset: number): DecodeResult {
    return { value: arr, offset };
  }
-
+ 
 -function decodeDictN(buf: Buffer, offset: number, count: number): DecodeResult {
 +function decodeDictN(buf: Buffer, offset: number, count: number, objects: OpackValue[]): DecodeResult {
    const dict: OpackDict = new Map();
@@ -1299,7 +1410,7 @@ index 7641ce2..0918c4b 100644
    }
    return { value: dict, offset };
  }
-
+ 
 -function decodeDictTerminated(buf: Buffer, offset: number): DecodeResult {
 +function decodeDictTerminated(buf: Buffer, offset: number, objects: OpackValue[]): DecodeResult {
    const dict: OpackDict = new Map();
@@ -1318,7 +1429,7 @@ index e3b1fed..b666e5d 100644
 +++ b/src/companion/pair-setup.ts
 @@ -6,15 +6,17 @@
   */
-
+ 
  import { Socket } from 'node:net';
 -import { generateKeyPairSync, sign, createPrivateKey, randomUUID } from 'node:crypto';
 +import { generateKeyPairSync, sign, verify, createPrivateKey, createPublicKey, randomUUID } from 'node:crypto';
@@ -1329,14 +1440,14 @@ index e3b1fed..b666e5d 100644
  import { opackEncode, opackDecode, type OpackDict, type OpackValue } from './opack.js';
  import type { HAPCredentials } from '../auth/types.js';
 +import { PendingRequests } from '../util/pending-requests.js';
-
+ 
  const ED25519_PKCS8_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
 +const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
-
+ 
  export class CompanionPairSetup {
    private socket: Socket | undefined;
 @@ -31,12 +33,23 @@ export class CompanionPairSetup {
-
+ 
    /** Queued frames that arrived before anyone was waiting for them. */
    private frameQueue: Frame[] = [];
 -  private pendingFrameResolvers: Array<(frame: Frame) => void> = [];
@@ -1349,7 +1460,7 @@ index e3b1fed..b666e5d 100644
 +  private pairingStage: 'connect' | 'pin' | 'proof' | 'identity' | 'complete' = 'connect';
 +  /** Last pairing stage, retained after shutdown without exposing protocol payloads. */
 +  get stage(): typeof this.pairingStage { return this.pairingStage; }
-
+ 
    constructor(
      private host: string,
      private port: number,
@@ -1358,7 +1469,7 @@ index e3b1fed..b666e5d 100644
 +    if (!host || !Number.isInteger(port) || port < 1 || port > 65535) throw new RangeError('Invalid pairing target');
 +    if (!Number.isFinite(this.timeoutMs) || this.timeoutMs <= 0) throw new RangeError('Invalid pairing timeout');
      this.clientId = randomUUID();
-
+ 
      const { publicKey, privateKey } = generateKeyPairSync('ed25519');
 @@ -52,28 +65,59 @@ export class CompanionPairSetup {
     * Open socket and send M1. The Apple TV should display the PIN after this.
@@ -1399,7 +1510,7 @@ index e3b1fed..b666e5d 100644
 +  private assertOpen(): void {
 +    if (this.phase === 'closed') throw new Error('Companion pairing is closed');
    }
-
+ 
    private openSocket(): Promise<void> {
 -    return new Promise((resolve, reject) => {
 -      this.socket = new Socket();
@@ -1434,7 +1545,7 @@ index e3b1fed..b666e5d 100644
      });
 +    return connected;
    }
-
+ 
    /**
 @@ -99,6 +143,7 @@ export class CompanionPairSetup {
     */
@@ -1446,15 +1557,15 @@ index e3b1fed..b666e5d 100644
        throw new Error(`Companion PS: expected OPACK dict response, got frame type 0x${frame.type.toString(16)}`);
 @@ -135,6 +180,7 @@ export class CompanionPairSetup {
    }
-
+ 
    async sendM3(pin: string, salt: Buffer, serverPublicKey: Buffer): Promise<void> {
 +    this.pairingStage = 'proof';
      this.srp.init(salt, pin);
      this.srp.setServerPublicKey(serverPublicKey);
-
+ 
 @@ -162,6 +208,7 @@ export class CompanionPairSetup {
    }
-
+ 
    async sendM5(): Promise<HAPCredentials> {
 +    this.pairingStage = 'identity';
      if (!this.sessionKey) {
@@ -1470,7 +1581,7 @@ index e3b1fed..b666e5d 100644
 +    if (!serverId?.length || serverLTPK?.length !== 32 || serverSignature?.length !== 64) {
 +      throw new Error('Companion PS M6 missing valid identity or signature');
      }
-
+ 
 +    const accessoryKey = await hkdfSha512(
 +      this.sessionKey, 'Pair-Setup-Accessory-Sign-Salt', 'Pair-Setup-Accessory-Sign-Info', 32,
 +    );
@@ -1499,7 +1610,7 @@ index e3b1fed..b666e5d 100644
        return await this.sendM5();
 @@ -255,35 +315,37 @@ export class CompanionPairSetup {
    }
-
+ 
    destroy(): void {
 +    this.shutdown(new Error('Companion pairing closed'));
 +  }
@@ -1517,7 +1628,7 @@ index e3b1fed..b666e5d 100644
 +    this.salt = this.serverPublicKey = this.sessionKey = undefined;
 +    this.resolveClosed();
    }
-
+ 
    private writeFrame(type: FrameType, payload: Buffer): void {
 +    this.assertOpen();
 +    if (!this.socket) throw new Error('Companion pairing is not connected');
@@ -1525,14 +1636,14 @@ index e3b1fed..b666e5d 100644
 -    this.socket?.write(frame);
 +    this.socket.write(frame, error => { if (error) this.shutdown(error); });
    }
-
+ 
 -  private waitForAnyFrame(timeoutMs = 10000): Promise<Frame> {
 +  private waitForAnyFrame(): Promise<Frame> {
 +    this.assertOpen();
      if (this.frameQueue.length > 0) {
        return Promise.resolve(this.frameQueue.shift()!);
      }
-
+ 
 -    return new Promise((resolve, reject) => {
 -      const onFrame = (frame: Frame): void => {
 -        clearTimeout(timer);
@@ -1550,11 +1661,11 @@ index e3b1fed..b666e5d 100644
 -    });
 +    return this.pending.create<Frame>('frame', this.timeoutMs);
    }
-
+ 
    private processFrames(): void {
 @@ -291,10 +353,10 @@ export class CompanionPairSetup {
      this.buffer = remainder;
-
+ 
      for (const frame of frames) {
 -      const resolver = this.pendingFrameResolvers.shift();
 -      if (resolver) {
@@ -1575,7 +1686,7 @@ index 8851355..58039f6 100644
  import { buildDataStreamFrame, buildDataStreamReply, parseDataStreamFrame } from './util/data-stream.js';
  import type { HAPCredentials } from './auth/types.js';
 +import { PendingRequests } from './util/pending-requests.js';
-
+ 
  const DATA_CHANNEL_TYPE_UUID = '1910A70F-DBC0-4242-AF95-115DB30604E1';
  const X25519_SPKI_PREFIX = Buffer.from('302a300506032b656e032100', 'hex');
 @@ -28,17 +29,19 @@ interface ParsedHTTP {
@@ -1584,14 +1695,14 @@ index 8851355..58039f6 100644
    totalSize: number;
 +  statusCode?: number;
  }
-
+ 
  /** Parse an HTTP message (request or response) from a buffer. Returns null if incomplete. */
  function parseHTTPMessage(buf: Buffer): ParsedHTTP | null {
 -  const text = buf.toString('utf-8');
 -  const headerEnd = text.indexOf('\r\n\r\n');
 +  const headerEnd = buf.indexOf('\r\n\r\n');
    if (headerEnd === -1) return null;
-
+ 
 -  const headerSection = text.substring(0, headerEnd);
 +  const headerSection = buf.subarray(0, headerEnd).toString('utf8');
    const headers: Record<string, string> = {};
@@ -1603,7 +1714,7 @@ index 8851355..58039f6 100644
      if (colonIdx > 0) {
 @@ -48,21 +51,19 @@ function parseHTTPMessage(buf: Buffer): ParsedHTTP | null {
    }
-
+ 
    const bodyStart = headerEnd + 4;
 -  const contentLength = parseInt(headers['content-length'] ?? '0', 10);
 +  const length = headers['content-length'] ?? '0';
@@ -1611,12 +1722,12 @@ index 8851355..58039f6 100644
 +  const contentLength = Number(length);
    const totalSize = bodyStart + contentLength;
    if (buf.length < totalSize) return null;
-
+ 
    const body = buf.subarray(bodyStart, bodyStart + contentLength);
 -  return { headers, body: Buffer.from(body), totalSize };
 +  return { headers, body: Buffer.from(body), totalSize, statusCode: status ? Number(status[1]) : undefined };
  }
-
+ 
 -/** Connect a socket to host:port and return it once connected. */
 -function connectSocket(host: string, port: number): Promise<Socket> {
 -  return new Promise((resolve, reject) => {
@@ -1628,7 +1739,7 @@ index 8851355..58039f6 100644
 +  timeoutMs?: number;
 +  logger?: (message: string) => void;
  }
-
+ 
  export class AirPlayConnection extends EventEmitter {
 @@ -79,69 +80,133 @@ export class AirPlayConnection extends EventEmitter {
    private dacpId = randomBytes(8).toString('hex');
@@ -1652,7 +1763,7 @@ index 8851355..58039f6 100644
 -  }> = [];
 +  private mrpResponseTypes = new Map<string, number | undefined>();
 +  private incomingMRP = Promise.resolve();
-
+ 
    constructor(
      private host: string,
      private port: number,
@@ -1662,7 +1773,7 @@ index 8851355..58039f6 100644
      super();
 +    if (!Number.isFinite(this.timeoutMs) || this.timeoutMs <= 0) throw new RangeError('Invalid AirPlay timeout');
    }
-
+ 
 -  async connect(): Promise<void> {
 -    // Step 1: Open TCP connection
 -    this.log('opening TCP connection...');
@@ -1805,17 +1916,17 @@ index 8851355..58039f6 100644
 +      throw error;
 +    }
    }
-
+ 
    private log(msg: string): void {
 -    console.error(`[AirPlay] ${msg}`);
 +    if (this.options.logger) this.options.logger(msg);
 +    else console.error(`[AirPlay] ${msg}`);
    }
-
+ 
    // --- Pair-verify directly on the RTSP socket ---
 @@ -257,49 +322,52 @@ export class AirPlayConnection extends EventEmitter {
    }
-
+ 
    /** Send a plain HTTP POST on the raw socket and read the response */
 -  private httpPostOnSocket(path: string, body: Buffer): Promise<Buffer> {
 -    return new Promise((resolve, reject) => {
@@ -1862,7 +1973,7 @@ index 8851355..58039f6 100644
 +      throw error;
 +    }
    }
-
+ 
    /** Handle raw (unencrypted) data during pair-verify phase */
    private onRawData(data: Buffer): void {
 +    if (this.closed) return;
@@ -1890,12 +2001,12 @@ index 8851355..58039f6 100644
 +      this.fail(error instanceof Error ? error : new Error('Invalid AirPlay pairing response'));
      }
    }
-
+ 
    // --- Encrypted RTSP ---
-
+ 
    private encryptedBuffer = Buffer.alloc(0);
 +  private rtspBuffer = Buffer.alloc(0);
-
+ 
    private async sendRTSP(
      method: string,
 @@ -307,14 +375,16 @@ export class AirPlayConnection extends EventEmitter {
@@ -1914,12 +2025,12 @@ index 8851355..58039f6 100644
        'Client-Instance': this.dacpId,
 -      ...headers,
      };
-
+ 
      let request = `${method} ${uri} RTSP/1.0\r\n`;
 @@ -333,12 +403,15 @@ export class AirPlayConnection extends EventEmitter {
        data = Buffer.from(this.session.encrypt(data));
      }
-
+ 
 -    return new Promise((resolve, reject) => {
 -      this.socket!.write(data, (err) => {
 -        if (err) reject(err);
@@ -1936,7 +2047,7 @@ index 8851355..58039f6 100644
 +      throw error;
 +    }
    }
-
+ 
    private get rtspUri(): string {
 @@ -384,14 +457,13 @@ export class AirPlayConnection extends EventEmitter {
        const eventInputKey = await hkdfSha512(
@@ -1944,7 +2055,7 @@ index 8851355..58039f6 100644
        );
 +      this.assertOpen();
        this.eventSession = new HAPSession(eventOutputKey, eventInputKey);
-
+ 
        this.log(`connecting to event port ${eventPort}...`);
 -      this.eventSocket = await connectSocket(this.host, eventPort);
 +      this.eventSocket = await this.openSocket(eventPort);
@@ -1954,25 +2065,25 @@ index 8851355..58039f6 100644
 -      this.eventSocket.on('close', () => this.log('event channel closed'));
      }
    }
-
+ 
 @@ -447,16 +519,15 @@ export class AirPlayConnection extends EventEmitter {
        'DataStream-Input-Encryption-Key',
        32,
      );
 +    this.assertOpen();
      this.dataSession = new HAPSession(dataOutputKey, dataInputKey);
-
+ 
      this.log(`connecting data channel to ${this.host}:${dataPort}...`);
-
+ 
 -    this.dataSocket = await connectSocket(this.host, dataPort);
 +    this.dataSocket = await this.openSocket(dataPort);
      this.log('data socket connected');
-
+ 
      this.dataSocket.on('data', (data) => this.onDataChannelData(Buffer.from(data)));
 -    this.dataSocket.on('error', (err) => this.log(`data channel error: ${err.message}`));
 -    this.dataSocket.on('close', () => this.log('data channel closed by remote'));
      this.dataSocket.on('end', () => this.log('data channel ended by remote'));
-
+ 
      // Initialize MRP protocol on data channel
 @@ -471,10 +542,8 @@ export class AirPlayConnection extends EventEmitter {
        uniqueIdentifier: this.credentials.clientId,
@@ -1984,7 +2095,7 @@ index 8851355..58039f6 100644
 -    await this.waitForMRPMessage(MessageType.DeviceInfo, 5000);
 +    await this.sendMRPMessageAndWait(deviceInfo, MessageType.DeviceInfo, 5000);
      this.log('DeviceInfo exchange complete');
-
+ 
      // 2. CryptoPairing is NOT performed over AirPlay transport.
 @@ -492,34 +561,13 @@ export class AirPlayConnection extends EventEmitter {
        nowPlayingUpdates: true,
@@ -1994,7 +2105,7 @@ index 8851355..58039f6 100644
      });
 -    await this.sendMRPMessage(updatesConfig);
 +    await this.sendMRPMessageAndWait(updatesConfig);
-
+ 
      // 5. GetKeyboardSession (pyatv uses send_and_receive)
      const getKeyboard = await MRPMessage.sendCommand(MessageType.GetKeyboardSession);
 -    await this.sendMRPMessage(getKeyboard);
@@ -2022,7 +2133,7 @@ index 8851355..58039f6 100644
 -    });
 +    await this.sendMRPMessageAndWait(getKeyboard, MessageType.Keyboard);
    }
-
+ 
    /** Perform MRP-level pair-verify using CryptoPairingMessage */
 @@ -538,11 +586,8 @@ export class AirPlayConnection extends EventEmitter {
        ephemeralPublicKeyRaw,
@@ -2036,7 +2147,7 @@ index 8851355..58039f6 100644
 +    const m2Response = await this.sendMRPMessageAndWait(m1Msg, MessageType.CryptoPairing, 10000);
      const m2PairingData = (m2Response as any)['.cryptoPairingMessage']?.pairingData as Buffer;
      if (!m2PairingData) throw new Error('M2 missing pairingData');
-
+ 
 @@ -620,11 +665,8 @@ export class AirPlayConnection extends EventEmitter {
        [TlvTag.EncryptedData]: Buffer.concat([ciphertext, tag]),
      });
@@ -2047,18 +2158,18 @@ index 8851355..58039f6 100644
      // Wait for M4 acknowledgment
 -    await m4Promise;
 +    await this.sendMRPMessageAndWait(m3Msg, MessageType.CryptoPairing);
-
+ 
      // Over AirPlay, MRP encryption keys are derived but NOT applied.
      // The data channel is already encrypted at the transport layer.
 @@ -634,56 +676,44 @@ export class AirPlayConnection extends EventEmitter {
-
+ 
    /** Handle encrypted data after pair-verify is complete */
    private onEncryptedData(data: Buffer): void {
 +    if (this.closed) return;
      this.encryptedBuffer = Buffer.concat([this.encryptedBuffer, data]);
      this.tryParseRTSPResponse();
    }
-
+ 
    private tryParseRTSPResponse(): void {
 -    let decrypted: Buffer;
      try {
@@ -2122,15 +2233,15 @@ index 8851355..58039f6 100644
      }
 -    return true;
    }
-
+ 
    private eventEncBuffer = Buffer.alloc(0);
    private eventDecBuffer = Buffer.alloc(0);
-
+ 
    private onEventChannelData(data: Buffer): void {
 +    if (this.closed) return;
      this.eventEncBuffer = Buffer.concat([this.eventEncBuffer, data]);
      if (!this.eventSession) return;
-
+ 
 @@ -699,14 +729,15 @@ export class AirPlayConnection extends EventEmitter {
        try {
          const decrypted = this.eventSession.decrypt(frame);
@@ -2142,29 +2253,29 @@ index 8851355..58039f6 100644
          return;
        }
      }
-
+ 
      // Parse HTTP requests from decrypted data and respond with 200 OK
 -    this.processEventRequests();
 +    try { this.processEventRequests(); }
 +    catch { this.fail(new Error('Invalid AirPlay event request')); }
    }
-
+ 
    private processEventRequests(): void {
 @@ -726,13 +757,14 @@ export class AirPlayConnection extends EventEmitter {
-
+ 
        const response = `RTSP/1.0 200 OK\r\n${respHeaders.join('\r\n')}\r\n\r\n`;
        const encrypted = this.eventSession!.encrypt(Buffer.from(response));
 -      this.eventSocket?.write(encrypted);
 +      void this.write(this.eventSocket, encrypted).catch(error => this.fail(error));
      }
    }
-
+ 
    private dataEncBuffer = Buffer.alloc(0);
-
+ 
    private onDataChannelData(data: Buffer): void {
 +    if (this.closed) return;
      this.dataEncBuffer = Buffer.concat([this.dataEncBuffer, data]);
-
+ 
      // Wait for complete HAP frames before decrypting
 @@ -749,24 +781,31 @@ export class AirPlayConnection extends EventEmitter {
          this.dataDecBuffer = Buffer.concat([this.dataDecBuffer, decrypted]);
@@ -2174,7 +2285,7 @@ index 8851355..58039f6 100644
          return;
        }
      }
-
+ 
      // Parse complete DataStream frames from the decrypted buffer
      while (this.dataDecBuffer.length >= 32) {
 -      const frame = parseDataStreamFrame(this.dataDecBuffer, 0);
@@ -2186,7 +2297,7 @@ index 8851355..58039f6 100644
 +        return;
 +      }
        if (!frame) break;
-
+ 
        // Send rply for sync frames from the Apple TV
        if (frame.messageType === 'sync') {
          const reply = buildDataStreamReply(frame.seqno);
@@ -2194,17 +2305,17 @@ index 8851355..58039f6 100644
 -        this.dataSocket?.write(encrypted);
 +        void this.write(this.dataSocket, encrypted).catch(error => this.fail(error));
        }
-
+ 
 -      if (frame.protobufData) {
 -        this.handleMRPResponse(frame.protobufData);
 +      for (const protobufData of frame.protobufMessages) {
 +        this.incomingMRP = this.incomingMRP.then(() => this.handleMRPResponse(protobufData));
        }
-
+ 
        // Advance buffer past this frame
 @@ -775,69 +814,116 @@ export class AirPlayConnection extends EventEmitter {
    }
-
+ 
    private async handleMRPResponse(protobufData: Buffer): Promise<void> {
 +    if (this.closed) return;
      try {
@@ -2212,10 +2323,10 @@ index 8851355..58039f6 100644
 +      if (this.closed) return;
        const msg = decoded as unknown as Record<string, unknown>;
        this.log(`MRP response: type=${msg.type}`);
-
+ 
        // Always emit so that listeners (e.g. AppleTV) can observe all messages
        this.emit('mrp-message', msg);
-
+ 
 -      // Also resolve any pending resolver that matches this message type
 -      const idx = this.pendingMRPResolvers.findIndex(
 -        (r) => r.type === undefined || r.type === msg.type,
@@ -2238,7 +2349,7 @@ index 8851355..58039f6 100644
 +      this.fail(new Error('Invalid AirPlay MRP message'));
      }
    }
-
+ 
    private startFeedbackHeartbeat(): void {
 +    this.assertOpen();
 +    let pending = false;
@@ -2255,7 +2366,7 @@ index 8851355..58039f6 100644
        }
      }, 2000);
    }
-
+ 
 +  /**
 +   * Send one MRP message and wait for its correlated reply. A timeout fails the connection
 +   * unless `fatalTimeout: false` is given; then only this request rejects and a late reply
@@ -2292,7 +2403,7 @@ index 8851355..58039f6 100644
 +      this.mrpResponseTypes.delete(key);
 +    }
    }
-
+ 
    async sendMRPMessage(protobufData: Buffer): Promise<void> {
 +    this.assertOpen();
      if (!this.dataSocket || !this.dataSession) throw new Error('Data channel not connected');
@@ -2306,7 +2417,7 @@ index 8851355..58039f6 100644
 -    });
 +    await this.write(this.dataSocket, encrypted);
    }
-
+ 
 -  close(): void {
 +  private fail(error: Error): void {
 +    if (this.closed) return;
@@ -2352,17 +2463,17 @@ index 3f67678..9f288b2 100644
    filter?: (device: DiscoveredDevice) => boolean;
 +  signal?: AbortSignal;
  }
-
+ 
  export async function scan(options: ScanOptions = {}): Promise<DiscoveredDevice[]> {
    const timeout = options.timeout ?? 5000;
 +  options.signal?.throwIfAborted();
    const devices = new Map<string, DiscoveredDevice>();
 +  const companionPorts = new Map<string, number>();
-
+ 
 -  return new Promise((resolve) => {
 +  return new Promise((resolve, reject) => {
      const instance = new Bonjour();
-
+ 
      const browser = instance.find({ type: 'airplay', protocol: 'tcp' }, (service: Service) => {
 @@ -78,6 +81,7 @@ export async function scan(options: ScanOptions = {}): Promise<DiscoveredDevice[
              port: service.port,
@@ -2375,7 +2486,7 @@ index 3f67678..9f288b2 100644
 @@ -91,6 +95,8 @@ export async function scan(options: ScanOptions = {}): Promise<DiscoveredDevice[
          );
          if (!address) return;
-
+ 
 +        companionPorts.set(address, service.port);
 +
          for (const device of devices.values()) {
@@ -2384,7 +2495,7 @@ index 3f67678..9f288b2 100644
 @@ -99,16 +105,27 @@ export async function scan(options: ScanOptions = {}): Promise<DiscoveredDevice[
        },
      );
-
+ 
 -    setTimeout(() => {
 +    let finished = false;
 +    const finish = (cancelled = false) => {
@@ -2444,7 +2555,7 @@ index ba91c37..25abaaa 100644
 +++ b/src/message.ts
 @@ -8,7 +8,9 @@ export class Message {
    readonly payload: Record<string, unknown>;
-
+ 
    constructor(decoded: Record<string, unknown>) {
 -    this.type = (decoded.type as MessageType) ?? 0;
 +    // protobufjs supplies the first enum member for an absent proto2 field.
@@ -2657,14 +2768,14 @@ index 499a60a..bb9d883 100644
  import { randomUUID } from 'node:crypto';
  import { dirname, join } from 'node:path';
 +import { existsSync } from 'node:fs';
-
+ 
  const __dirname = dirname(fileURLToPath(import.meta.url));
 -const PROTO_DIR = join(__dirname, '..', 'proto');
 +// Single-file application bundles keep the packaged schemas next to their entry.
 +const PROTO_DIR = existsSync(join(__dirname, 'proto'))
 +  ? join(__dirname, 'proto')
 +  : join(__dirname, '..', 'proto');
-
+ 
  export enum MessageType {
 +  Unknown = 0,
    SendCommand = 1,
@@ -2685,7 +2796,7 @@ index 499a60a..bb9d883 100644
    UpdateContentItem = 56,
 +  VolumeControlCapabilitiesDidChange = 64,
  }
-
+ 
  let rootPromise: Promise<protobuf.Root> | null = null;
 @@ -74,6 +87,14 @@ const PROTO_FILES = [
    'SetConnectionStateMessage.proto',
@@ -2705,7 +2816,7 @@ index 499a60a..bb9d883 100644
 @@ -162,7 +183,55 @@ async function encodeMessage(
    return Buffer.from(ProtocolMessage.encode(message).finish());
  }
-
+ 
 +/** Output context types reported by tvOS MediaRemote (values from pyatv#2834). */
 +export enum OutputContextType {
 +  Unknown = 0,
@@ -2764,7 +2875,7 @@ index 923aca0..086513e 100644
 +++ b/src/proto/DeviceInfoMessage.proto
 @@ -7,13 +7,13 @@ extend ProtocolMessage {
  }
-
+ 
  message DeviceInfoMessage {
 -  required string uniqueIdentifier = 1; // Example: B8D8678C-9DA9-4D29-9338-5D6B827B8063
 +  optional string uniqueIdentifier = 1;
@@ -2868,7 +2979,7 @@ index d1e937e..f338c87 100644
 +++ b/src/proto/ProtocolMessage.proto
 @@ -4,6 +4,7 @@ message ProtocolMessage {
    extensions 6 to max;
-
+ 
    enum Type { 
 +    UNKNOWN_MESSAGE = 0;
      SEND_COMMAND_MESSAGE = 1;
@@ -2892,7 +3003,7 @@ index d1e937e..f338c87 100644
      UPDATE_CONTENT_ITEM_MESSAGE = 56;
 +    VOLUME_CONTROL_CAPABILITIES_DID_CHANGE_MESSAGE = 64;
    }
-
+ 
    optional Type type = 1; // Identifies which underlying message is filled in.
    optional string identifier = 2;
 -  optional int32 priority = 4;
@@ -3001,11 +3112,11 @@ index edfa6f3..d182e46 100644
  import { describe, it, expect } from 'vitest';
 +import bplistCreator from 'bplist-creator';
  import { encodeVarint, decodeVarint, buildDataStreamFrame, parseDataStreamFrame } from '../data-stream.js';
-
+ 
  describe('varint encoding', () => {
 @@ -31,6 +32,45 @@ describe('varint encoding', () => {
  });
-
+ 
  describe('DataStream framing', () => {
 +  function batchFrame(messages: Buffer[]): Buffer {
 +    const payload = bplistCreator({ params: { data: Buffer.concat(messages.map(message =>
@@ -3054,7 +3165,7 @@ index f797944..fe9fbfa 100644
 --- a/src/util/data-stream.ts
 +++ b/src/util/data-stream.ts
 @@ -15,18 +15,13 @@ export function encodeVarint(value: number): Buffer {
-
+ 
  export function decodeVarint(buf: Buffer, offset = 0): { value: number; bytesRead: number } {
    let value = 0;
 -  let shift = 0;
@@ -3075,7 +3186,7 @@ index f797944..fe9fbfa 100644
 -  return { value, bytesRead };
 +  throw new Error('Incomplete DataStream length');
  }
-
+ 
  // --- DataStream 32-byte header framing ---
 @@ -77,6 +72,8 @@ export function buildDataStreamFrame(protobufData: Buffer): Buffer {
  export interface ParsedDataStreamFrame {
@@ -3088,22 +3199,22 @@ index f797944..fe9fbfa 100644
  }
 @@ -85,6 +82,7 @@ export function parseDataStreamFrame(buf: Buffer, offset = 0): ParsedDataStreamF
    if (buf.length - offset < HEADER_SIZE) return null;
-
+ 
    const totalSize = buf.readUInt32BE(offset);
 +  if (totalSize < HEADER_SIZE) throw new Error('Invalid DataStream frame size');
    if (buf.length - offset < totalSize) return null;
-
+ 
    const messageTypeStr = buf.subarray(offset + 4, offset + 8).toString('ascii');
 @@ -92,28 +90,28 @@ export function parseDataStreamFrame(buf: Buffer, offset = 0): ParsedDataStreamF
    const seqno = buf.readBigUInt64BE(offset + 20);
-
+ 
    if (totalSize <= HEADER_SIZE) {
 -    return { messageType, protobufData: null, seqno, totalSize };
 +    return { messageType, protobufData: null, protobufMessages: [], seqno, totalSize };
    }
-
+ 
    const plistBuf = buf.subarray(offset + HEADER_SIZE, offset + totalSize);
-
+ 
 -  try {
 -    const parsed = parseBuffer(plistBuf);
 -    const payload = parsed[0] as Record<string, unknown>;
@@ -3137,7 +3248,7 @@ index f797944..fe9fbfa 100644
    }
 +  return { messageType, protobufData: protobufMessages[0] ?? null, protobufMessages, seqno, totalSize };
  }
-
+ 
  /** Build a "rply" frame to acknowledge a received sync frame */
 diff --git a/src/util/pending-requests.ts b/src/util/pending-requests.ts
 new file mode 100644

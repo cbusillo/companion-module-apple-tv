@@ -68,6 +68,19 @@ export async function withCompanionSession<T>(
 	const onDropped = (error: unknown): void => {
 		dropped = transportDetail(error)
 	}
+	// A reply the library could not match to a pending request arrives as an event. Remember the
+	// last one so a request timeout can say what the TV actually sent back.
+	let unmatched: string | undefined
+	const describeUnmatched = (data: unknown): string | undefined => {
+		if (!(data instanceof Map) || data.get('_t') !== 3) return undefined
+		const id = data.get('_x')
+		const kind = typeof id === 'object' ? (id === null ? 'null' : (id.constructor?.name ?? 'object')) : typeof id
+		return `_i=${String(data.get('_i'))} _x=${String(id)} (${kind})`
+	}
+	const timeoutDetail = (): string =>
+		[unmatched && `last unmatched reply: ${unmatched}`, dropped && `last dropped frame: ${dropped}`]
+			.filter(Boolean)
+			.join('; ')
 	const lose = (reason: string): void => {
 		if (!lost.signal.aborted)
 			lost.abort(new ConnectionLost(dropped ? `${reason}; last dropped frame: ${dropped}` : reason))
@@ -86,7 +99,14 @@ export async function withCompanionSession<T>(
 		) => {
 			const wait = requestTimeoutMs ?? timeoutMs
 			// The library's own timer stays later so a missing reply surfaces as OperationTimedOut.
-			return bounded(async () => connection.sendRequest(identifier, content, wait + 1000), wait, active)
+			try {
+				return await bounded(async () => connection.sendRequest(identifier, content, wait + 1000), wait, active)
+			} catch (error) {
+				const detail = error instanceof OperationTimedOut && timeoutDetail()
+				if (error instanceof OperationTimedOut && detail)
+					throw new OperationTimedOut(`${error.message}; ${detail}`, { cause: error })
+				throw error
+			}
 		},
 		sendCompanionMessage: connection.sendMessage
 			? (identifier: string, content: Parameters<CompanionConnection['sendMessage']>[1]): void => {
@@ -96,7 +116,10 @@ export async function withCompanionSession<T>(
 			: undefined,
 	}
 	const commands = new CompanionPrototype(client, { signal: active })
-	const onEvent = (event: Parameters<CompanionPrototype['receiveEvent']>[0]): void => commands.receiveEvent(event)
+	const onEvent = (event: Parameters<CompanionPrototype['receiveEvent']>[0]): void => {
+		unmatched = describeUnmatched(event.data) ?? unmatched
+		commands.receiveEvent(event)
+	}
 	connection.on('event', onEvent)
 	active.addEventListener('abort', () => commands.invalidate(), { once: true })
 	let subscribed = false
