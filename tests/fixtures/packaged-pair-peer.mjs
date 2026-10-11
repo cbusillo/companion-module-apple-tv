@@ -4,6 +4,26 @@ import assert from 'node:assert/strict'
 import { setTimeout as delay } from 'node:timers/promises'
 import { pathToFileURL } from 'node:url'
 import { resolve } from 'node:path'
+import crypto from 'node:crypto'
+import { syncBuiltinESMExports } from 'node:module'
+
+// Reproducible synthetic keys and SRP input: this test targets M6 rejection,
+// not the separately documented leading-zero SRP interoperability limitation.
+const randomBytes = crypto.randomBytes
+let randomInput = 0
+crypto.randomBytes = new Proxy(randomBytes, {
+	apply(_target, _receiver, [size, callback]) {
+		assert.ok(size <= 64)
+		const hex = crypto.createHash('sha512').update(`packaged-pair-peer:${randomInput++}`).digest('hex')
+		const bytes = Buffer.from(hex.slice(0, size * 2), 'hex')
+		if (callback) {
+			queueMicrotask(() => callback(null, bytes))
+			return
+		}
+		return bytes
+	},
+})
+syncBuiltinESMExports()
 
 const { default: AppleTV } = await import(pathToFileURL(resolve(process.argv[2])))
 const port = Number(process.argv[3])
@@ -98,4 +118,6 @@ try {
 	console.log(`Packaged pyatv pairing: ${mode} passed`)
 } finally {
 	await module.destroy()
+	crypto.randomBytes = randomBytes
+	syncBuiltinESMExports()
 }

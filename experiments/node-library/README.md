@@ -577,8 +577,13 @@ actual bundle as well as the installed patched library.
 One earlier synthetic M4 failure remains unexplained at the exact-input level.
 A retained diagnostic found that srptools and fast-srp-hap differ when an SRP
 integer begins with a zero byte. Ordinary inputs agreed; that does not prove
-which encoding the tested tvOS version accepts in the edge case. No seed,
-automatic pairing retry or production SRP math was changed to hide this result.
+which encoding the tested tvOS version accepts in the edge case. The packaged
+success/closure/M6 identity-rejection fixture now uses reproducible synthetic
+client randomness and a fixed synthetic server salt, so an unrelated M4 failure
+cannot randomly prevent the identity-rejection test from reaching M6. This
+fixture does not qualify leading-zero SRP interoperability. The ordinary
+independent peer still uses random inputs; production randomness, SRP math and
+the prohibition on automatic pairing retries are unchanged.
 
 ## Remaining qualification
 
