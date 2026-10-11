@@ -229,6 +229,40 @@ test('a session the TV closes names the close, a prior socket error and the last
 	}
 })
 
+test('a request timeout names the last reply the library could not match', async () => {
+	const connection = new FakeConnection()
+	await assert.rejects(
+		withCompanionSession(
+			target,
+			credentials,
+			new AbortController().signal,
+			async (commands) => {
+				connection.sendRequest = () =>
+					new Promise(() => {
+						queueMicrotask(() =>
+							connection.emit('event', {
+								identifier: 'FetchLaunchableApplicationsEvent',
+								data: new Map([
+									['_i', 'FetchLaunchableApplicationsEvent'],
+									['_t', 3],
+									['_x', 'synthetic'],
+								]),
+							}),
+						)
+					})
+				await commands.listApps()
+			},
+			() => connection,
+			() => {},
+			50,
+		),
+		{
+			message: 'Operation timed out; last unmatched reply: _i=FetchLaunchableApplicationsEvent _x=synthetic (string)',
+		},
+	)
+	assert.equal(connection.closed, true)
+})
+
 test('failed session stop cannot be reported as successful teardown', async () => {
 	const connection = new FakeConnection()
 	const original = connection.sendRequest.bind(connection)
