@@ -78,6 +78,13 @@ maps to the published npm package. This makes the experiment reproducible withou
 a local filesystem dependency or an unpublished package. No upstream submission
 or permanent fork decision is implied.
 
+Development build 0.5.0-dev.11 takes the upstream maintainer's two follow-up
+commits on the Companion compatibility pull request (through `469cc72`): the OPACK
+reference table is keyed by encoded bytes, so equal values with different
+encodings keep separate slots, and discovery joins the Companion port once both
+mDNS browsers stop. The module's cancellable scan keeps that join on its normal
+completion path. dev.11 is a test build for a supervised check on the TV.
+
 ## System audio output selection
 
 `MRPMessage.setSystemAudioOutputs(outputDeviceUIDs)` encodes MRP message type 48
