@@ -4,6 +4,7 @@ import test from 'node:test'
 import { NodeBackend } from '../dist/node-backend.js'
 import { decodePairing, encodePairing } from '../dist/node-credentials.js'
 import { CommandNotSent } from '../dist/prototype/queue.js'
+import { SeekCancelled } from '../dist/prototype/controller.js'
 import { UnsupportedCommand, CompanionRequestRejected } from '../dist/prototype/companion.js'
 import {
 	config,
@@ -281,8 +282,10 @@ test('commands dispatch once and show bounded error messages without leaking pro
 		const action = { kind: 'seek', seconds: -10 }
 		await f.backend.perform(action)
 		assert.deepEqual(f.controllers[0].actions, [action])
+		const results = []
 		for (const error of [
 			new CommandNotSent('private'),
+			new SeekCancelled('private'),
 			new UnsupportedCommand('private'),
 			new CompanionRequestRejected('private'),
 			new Error('private'),
@@ -295,7 +298,10 @@ test('commands dispatch once and show bounded error messages without leaking pro
 			await f.backend.perform(action)
 			assert.equal(sends, 1)
 			assert.equal(f.values.last_result.includes('private'), false)
+			results.push(f.values.last_result)
 		}
+		// Each outcome, including seeks that cancelled out, reads differently.
+		assert.equal(new Set(results).size, results.length)
 	} finally {
 		await f.backend.stop()
 	}

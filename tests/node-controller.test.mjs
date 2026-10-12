@@ -8,6 +8,7 @@ import { saved } from './fixtures/node-setup-peer.mjs'
 import { fixture, until } from './fixtures/controller-peer.mjs'
 import { runAcceptance } from '../dist/prototype/acceptance.js'
 import { remoteActions } from '../dist/actions.js'
+import { SeekCancelled } from '../dist/prototype/controller.js'
 
 test('controller accepts input only after a real health round trip and keeps gestures atomic', async () => {
 	const { controller, peers } = fixture()
@@ -768,6 +769,198 @@ test('a socket error during a key press reaches the session-loss log with its co
 			logs.filter(({ level }) => level === 'warn').map(({ message }) => message),
 			['Apple TV session lost: Companion connection error: read ECONNRESET; retrying in 0.005 s'],
 		)
+	} finally {
+		await controller.stop()
+	}
+})
+
+/** Seconds carried by each seek request, in the order the peer received them. */
+const seeks = (peer) =>
+	peer.requests
+		.filter(({ id, content }) => id === '_mcc' && content.get('_mcc') === 7)
+		.map(({ content }) => content.get('_skpS').value)
+
+/** Hold the first seek request in flight until `release` is called. */
+function holdFirstSeek(peer) {
+	const started = Promise.withResolvers()
+	const gate = Promise.withResolvers()
+	let held = false
+	peer.onRequest = async (id, content) => {
+		if (id === '_mcc' && content.get('_mcc') === 7 && !held) {
+			held = true
+			started.resolve(undefined)
+			await gate.promise
+		}
+	}
+	return { started: started.promise, release: () => gate.resolve(undefined) }
+}
+
+const settle = (promises) =>
+	Promise.all(
+		promises.map((promise) =>
+			promise.then(
+				() => 'sent',
+				(error) => error,
+			),
+		),
+	)
+
+test('a fast spin of seek ticks becomes a few requests that carry every second', async () => {
+	const { controller, peers } = fixture()
+	controller.start()
+	try {
+		await controller.waitUntilReady(2000)
+		const { started, release } = holdFirstSeek(peers[0])
+		const first = controller.perform(remoteActions.seekForward)
+		await started
+		const burst = Array.from({ length: 9 }, () => controller.perform(remoteActions.seekForward))
+		release()
+		assert.deepEqual(await settle([first, ...burst]), Array(10).fill('sent'))
+		const sent = seeks(peers[0])
+		assert.ok(sent.length < 10)
+		assert.equal(
+			sent.reduce((sum, seconds) => sum + seconds, 0),
+			10 * remoteActions.seekForward.seconds,
+		)
+		assert.ok(sent.every((seconds) => seconds > 0 && seconds <= 60))
+		assert.equal(controller.state, 'ready')
+	} finally {
+		await controller.stop()
+	}
+})
+
+test('a coalesced seek never exceeds sixty seconds; further ticks queue another request', async () => {
+	const { controller, peers } = fixture()
+	controller.start()
+	try {
+		await controller.waitUntilReady(2000)
+		const { started, release } = holdFirstSeek(peers[0])
+		const first = controller.perform({ kind: 'seek', seconds: 10 })
+		await started
+		const burst = [30, 30, 10, 20].map((seconds) => controller.perform({ kind: 'seek', seconds }))
+		release()
+		await Promise.all([first, ...burst])
+		// 30 + 30 fills one request; 10 would pass sixty, so it starts the next one, which 20 joins.
+		assert.deepEqual(seeks(peers[0]), [10, 60, 30])
+	} finally {
+		await controller.stop()
+	}
+})
+
+test('opposite seek ticks net against the pending seek', async () => {
+	const { controller, peers } = fixture()
+	controller.start()
+	try {
+		await controller.waitUntilReady(2000)
+		const { started, release } = holdFirstSeek(peers[0])
+		const first = controller.perform(remoteActions.seekForward)
+		await started
+		const burst = [10, 10, -10, -30].map((seconds) => controller.perform({ kind: 'seek', seconds }))
+		release()
+		await Promise.all([first, ...burst])
+		assert.deepEqual(seeks(peers[0]), [10, -20])
+	} finally {
+		await controller.stop()
+	}
+})
+
+test('seek ticks that net to zero send nothing and leave the session healthy', async () => {
+	const { controller, peers } = fixture()
+	controller.start()
+	try {
+		await controller.waitUntilReady(2000)
+		const { started, release } = holdFirstSeek(peers[0])
+		const first = controller.perform(remoteActions.seekForward)
+		await started
+		const burst = [remoteActions.seekForward, remoteActions.seekBackward].map((action) => controller.perform(action))
+		release()
+		const results = await settle([first, ...burst])
+		assert.equal(results[0], 'sent')
+		for (const result of results.slice(1)) {
+			assert.ok(result instanceof SeekCancelled)
+			assert.ok(result instanceof CommandNotSent)
+		}
+		assert.deepEqual(seeks(peers[0]), [10])
+		assert.equal(controller.state, 'ready')
+		await controller.perform(remoteActions.seekBackward)
+		assert.deepEqual(seeks(peers[0]), [10, -10])
+	} finally {
+		await controller.stop()
+	}
+})
+
+test('a seek tick never joins a seek queued before other input', async () => {
+	const { controller, peers } = fixture()
+	controller.start()
+	try {
+		await controller.waitUntilReady(2000)
+		const { started, release } = holdFirstSeek(peers[0])
+		const first = controller.perform(remoteActions.seekForward)
+		await started
+		const before = peers[0].requests.length
+		const rest = [
+			controller.perform(remoteActions.seekForward),
+			controller.perform({ kind: 'button', button: 'select' }),
+			controller.perform(remoteActions.seekForward),
+		]
+		release()
+		await Promise.all([first, ...rest])
+		assert.deepEqual(
+			peers[0].requests.slice(before).map(({ id, content }) => (id === '_mcc' ? content.get('_skpS').value : id)),
+			[10, '_hidC', '_hidC', 10],
+		)
+	} finally {
+		await controller.stop()
+	}
+})
+
+test('an invalid seek tick is rejected without changing the pending seek', async () => {
+	const { controller, peers } = fixture()
+	controller.start()
+	try {
+		await controller.waitUntilReady(2000)
+		const { started, release } = holdFirstSeek(peers[0])
+		const first = controller.perform(remoteActions.seekForward)
+		await started
+		const pending = controller.perform(remoteActions.seekForward)
+		await assert.rejects(controller.perform({ kind: 'seek', seconds: 61 }), RangeError)
+		release()
+		await Promise.all([first, pending])
+		assert.deepEqual(seeks(peers[0]), [10, 10])
+		assert.equal(controller.state, 'ready')
+	} finally {
+		await controller.stop()
+	}
+})
+
+test('a coalesced seek that fails reports to every joined tick and is never resent', async () => {
+	const { controller, peers } = fixture()
+	controller.start()
+	try {
+		await controller.waitUntilReady(2000)
+		const { started, release } = holdFirstSeek(peers[0])
+		const inner = peers[0].onRequest
+		const failure = new Error('synthetic transport failure')
+		let seekRequests = 0
+		peers[0].onRequest = async (id, content) => {
+			await inner(id, content)
+			if (id === '_mcc' && content.get('_mcc') === 7 && ++seekRequests === 2) throw failure
+		}
+		const first = controller.perform(remoteActions.seekForward)
+		await started
+		// 6 ticks fill the coalesced request; the last 2 wait behind it in a second one.
+		const joined = Array.from({ length: 6 }, () => controller.perform(remoteActions.seekForward))
+		const behind = Array.from({ length: 2 }, () => controller.perform(remoteActions.seekForward))
+		release()
+		const results = await settle([first, ...joined, ...behind])
+		assert.equal(results[0], 'sent')
+		for (const result of results.slice(1, 7)) assert.equal(result, failure)
+		for (const result of results.slice(7)) assert.ok(result instanceof CommandNotSent)
+		assert.deepEqual(seeks(peers[0]), [10, 60])
+		await until(() => controller.reconnects === 1)
+		assert.deepEqual(seeks(peers[1]), [])
+		await controller.perform(remoteActions.seekForward)
+		assert.deepEqual(seeks(peers[1]), [10])
 	} finally {
 		await controller.stop()
 	}
