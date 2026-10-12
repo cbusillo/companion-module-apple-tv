@@ -21,7 +21,7 @@
     "url": "git+https://github.com/cbusillo/companion-module-apple-tv.git"
   },
   "engines": {
-    "node": "^22.20",
+    "node": "^22.22.1",
     "yarn": "^4"
   },
   "dependencies": {
