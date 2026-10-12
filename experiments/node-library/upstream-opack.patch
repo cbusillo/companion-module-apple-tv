@@ -694,15 +694,15 @@ index 0000000..c123b55
 +});
 diff --git a/src/companion/__tests__/framing-compatibility.test.ts b/src/companion/__tests__/framing-compatibility.test.ts
 new file mode 100644
-index 0000000..ff480cb
+index 0000000..9b8e540
 --- /dev/null
 +++ b/src/companion/__tests__/framing-compatibility.test.ts
-@@ -0,0 +1,105 @@
+@@ -0,0 +1,74 @@
 +import { describe, expect, it } from 'vitest';
 +import { CompanionSession } from '../companion-session.js';
 +import { CompanionConnection } from '../connection.js';
 +import { FrameType } from '../framing.js';
-+import { opackDecode, opackEncode, type OpackDict, type OpackValue } from '../opack.js';
++import type { OpackDict } from '../opack.js';
 +
 +// pyatv 0.18.0 Chacha20Cipher(nonce_length=12), bytes(range(32)), counters 0 and 1.
 +// Public synthetic keys and payloads; no pairing or live device data.
@@ -734,37 +734,6 @@ index 0000000..ff480cb
 +}
 +
 +describe('Companion encrypted framing compatibility', () => {
-+  it('uses nonzero transaction IDs and correlates successive public requests', async () => {
-+    const { connection, parser, errors } = receiver();
-+    const peer = new CompanionSession(key, key);
-+    const ids: number[] = [];
-+    parser.socket = {
-+      write(frame: Buffer): void {
-+        const request = opackDecode(peer.decrypt(frame.subarray(0, 4), frame.subarray(4))) as OpackDict;
-+        const id = request.get('_x') as number;
-+        // Observed TV behavior: transaction zero is never acknowledged.
-+        expect(id).toBeGreaterThan(0);
-+        expect(ids).not.toContain(id);
-+        ids.push(id);
-+        const reply = new Map<OpackValue, OpackValue>([['_x', id], ['_t', 3], ['_c', new Map()]]);
-+        queueMicrotask(() => parser.onData(peer.encrypt(FrameType.E_OPACK, opackEncode(reply))));
-+      },
-+      destroy(): void {},
-+    };
-+    try {
-+      for (const identifier of ['_systemInfo', '_sessionStart']) {
-+        const reply = await connection.sendRequest(identifier, new Map<OpackValue, OpackValue>([
-+          ['_t', 2], ['_c', new Map()],
-+        ]));
-+        expect(reply.get('_t')).toBe(3);
-+      }
-+      expect(ids).toHaveLength(2);
-+      expect(errors).toEqual([]);
-+    } finally {
-+      connection.close();
-+    }
-+  });
-+
 +  it('matches an independently encrypted packet including the tag in its header', () => {
 +    const sender = new CompanionSession(key, key);
 +    expect(sender.encrypt(FrameType.E_OPACK, payload)).toEqual(frames[0]);
@@ -805,10 +774,10 @@ index 0000000..ff480cb
 +});
 diff --git a/src/companion/__tests__/opack-compatibility.test.ts b/src/companion/__tests__/opack-compatibility.test.ts
 new file mode 100644
-index 0000000..fb9a21e
+index 0000000..2a2fcf9
 --- /dev/null
 +++ b/src/companion/__tests__/opack-compatibility.test.ts
-@@ -0,0 +1,81 @@
+@@ -0,0 +1,104 @@
 +import { describe, expect, it } from 'vitest';
 +import { opackDecode, opackEncode, OpackFloat } from '../opack.js';
 +
@@ -874,6 +843,29 @@ index 0000000..fb9a21e
 +  it('does not add duplicate literals or references to the object table', () =>
 +    expect(opackDecode(Buffer.from('d543666f6f43666f6fa043626172a1', 'hex')))
 +      .toEqual(['foo', 'foo', 'foo', 'bar', 'bar']));
++
++  it('preserves signed zero and byte-based deduplication in reference order', () => {
++    const bytes = Buffer.from([0xab]);
++    const literals = [new OpackFloat(0), new OpackFloat(-0), new OpackFloat(0), bytes, bytes, 'end'];
++    const packet = Buffer.concat([
++      Buffer.from([0xd7]), ...literals.map(opackEncode), Buffer.from([0xa3]),
++    ]);
++    expect(opackDecode(packet)).toEqual([0, -0, 0, bytes, bytes, 'end', 'end']);
++  });
++
++  it('gives equal values with different encodings separate reference slots, as the encoder does', () => {
++    // int8 100, float64 100.0, then a reference to slot 1 (the float).
++    const numbers = Buffer.concat([
++      Buffer.from('d33064', 'hex'), opackEncode(new OpackFloat(100)), Buffer.from('a1', 'hex'),
++    ]);
++    expect(opackDecode(numbers)).toEqual([100, 100, 100]);
++    // A UUID and a 16-byte data value with the same bytes, then a reference to slot 1 (the data).
++    const bytes = Buffer.alloc(16, 0xab);
++    const uuidAndData = Buffer.concat([
++      Buffer.from('d305', 'hex'), bytes, Buffer.from('80', 'hex'), bytes, Buffer.from('a1', 'hex'),
++    ]);
++    expect(opackDecode(uuidAndData)).toEqual([bytes, bytes, bytes]);
++  });
 +
 +  it.each([1, 2, 3, 4])('decodes an extended reference with %s index bytes', width => {
 +    const pointer = Buffer.alloc(1 + width);
@@ -1221,7 +1213,7 @@ index 351e7fb..03b19c1 100644
        this.pendingRequests.delete(transferId);
        pending.resolve(dict);
 diff --git a/src/companion/opack.ts b/src/companion/opack.ts
-index 7641ce2..73244d9 100644
+index 7641ce2..52a7da0 100644
 --- a/src/companion/opack.ts
 +++ b/src/companion/opack.ts
 @@ -11,11 +11,17 @@ export type OpackValue =
@@ -1277,13 +1269,16 @@ index 7641ce2..73244d9 100644
    if (typeof value === 'string') {
      encodeString(value, parts);
      return;
-@@ -150,14 +168,14 @@ function encodeInteger(value: number, parts: Buffer[]): void {
-   // Fall through to int64
-   const buf = Buffer.alloc(9);
-   buf[0] = TAG_INT64;
+@@ -147,17 +165,13 @@ function encodeInteger(value: number, parts: Buffer[]): void {
+     return;
+   }
+ 
+-  // Fall through to int64
+-  const buf = Buffer.alloc(9);
+-  buf[0] = TAG_INT64;
 -  buf.writeBigInt64LE(BigInt(value), 1);
-+  buf.writeBigUInt64LE(BigInt(value), 1);
-   parts.push(buf);
+-  parts.push(buf);
++  encodeBigInt(BigInt(value), parts);
  }
  
  function encodeBigInt(value: bigint, parts: Buffer[]): void {
@@ -1294,21 +1289,27 @@ index 7641ce2..73244d9 100644
    parts.push(buf);
  }
  
-@@ -242,7 +260,7 @@ function encodeDict(value: OpackDict, parts: Buffer[]): void {
+@@ -242,7 +256,7 @@ function encodeDict(value: OpackDict, parts: Buffer[]): void {
  // --- Decoder ---
  
  export function opackDecode(buffer: Buffer): OpackValue {
 -  const result = decodeValue(buffer, 0);
-+  const result = decodeValue(buffer, 0, []);
++  const result = decodeValue(buffer, 0, { objects: [], seen: new Set() });
    return result.value;
  }
  
-@@ -251,7 +269,29 @@ interface DecodeResult {
+@@ -251,7 +265,39 @@ interface DecodeResult {
    offset: number;
  }
  
 -function decodeValue(buf: Buffer, offset: number): DecodeResult {
-+function decodeValue(buf: Buffer, offset: number, objects: OpackValue[]): DecodeResult {
++interface DecodeContext {
++  objects: OpackValue[];
++  seen: Set<string>;
++}
++
++function decodeValue(buf: Buffer, offset: number, context: DecodeContext): DecodeResult {
++  const { objects, seen } = context;
 +  const tag = buf[offset];
 +  if (tag >= 0xa0 && tag <= 0xc4) {
 +    const width = tag <= 0xc0 ? 0 : tag - 0xc0;
@@ -1319,64 +1320,68 @@ index 7641ce2..73244d9 100644
 +    return { value: objects[index], offset: offset + 1 + width };
 +  }
 +
-+  const result = decodeLiteral(buf, offset, objects);
++  const result = decodeLiteral(buf, offset, context);
 +  const value = result.value;
-+  // Containers, single-byte objects and existing values do not add table entries.
-+  if (result.offset - offset > 1 && !Array.isArray(value) && !(value instanceof Map)
-+      && !objects.some(item => Buffer.isBuffer(item) && Buffer.isBuffer(value)
-+        ? item.equals(value) : Object.is(item, value))) {
-+    objects.push(value);
++  // Deduplicate by encoded bytes, as the encoder does, so equal values with different
++  // encodings (int 100 vs float 100.0, UUID vs data) keep separate reference slots.
++  // ponytail: latin1 key copies each literal once; switch to length-bucketed Buffer.equals if large replies get hot.
++  if (result.offset - offset > 1 && !Array.isArray(value) && !(value instanceof Map)) {
++    const key = buf.toString('latin1', offset, result.offset);
++    if (!seen.has(key)) {
++      seen.add(key);
++      objects.push(value);
++    }
 +  }
 +  return result;
 +}
 +
-+function decodeLiteral(buf: Buffer, offset: number, objects: OpackValue[]): DecodeResult {
++function decodeLiteral(buf: Buffer, offset: number, context: DecodeContext): DecodeResult {
    if (offset >= buf.length) {
      throw new Error('OPACK: unexpected end of buffer');
    }
-@@ -277,6 +317,10 @@ function decodeValue(buf: Buffer, offset: number): DecodeResult {
+@@ -276,6 +322,10 @@ function decodeValue(buf: Buffer, offset: number): DecodeResult {
+     return { value: Buffer.from(buf.subarray(offset + 1, offset + 17)), offset: offset + 17 };
    }
  
-   // Small integers 0..39: tags 0x08..0x2F
 +  if (tag === TAG_MINUS_ONE) {
 +    return { value: -1, offset: offset + 1 };
 +  }
 +
+   // Small integers 0..39: tags 0x08..0x2F
    if (tag >= TAG_SMALL_INT_BASE && tag <= TAG_SMALL_INT_BASE + TAG_SMALL_INT_MAX_VALUE) {
      return { value: tag - TAG_SMALL_INT_BASE, offset: offset + 1 };
-   }
-@@ -359,38 +403,38 @@ function decodeValue(buf: Buffer, offset: number): DecodeResult {
+@@ -359,38 +409,38 @@ function decodeValue(buf: Buffer, offset: number): DecodeResult {
    // Arrays: 0xD0..0xDE inline count, 0xDF = terminated
    if (tag >= TAG_ARRAY_BASE && tag < TAG_ARRAY_BASE + TAG_ARRAY_OVERFLOW) {
      const count = tag - TAG_ARRAY_BASE;
 -    return decodeArrayN(buf, offset + 1, count);
-+    return decodeArrayN(buf, offset + 1, count, objects);
++    return decodeArrayN(buf, offset + 1, count, context);
    }
    if (tag === TAG_ARRAY_BASE + TAG_ARRAY_OVERFLOW) {
 -    return decodeArrayTerminated(buf, offset + 1);
-+    return decodeArrayTerminated(buf, offset + 1, objects);
++    return decodeArrayTerminated(buf, offset + 1, context);
    }
  
    // Dicts: 0xE0..0xEE inline count, 0xEF = terminated
    if (tag >= TAG_DICT_BASE && tag < TAG_DICT_BASE + TAG_DICT_OVERFLOW) {
      const count = tag - TAG_DICT_BASE;
 -    return decodeDictN(buf, offset + 1, count);
-+    return decodeDictN(buf, offset + 1, count, objects);
++    return decodeDictN(buf, offset + 1, count, context);
    }
    if (tag === TAG_DICT_BASE + TAG_DICT_OVERFLOW) {
 -    return decodeDictTerminated(buf, offset + 1);
-+    return decodeDictTerminated(buf, offset + 1, objects);
++    return decodeDictTerminated(buf, offset + 1, context);
    }
  
    throw new Error(`OPACK: unknown tag 0x${tag.toString(16)} at offset ${offset}`);
  }
  
 -function decodeArrayN(buf: Buffer, offset: number, count: number): DecodeResult {
-+function decodeArrayN(buf: Buffer, offset: number, count: number, objects: OpackValue[]): DecodeResult {
++function decodeArrayN(buf: Buffer, offset: number, count: number, context: DecodeContext): DecodeResult {
    const arr: OpackValue[] = [];
    for (let i = 0; i < count; i++) {
 -    const item = decodeValue(buf, offset);
-+    const item = decodeValue(buf, offset, objects);
++    const item = decodeValue(buf, offset, context);
      arr.push(item.value);
      offset = item.offset;
    }
@@ -1384,27 +1389,27 @@ index 7641ce2..73244d9 100644
  }
  
 -function decodeArrayTerminated(buf: Buffer, offset: number): DecodeResult {
-+function decodeArrayTerminated(buf: Buffer, offset: number, objects: OpackValue[]): DecodeResult {
++function decodeArrayTerminated(buf: Buffer, offset: number, context: DecodeContext): DecodeResult {
    const arr: OpackValue[] = [];
    while (offset < buf.length && buf[offset] !== TAG_TERMINATOR) {
 -    const item = decodeValue(buf, offset);
-+    const item = decodeValue(buf, offset, objects);
++    const item = decodeValue(buf, offset, context);
      arr.push(item.value);
      offset = item.offset;
    }
-@@ -400,24 +444,24 @@ function decodeArrayTerminated(buf: Buffer, offset: number): DecodeResult {
+@@ -400,24 +450,24 @@ function decodeArrayTerminated(buf: Buffer, offset: number): DecodeResult {
    return { value: arr, offset };
  }
  
 -function decodeDictN(buf: Buffer, offset: number, count: number): DecodeResult {
-+function decodeDictN(buf: Buffer, offset: number, count: number, objects: OpackValue[]): DecodeResult {
++function decodeDictN(buf: Buffer, offset: number, count: number, context: DecodeContext): DecodeResult {
    const dict: OpackDict = new Map();
    for (let i = 0; i < count; i++) {
 -    const key = decodeValue(buf, offset);
-+    const key = decodeValue(buf, offset, objects);
++    const key = decodeValue(buf, offset, context);
      offset = key.offset;
 -    const val = decodeValue(buf, offset);
-+    const val = decodeValue(buf, offset, objects);
++    const val = decodeValue(buf, offset, context);
      offset = val.offset;
      dict.set(key.value, val.value);
    }
@@ -1412,14 +1417,14 @@ index 7641ce2..73244d9 100644
  }
  
 -function decodeDictTerminated(buf: Buffer, offset: number): DecodeResult {
-+function decodeDictTerminated(buf: Buffer, offset: number, objects: OpackValue[]): DecodeResult {
++function decodeDictTerminated(buf: Buffer, offset: number, context: DecodeContext): DecodeResult {
    const dict: OpackDict = new Map();
    while (offset < buf.length && buf[offset] !== TAG_TERMINATOR) {
 -    const key = decodeValue(buf, offset);
-+    const key = decodeValue(buf, offset, objects);
++    const key = decodeValue(buf, offset, context);
      offset = key.offset;
 -    const val = decodeValue(buf, offset);
-+    const val = decodeValue(buf, offset, objects);
++    const val = decodeValue(buf, offset, context);
      offset = val.offset;
      dict.set(key.value, val.value);
    }
@@ -2454,7 +2459,7 @@ index 8851355..58039f6 100644
 +  close(): void { this.shutdown(new Error('AirPlay connection closed')); }
  }
 diff --git a/src/discovery.ts b/src/discovery.ts
-index 3f67678..9f288b2 100644
+index 3f67678..8e2ef55 100644
 --- a/src/discovery.ts
 +++ b/src/discovery.ts
 @@ -50,13 +50,16 @@ export class DiscoveredDevice {
@@ -2475,24 +2480,16 @@ index 3f67678..9f288b2 100644
      const instance = new Bonjour();
  
      const browser = instance.find({ type: 'airplay', protocol: 'tcp' }, (service: Service) => {
-@@ -78,6 +81,7 @@ export async function scan(options: ScanOptions = {}): Promise<DiscoveredDevice[
-             port: service.port,
-             deviceId: parsed.deviceId,
-             model: parsed.model,
-+            companionPort: companionPorts.get(address),
-           }),
-         );
-       }
-@@ -91,6 +95,8 @@ export async function scan(options: ScanOptions = {}): Promise<DiscoveredDevice[
+@@ -91,24 +94,35 @@ export async function scan(options: ScanOptions = {}): Promise<DiscoveredDevice[
          );
          if (!address) return;
  
+-        for (const device of devices.values()) {
+-          if (device.address === address) {
+-            device.companionPort = service.port;
+-          }
+-        }
 +        companionPorts.set(address, service.port);
-+
-         for (const device of devices.values()) {
-           if (device.address === address) {
-             device.companionPort = service.port;
-@@ -99,16 +105,27 @@ export async function scan(options: ScanOptions = {}): Promise<DiscoveredDevice[
        },
      );
  
@@ -2513,6 +2510,10 @@ index 3f67678..9f288b2 100644
 +      if (cancelled) { reject(options.signal?.reason); return; }
 +      try {
 +        let result = Array.from(devices.values());
++        // Join once after both browsers stop, independent of advertisement order.
++        for (const device of result) {
++          device.companionPort = companionPorts.get(device.address);
++        }
 +        if (options.filter) result = result.filter(options.filter);
 +        resolve(result.sort((a, b) => a.name.localeCompare(b.name)));
 +      } catch (error) {
