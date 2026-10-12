@@ -3,7 +3,7 @@
 These are reproducible extensions to `node-appletv-remote` 0.3.2, with offline
 tests and a separate, explicit-target live harness. Version 0.5 integrates the
 controller into Companion's normal entry point and bundles the patched library.
-Development build 0.5.0-dev.4 runs in the Director's Companion; the earlier
+Development build 0.5.0-dev.10 runs in the Director's Companion; the earlier
 Python environment, keys and package are kept as rollback material. See the root
 README for the normal-user discovery and PIN flow.
 
@@ -592,9 +592,9 @@ lifecycle against a fake connection. They do not prove the TV accepts a command,
 changes physical state, or behaves correctly after reconnect.
 A returned request acknowledgement is not physical confirmation.
 
-Development build 0.5.0-dev.4 has run in the Director's Companion since October
-2, 2026, after earlier dev builds; the Python package and keys are kept as
-rollback material. Personal audio output selection was qualified there with the
+Development builds have run in the Director's Companion since October 2, 2026,
+ending with 0.5.0-dev.10, which fixed the two-hour session drop (#25); the
+Python package and keys are kept as rollback material. Personal audio output selection was qualified there with the
 Director present: nearby and taken-over AirPods, AirPods in the case, TV-side
 switches, sleep/wake and a Companion restart (Media Control Relay #114). There
 is no tagged release; adopting an accepted release and retiring the local
