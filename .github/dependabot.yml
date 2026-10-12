@@ -10,6 +10,11 @@ updates:
     cooldown:
       default-days: 4
       semver-major-days: 30
+    # Companion 5.1.0 accepts only base 2.2.x (package.json "companion").
+    # Move to a newer base line deliberately, with the minimum Companion version.
+    ignore:
+      - dependency-name: '@companion-module/base'
+        update-types: ['version-update:semver-major', 'version-update:semver-minor']
     schedule:
       interval: weekly
     groups:

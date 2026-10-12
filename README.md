@@ -5,6 +5,10 @@ buttons, app launching and Now Playing variables. Version 0.5 runs entirely in
 Companion's Node runtime. Users do not install Python, run a terminal command or
 prepare a credential file.
 
+## Requirements
+
+Companion 5.1.0 or later. Companion 5.0.x refuses to start this module.
+
 ## Setup
 
 1. Import the built package into Companion and add an Apple TV connection.
@@ -144,6 +148,11 @@ The shared `Companion Apple TV` JetBrains inspection profile is selected by the
 inspection gate. It leaves arrow-parameter parentheses to Prettier and disables
 unused-global-symbol findings only under `tests/`, where duck-typed fakes expose
 members indirectly. Other IDE state remains local and ignored.
+
+The minimum Companion version and the module API range it accepts are recorded
+under `companion` in `package.json`. `yarn package` fails when the bundled
+`@companion-module/base` version falls outside that range. Raise both values and
+the Requirements section together when moving to a newer base line.
 
 ```sh
 yarn install --immutable
