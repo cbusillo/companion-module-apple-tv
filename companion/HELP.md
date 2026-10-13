@@ -1,5 +1,7 @@
 # Apple TV
 
+Requires Companion 5.1.0 or later.
+
 No Python or terminal setup is required. Keep Apple TV and Companion reachable
 on the same local network.
 
