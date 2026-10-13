@@ -1,8 +1,8 @@
 diff --git a/README.md b/README.md
-index 1fc2eb1..b5c0df3 100644
+index 1fc2eb1..68adb6a 100644
 --- a/README.md
 +++ b/README.md
-@@ -277,6 +277,79 @@ src/
+@@ -277,6 +277,84 @@ src/
  
  ## Development
  
@@ -17,6 +17,11 @@ index 1fc2eb1..b5c0df3 100644
 +
 +Encrypted Companion frame lengths include their authentication tag. Independent
 +pyatv fixtures verify both encryption and streaming reception of these frames.
++
++Companion request IDs stay in 1..127. A timed-out request keeps its ID reserved for
++30 seconds, or until its late reply arrives, so the reply cannot resolve a newer request.
++`sendCompanionMessage` never runs out of IDs, but throws if you pass an `_x` that a
++pending request is using. Empty frames are passed through unencrypted, as on the wire.
 +
 +The compatibility tests include independent fixtures from pyatv 0.18.0 and the
 +[published OPACK protocol examples](https://pyatv.dev/documentation/protocols/#opack).
@@ -82,7 +87,7 @@ index 1fc2eb1..b5c0df3 100644
  ```bash
  # Install dependencies
  npm install
-@@ -291,4 +364,4 @@ npm test
+@@ -291,4 +369,4 @@ npm test
  npm run test:watch
  ```
  
@@ -445,10 +450,11 @@ index bf59292..ca09b7e 100644
        clientId: 'test',
 diff --git a/src/__tests__/discovery-order.test.ts b/src/__tests__/discovery-order.test.ts
 new file mode 100644
-index 0000000..6d24eb5
+index 0000000..43f8e66
 --- /dev/null
 +++ b/src/__tests__/discovery-order.test.ts
-@@ -0,0 +1,52 @@
+@@ -0,0 +1,66 @@
++/** Tests that scan() pairs AirPlay and Companion mDNS records regardless of arrival or address order. */
 +import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 +import { scan } from '../discovery.js';
 +
@@ -500,9 +506,22 @@ index 0000000..6d24eb5
 +      expect(mock.destroyed).toHaveBeenCalledOnce();
 +    });
 +  }
++
++  it('finds the Companion port when a multihomed TV lists its addresses in a different order', async () => {
++    const pending = scan({ timeout: 10 });
++    mock.callbacks.get('airplay')!({
++      name: 'Synthetic TV', host: 'synthetic-tv.local', addresses: ['192.0.2.10', '192.0.2.11'], port: 7000,
++      txt: { deviceid: 'synthetic-tv', model: 'AppleTV6,2' },
++    });
++    mock.callbacks.get('companion-link')!({
++      host: 'synthetic-tv.local', addresses: ['192.0.2.11', '192.0.2.10'], port: 49153,
++    });
++    await vi.advanceTimersByTimeAsync(10);
++    expect((await pending)[0].companionPort).toBe(49153);
++  });
 +});
 diff --git a/src/companion/__tests__/companion-session.test.ts b/src/companion/__tests__/companion-session.test.ts
-index 1fb65bc..cc1c76c 100644
+index 1fb65bc..bb0679f 100644
 --- a/src/companion/__tests__/companion-session.test.ts
 +++ b/src/companion/__tests__/companion-session.test.ts
 @@ -22,9 +22,9 @@ describe('CompanionSession', () => {
@@ -518,13 +537,28 @@ index 1fb65bc..cc1c76c 100644
  
      const encryptedPayload = encrypted.subarray(4);
      const decrypted = receiver.decrypt(header, encryptedPayload);
+@@ -44,6 +44,13 @@ describe('CompanionSession', () => {
+     }
+   });
+ 
++  it('rejects an oversized payload without consuming a send nonce', () => {
++    const { sender, receiver } = createSessionPair();
++    expect(() => sender.encrypt(FrameType.E_OPACK, Buffer.alloc(0xffffff))).toThrow(/too large/);
++    const encrypted = sender.encrypt(FrameType.E_OPACK, Buffer.from('after'));
++    expect(receiver.decrypt(encrypted.subarray(0, 4), encrypted.subarray(4))).toEqual(Buffer.from('after'));
++  });
++
+   it('fails to decrypt with wrong key', () => {
+     const key1 = generateRandomBytes(32);
+     const key2 = generateRandomBytes(32);
 diff --git a/src/companion/__tests__/event-correlation.test.ts b/src/companion/__tests__/event-correlation.test.ts
 new file mode 100644
-index 0000000..36b837c
+index 0000000..216d8b8
 --- /dev/null
 +++ b/src/companion/__tests__/event-correlation.test.ts
-@@ -0,0 +1,92 @@
-+import { describe, expect, it } from 'vitest';
+@@ -0,0 +1,159 @@
++/** Tests how Companion request IDs are assigned and how replies and events are matched to requests. */
++import { describe, expect, it, vi } from 'vitest';
 +import { CompanionConnection } from '../connection.js';
 +import { CompanionSession } from '../companion-session.js';
 +import { FrameType } from '../framing.js';
@@ -548,7 +582,7 @@ index 0000000..36b837c
 +    destroy(): void {},
 +  };
 +  const receive = (body: OpackDict): void => parser.onData(peer.encrypt(FrameType.E_OPACK, opackEncode(body)));
-+  return { connection, requests, receive };
++  return { connection, requests, receive, parser };
 +}
 +
 +describe('Companion request and event correlation', () => {
@@ -602,6 +636,72 @@ index 0000000..36b837c
 +    } finally { connection.close(); }
 +  });
 +
++  it('does not reuse a timed-out request ID, so a late reply cannot resolve a newer request', async () => {
++    vi.useFakeTimers();
++    const { connection, requests, receive } = fixture();
++    try {
++      const late = connection.sendRequest('_late', new Map<OpackValue, OpackValue>([['_t', 2], ['_c', new Map()]]), 10);
++      const lateId = requests[0].get('_x');
++      const timedOut = expect(late).rejects.toThrow(/timeout/);
++      await vi.advanceTimersByTimeAsync(10);
++      await timedOut;
++      // Wrap the counter all the way round; the timed-out ID must be skipped.
++      for (let n = 0; n < 130; n++) {
++        const pending = connection.sendRequest('_ping', new Map<OpackValue, OpackValue>([['_t', 2], ['_c', new Map()]]));
++        const id = requests.at(-1)!.get('_x');
++        expect(id).not.toBe(lateId);
++        receive(new Map<OpackValue, OpackValue>([['_x', id!], ['_t', 3], ['_c', new Map()]]));
++        await pending;
++      }
++      // Once the late reply arrives, the ID is free again.
++      receive(new Map<OpackValue, OpackValue>([['_x', lateId!], ['_t', 3], ['_c', new Map()]]));
++      for (let n = 0; n < 127; n++) {
++        const pending = connection.sendRequest('_ping', new Map<OpackValue, OpackValue>([['_t', 2], ['_c', new Map()]]));
++        receive(new Map<OpackValue, OpackValue>([['_x', requests.at(-1)!.get('_x')!], ['_t', 3], ['_c', new Map()]]));
++        await pending;
++      }
++      expect(requests.map((r) => r.get('_x'))).toContain(lateId);
++    } finally {
++      connection.close();
++      vi.useRealTimers();
++    }
++  });
++
++  it('sends fire-and-forget messages even when every request ID is in use', () => {
++    const { connection, requests } = fixture();
++    try {
++      for (let n = 0; n < 127; n++) {
++        connection.sendRequest('_held', new Map<OpackValue, OpackValue>([['_t', 2], ['_c', new Map()]])).catch(() => {});
++      }
++      expect(() => connection.sendMessage('_touch', new Map<OpackValue, OpackValue>([['_t', 1], ['_c', new Map()]])))
++        .not.toThrow();
++      expect(requests).toHaveLength(128);
++    } finally { connection.close(); }
++  });
++
++  it('rejects a caller-supplied _x that collides with a pending request', () => {
++    const { connection, requests } = fixture();
++    try {
++      connection.sendRequest('_held', new Map<OpackValue, OpackValue>([['_t', 2], ['_c', new Map()]])).catch(() => {});
++      const held = requests[0].get('_x')!;
++      expect(() => connection.sendMessage('_touch', new Map<OpackValue, OpackValue>([['_t', 1], ['_x', held]])))
++        .toThrow(/in use/);
++    } finally { connection.close(); }
++  });
++
++  it('passes an empty frame through without consuming a receive nonce', async () => {
++    const { connection, requests, receive, parser } = fixture();
++    const errors: Error[] = [];
++    connection.on('error', (error) => errors.push(error));
++    try {
++      const pending = connection.sendRequest('_ping', new Map<OpackValue, OpackValue>([['_t', 2], ['_c', new Map()]]));
++      parser.onData(Buffer.from([FrameType.E_OPACK, 0, 0, 0]));
++      receive(new Map<OpackValue, OpackValue>([['_x', requests[0].get('_x')!], ['_t', 3], ['_c', new Map()]]));
++      expect((await pending).get('_t')).toBe(3);
++      expect(errors).toEqual([]);
++    } finally { connection.close(); }
++  });
++
 +  it('numbers public event messages and subsequent requests independently', async () => {
 +    const { connection, requests, receive } = fixture();
 +    try {
@@ -618,11 +718,11 @@ index 0000000..36b837c
 +});
 diff --git a/src/companion/__tests__/frame-resilience.test.ts b/src/companion/__tests__/frame-resilience.test.ts
 new file mode 100644
-index 0000000..c123b55
+index 0000000..a338bac
 --- /dev/null
 +++ b/src/companion/__tests__/frame-resilience.test.ts
-@@ -0,0 +1,70 @@
-+import { describe, expect, it } from 'vitest';
+@@ -0,0 +1,99 @@
++import { describe, expect, it, vi } from 'vitest';
 +import { CompanionConnection } from '../connection.js';
 +import { CompanionSession } from '../companion-session.js';
 +import { FrameType } from '../framing.js';
@@ -683,6 +783,35 @@ index 0000000..c123b55
 +    } finally { connection.close(); }
 +  });
 +
++  it('keeps the connection after a request timeout and drops its late reply silently', async () => {
++    vi.useFakeTimers();
++    const { connection, requests, reply, errors, dropped } = fixture();
++    const closed: unknown[] = [];
++    connection.on('close', (hadError: unknown) => closed.push(hadError));
++    try {
++      const late = connection.sendRequest('_late', new Map<OpackValue, OpackValue>([['_t', 2], ['_c', new Map()]]), 10);
++      const lateId = requests[0].get('_x')!;
++      const timedOut = expect(late).rejects.toThrow(/timeout/);
++      await vi.advanceTimersByTimeAsync(10);
++      await timedOut;
++      const next = connection.sendRequest('_next', new Map<OpackValue, OpackValue>([['_t', 2], ['_c', new Map()]]));
++      const nextId = requests[1].get('_x')!;
++      expect(nextId).not.toBe(lateId);
++      const events: unknown[] = [];
++      connection.on('event', (event: unknown) => events.push(event));
++      reply(lateId);
++      reply(nextId);
++      expect((await next).get('_x')).toBe(nextId);
++      expect(events).toEqual([]);
++      expect(errors).toEqual([]);
++      expect(dropped).toEqual([]);
++      expect(closed).toEqual([]);
++    } finally {
++      connection.close();
++      vi.useRealTimers();
++    }
++  });
++
 +  it('still reports a frame that fails authentication as a connection error', () => {
 +    const { connection, receiveRaw, errors } = fixture();
 +    try {
@@ -694,15 +823,15 @@ index 0000000..c123b55
 +});
 diff --git a/src/companion/__tests__/framing-compatibility.test.ts b/src/companion/__tests__/framing-compatibility.test.ts
 new file mode 100644
-index 0000000..ff480cb
+index 0000000..9b8e540
 --- /dev/null
 +++ b/src/companion/__tests__/framing-compatibility.test.ts
-@@ -0,0 +1,105 @@
+@@ -0,0 +1,74 @@
 +import { describe, expect, it } from 'vitest';
 +import { CompanionSession } from '../companion-session.js';
 +import { CompanionConnection } from '../connection.js';
 +import { FrameType } from '../framing.js';
-+import { opackDecode, opackEncode, type OpackDict, type OpackValue } from '../opack.js';
++import type { OpackDict } from '../opack.js';
 +
 +// pyatv 0.18.0 Chacha20Cipher(nonce_length=12), bytes(range(32)), counters 0 and 1.
 +// Public synthetic keys and payloads; no pairing or live device data.
@@ -734,37 +863,6 @@ index 0000000..ff480cb
 +}
 +
 +describe('Companion encrypted framing compatibility', () => {
-+  it('uses nonzero transaction IDs and correlates successive public requests', async () => {
-+    const { connection, parser, errors } = receiver();
-+    const peer = new CompanionSession(key, key);
-+    const ids: number[] = [];
-+    parser.socket = {
-+      write(frame: Buffer): void {
-+        const request = opackDecode(peer.decrypt(frame.subarray(0, 4), frame.subarray(4))) as OpackDict;
-+        const id = request.get('_x') as number;
-+        // Observed TV behavior: transaction zero is never acknowledged.
-+        expect(id).toBeGreaterThan(0);
-+        expect(ids).not.toContain(id);
-+        ids.push(id);
-+        const reply = new Map<OpackValue, OpackValue>([['_x', id], ['_t', 3], ['_c', new Map()]]);
-+        queueMicrotask(() => parser.onData(peer.encrypt(FrameType.E_OPACK, opackEncode(reply))));
-+      },
-+      destroy(): void {},
-+    };
-+    try {
-+      for (const identifier of ['_systemInfo', '_sessionStart']) {
-+        const reply = await connection.sendRequest(identifier, new Map<OpackValue, OpackValue>([
-+          ['_t', 2], ['_c', new Map()],
-+        ]));
-+        expect(reply.get('_t')).toBe(3);
-+      }
-+      expect(ids).toHaveLength(2);
-+      expect(errors).toEqual([]);
-+    } finally {
-+      connection.close();
-+    }
-+  });
-+
 +  it('matches an independently encrypted packet including the tag in its header', () => {
 +    const sender = new CompanionSession(key, key);
 +    expect(sender.encrypt(FrameType.E_OPACK, payload)).toEqual(frames[0]);
@@ -805,10 +903,10 @@ index 0000000..ff480cb
 +});
 diff --git a/src/companion/__tests__/opack-compatibility.test.ts b/src/companion/__tests__/opack-compatibility.test.ts
 new file mode 100644
-index 0000000..fb9a21e
+index 0000000..04aec04
 --- /dev/null
 +++ b/src/companion/__tests__/opack-compatibility.test.ts
-@@ -0,0 +1,81 @@
+@@ -0,0 +1,107 @@
 +import { describe, expect, it } from 'vitest';
 +import { opackDecode, opackEncode, OpackFloat } from '../opack.js';
 +
@@ -874,6 +972,32 @@ index 0000000..fb9a21e
 +  it('does not add duplicate literals or references to the object table', () =>
 +    expect(opackDecode(Buffer.from('d543666f6f43666f6fa043626172a1', 'hex')))
 +      .toEqual(['foo', 'foo', 'foo', 'bar', 'bar']));
++
++  it('preserves signed zero and byte-based deduplication in reference order', () => {
++    const bytes = Buffer.from([0xab]);
++    const literals = [new OpackFloat(0), new OpackFloat(-0), new OpackFloat(0), bytes, bytes, 'end'];
++    const packet = Buffer.concat([
++      Buffer.from([0xd7]), ...literals.map(opackEncode), Buffer.from([0xa3]),
++    ]);
++    expect(opackDecode(packet)).toEqual([0, -0, 0, bytes, bytes, 'end', 'end']);
++  });
++
++  it('gives equal values with different encodings separate reference slots, as the encoder does', () => {
++    // int8 100, float64 100.0, then a reference to slot 1 (the float).
++    const numbers = Buffer.concat([
++      Buffer.from('d33064', 'hex'), opackEncode(new OpackFloat(100)), Buffer.from('a1', 'hex'),
++    ]);
++    expect(opackDecode(numbers)).toEqual([100, 100, 100]);
++    // A UUID and a 16-byte data value with the same bytes, then a reference to slot 1 (the data).
++    const bytes = Buffer.alloc(16, 0xab);
++    const uuidAndData = Buffer.concat([
++      Buffer.from('d305', 'hex'), bytes, Buffer.from('80', 'hex'), bytes, Buffer.from('a1', 'hex'),
++    ]);
++    expect(opackDecode(uuidAndData)).toEqual([bytes, bytes, bytes]);
++  });
++
++  it.each(['4361', '6103', '9203006162', 'd2'])('rejects truncated literal %s', hex =>
++    expect(() => opackDecode(Buffer.from(hex, 'hex'))).toThrow(/end of buffer/));
 +
 +  it.each([1, 2, 3, 4])('decodes an extended reference with %s index bytes', width => {
 +    const pointer = Buffer.alloc(1 + width);
@@ -1004,10 +1128,11 @@ index 0000000..adc2669
 +});
 diff --git a/src/companion/__tests__/socket-latency.test.ts b/src/companion/__tests__/socket-latency.test.ts
 new file mode 100644
-index 0000000..3a1fba5
+index 0000000..5d12d32
 --- /dev/null
 +++ b/src/companion/__tests__/socket-latency.test.ts
-@@ -0,0 +1,24 @@
+@@ -0,0 +1,25 @@
++/** Tests that the Companion socket sends small touch and key events without TCP batching delay. */
 +import { createServer, Socket } from 'node:net';
 +import { expect, it, vi } from 'vitest';
 +import { CompanionConnection } from '../connection.js';
@@ -1033,7 +1158,7 @@ index 0000000..3a1fba5
 +  }
 +});
 diff --git a/src/companion/companion-session.ts b/src/companion/companion-session.ts
-index 9500d2e..5e3db8d 100644
+index 9500d2e..c63d910 100644
 --- a/src/companion/companion-session.ts
 +++ b/src/companion/companion-session.ts
 @@ -1,16 +1,24 @@
@@ -1063,25 +1188,32 @@ index 9500d2e..5e3db8d 100644
  export class CompanionSession {
    private outCounter = 0n;
    private inCounter = 0n;
-@@ -25,15 +33,13 @@ export class CompanionSession {
+@@ -25,15 +33,17 @@ export class CompanionSession {
     * Returns a complete frame: 4-byte header + ciphertext + 16-byte auth tag.
     */
    encrypt(frameType: FrameType, plaintext: Buffer): Buffer {
 -    const nonce = generateNonce(this.outCounter);
-+    const nonce = companionNonce(this.outCounter);
-     this.outCounter++;
- 
-     // Build the frame header (used as AAD)
+-    this.outCounter++;
+-
+-    // Build the frame header (used as AAD)
++    // Build the frame header (used as AAD) before advancing the counter, so an
++    // oversized payload throws without desynchronizing the nonce with the peer.
      const header = Buffer.alloc(4);
      header[0] = frameType;
 -    header[1] = (plaintext.length >> 16) & 0xff;
 -    header[2] = (plaintext.length >> 8) & 0xff;
 -    header[3] = plaintext.length & 0xff;
++    if (plaintext.length + AUTH_TAG_LENGTH > 0xffffff) {
++      throw new RangeError('Companion payload too large for a 3-byte frame length');
++    }
 +    header.writeUIntBE(plaintext.length + AUTH_TAG_LENGTH, 1, 3);
++
++    const nonce = companionNonce(this.outCounter);
++    this.outCounter++;
  
      const { ciphertext, tag } = encryptChaCha20(
        this.outKey,
-@@ -51,7 +57,7 @@ export class CompanionSession {
+@@ -51,7 +61,7 @@ export class CompanionSession {
     * The header bytes are needed as AAD.
     */
    decrypt(header: Buffer, encryptedPayload: Buffer): Buffer {
@@ -1091,16 +1223,18 @@ index 9500d2e..5e3db8d 100644
  
      const ciphertext = encryptedPayload.subarray(0, encryptedPayload.length - AUTH_TAG_LENGTH);
 diff --git a/src/companion/connection.ts b/src/companion/connection.ts
-index 351e7fb..03b19c1 100644
+index 351e7fb..6ad0280 100644
 --- a/src/companion/connection.ts
 +++ b/src/companion/connection.ts
-@@ -53,11 +53,15 @@ function ed25519PrivateKeyFromSeed(seed: Buffer): KeyObject {
+@@ -53,11 +53,19 @@ function ed25519PrivateKeyFromSeed(seed: Buffer): KeyObject {
    });
  }
  
-+
 +/** Largest request ID an Apple TV echoes unchanged (one-byte OPACK integers are signed). */
 +const MAX_TRANSFER_ID = 127;
++/** How long a timed-out request ID stays reserved in case its reply arrives late. */
++const LATE_REPLY_WINDOW_MS = 30_000;
++
  export class CompanionConnection extends EventEmitter {
    private socket: Socket | undefined;
    private session: CompanionSession | undefined;
@@ -1108,10 +1242,12 @@ index 351e7fb..03b19c1 100644
 -  private transferId = 0;
 +  // A real TV may treat transaction zero as unacknowledged traffic.
 +  private transferId = 1;
++  // Request IDs that timed out; reserved until the late reply arrives or the window passes.
++  private timedOutIds = new Map<number, NodeJS.Timeout>();
    private pendingRequests = new Map<number, {
      resolve: (value: OpackDict) => void;
      reject: (error: Error) => void;
-@@ -79,12 +83,15 @@ export class CompanionConnection extends EventEmitter {
+@@ -79,12 +87,15 @@ export class CompanionConnection extends EventEmitter {
    private openSocket(): Promise<void> {
      return new Promise((resolve, reject) => {
        this.socket = new Socket();
@@ -1128,45 +1264,77 @@ index 351e7fb..03b19c1 100644
        this.socket.on('data', (data: Buffer) => this.onData(data));
      });
    }
-@@ -252,7 +259,7 @@ export class CompanionConnection extends EventEmitter {
+@@ -252,7 +263,8 @@ export class CompanionConnection extends EventEmitter {
        throw new Error('Companion not connected');
      }
  
 -    const tid = this.transferId++;
 +    const tid = this.nextTransferId();
++    if (tid === undefined) throw new Error('Companion has no free request ID');
      content.set('_i', identifier);
      content.set('_x', tid);
  
-@@ -279,6 +286,20 @@ export class CompanionConnection extends EventEmitter {
-     });
+@@ -263,6 +275,10 @@ export class CompanionConnection extends EventEmitter {
+     return new Promise((resolve, reject) => {
+       const timer = setTimeout(() => {
+         this.pendingRequests.delete(tid);
++        // Keep the ID out of rotation so a late reply cannot resolve a newer request.
++        const release = setTimeout(() => this.timedOutIds.delete(tid), LATE_REPLY_WINDOW_MS);
++        release.unref();
++        this.timedOutIds.set(tid, release);
+         reject(new Error(`Companion request timeout: ${identifier}`));
+       }, timeoutMs);
+ 
+@@ -280,7 +296,26 @@ export class CompanionConnection extends EventEmitter {
    }
  
-+  /**
+   /**
+-   * Send an OPACK message without waiting for a response.
 +   * Apple TVs read one-byte OPACK integers as signed, so an ID from 128 to 255 comes back
 +   * changed (255 returns as -1) and its reply never matches. Keep IDs in 1..127, skipping
-+   * any still awaiting a reply.
++   * any still awaiting a reply or reserved after a timeout.
 +   */
-+  private nextTransferId(): number {
++  private nextTransferId(): number | undefined {
 +    for (let attempt = 0; attempt < MAX_TRANSFER_ID; attempt++) {
 +      const id = this.transferId;
 +      this.transferId = id >= MAX_TRANSFER_ID ? 1 : id + 1;
-+      if (!this.pendingRequests.has(id)) return id;
++      if (!this.isIdInUse(id)) return id;
 +    }
-+    throw new Error('Companion has no free request ID');
++    return undefined;
 +  }
 +
-   /**
-    * Send an OPACK message without waiting for a response.
++  private isIdInUse(id: OpackValue): boolean {
++    return typeof id === 'number' && (this.pendingRequests.has(id) || this.timedOutIds.has(id));
++  }
++
++  /**
++   * Send an OPACK message without waiting for a response. It shares the request ID counter;
++   * when every ID is in use it reuses one rather than throwing, since no reply is awaited.
     */
-@@ -288,6 +309,7 @@ export class CompanionConnection extends EventEmitter {
+   sendMessage(identifier: string, content: OpackDict): void {
+     if (!this.session || !this.socket) {
+@@ -288,6 +323,11 @@ export class CompanionConnection extends EventEmitter {
      }
  
      content.set('_i', identifier);
-+    if (!content.has('_x')) content.set('_x', this.nextTransferId());
++    if (!content.has('_x')) {
++      content.set('_x', this.nextTransferId() ?? this.transferId);
++    } else if (this.isIdInUse(content.get('_x')!)) {
++      throw new Error(`Companion _x ${content.get('_x')} is in use by a pending request`);
++    }
      const payload = opackEncode(content);
      const encrypted = this.session.encrypt(FrameType.E_OPACK, payload);
      this.writeRaw(encrypted);
-@@ -365,11 +387,10 @@ export class CompanionConnection extends EventEmitter {
+@@ -298,6 +338,8 @@ export class CompanionConnection extends EventEmitter {
+       pending.reject(new Error('Connection closed'));
+     }
+     this.pendingRequests.clear();
++    for (const timer of this.timedOutIds.values()) clearTimeout(timer);
++    this.timedOutIds.clear();
+     this.socket?.destroy();
+     this.socket = undefined;
+     this.session = undefined;
+@@ -365,11 +407,10 @@ export class CompanionConnection extends EventEmitter {
  
    private processEncryptedFrames(): void {
      // Encrypted frames: 4-byte header + ciphertext + 16-byte tag
@@ -1181,11 +1349,11 @@ index 351e7fb..03b19c1 100644
  
        if (this.buffer.length < totalLen) break;
  
-@@ -377,12 +398,25 @@ export class CompanionConnection extends EventEmitter {
+@@ -377,12 +418,25 @@ export class CompanionConnection extends EventEmitter {
        const encryptedPayload = this.buffer.subarray(4, totalLen);
        this.buffer = Buffer.from(this.buffer.subarray(totalLen));
  
-+      // An empty frame carries no ciphertext and does not consume a nonce, as in pyatv.
++      // Companion leaves empty frames unencrypted; decrypting one would consume a nonce.
 +      if (payloadLen === 0) continue;
 +
 +      let plaintext: Buffer;
@@ -1211,7 +1379,7 @@ index 351e7fb..03b19c1 100644
        }
      }
    }
-@@ -395,7 +429,7 @@ export class CompanionConnection extends EventEmitter {
+@@ -395,13 +449,20 @@ export class CompanionConnection extends EventEmitter {
      const identifier = dict.get('_i');
  
      // Check if this is a response to a pending request
@@ -1220,8 +1388,21 @@ index 351e7fb..03b19c1 100644
        const pending = this.pendingRequests.get(transferId)!;
        this.pendingRequests.delete(transferId);
        pending.resolve(dict);
+       return;
+     }
+ 
++    // A late reply to a timed-out request frees its ID; it resolves nothing.
++    if (dict.get('_t') === 3 && typeof transferId === 'number' && this.timedOutIds.has(transferId)) {
++      clearTimeout(this.timedOutIds.get(transferId));
++      this.timedOutIds.delete(transferId);
++      return;
++    }
++
+     // Otherwise it's an unsolicited event
+     this.emit('event', { identifier, data: dict });
+   }
 diff --git a/src/companion/opack.ts b/src/companion/opack.ts
-index 7641ce2..73244d9 100644
+index 7641ce2..ea89123 100644
 --- a/src/companion/opack.ts
 +++ b/src/companion/opack.ts
 @@ -11,11 +11,17 @@ export type OpackValue =
@@ -1277,13 +1458,16 @@ index 7641ce2..73244d9 100644
    if (typeof value === 'string') {
      encodeString(value, parts);
      return;
-@@ -150,14 +168,14 @@ function encodeInteger(value: number, parts: Buffer[]): void {
-   // Fall through to int64
-   const buf = Buffer.alloc(9);
-   buf[0] = TAG_INT64;
+@@ -147,17 +165,13 @@ function encodeInteger(value: number, parts: Buffer[]): void {
+     return;
+   }
+ 
+-  // Fall through to int64
+-  const buf = Buffer.alloc(9);
+-  buf[0] = TAG_INT64;
 -  buf.writeBigInt64LE(BigInt(value), 1);
-+  buf.writeBigUInt64LE(BigInt(value), 1);
-   parts.push(buf);
+-  parts.push(buf);
++  encodeBigInt(BigInt(value), parts);
  }
  
  function encodeBigInt(value: bigint, parts: Buffer[]): void {
@@ -1294,21 +1478,27 @@ index 7641ce2..73244d9 100644
    parts.push(buf);
  }
  
-@@ -242,7 +260,7 @@ function encodeDict(value: OpackDict, parts: Buffer[]): void {
+@@ -242,7 +256,7 @@ function encodeDict(value: OpackDict, parts: Buffer[]): void {
  // --- Decoder ---
  
  export function opackDecode(buffer: Buffer): OpackValue {
 -  const result = decodeValue(buffer, 0);
-+  const result = decodeValue(buffer, 0, []);
++  const result = decodeValue(buffer, 0, { objects: [], seen: new Set() });
    return result.value;
  }
  
-@@ -251,7 +269,29 @@ interface DecodeResult {
+@@ -251,7 +265,43 @@ interface DecodeResult {
    offset: number;
  }
  
 -function decodeValue(buf: Buffer, offset: number): DecodeResult {
-+function decodeValue(buf: Buffer, offset: number, objects: OpackValue[]): DecodeResult {
++interface DecodeContext {
++  objects: OpackValue[];
++  seen: Set<string>;
++}
++
++function decodeValue(buf: Buffer, offset: number, context: DecodeContext): DecodeResult {
++  const { objects, seen } = context;
 +  const tag = buf[offset];
 +  if (tag >= 0xa0 && tag <= 0xc4) {
 +    const width = tag <= 0xc0 ? 0 : tag - 0xc0;
@@ -1319,64 +1509,72 @@ index 7641ce2..73244d9 100644
 +    return { value: objects[index], offset: offset + 1 + width };
 +  }
 +
-+  const result = decodeLiteral(buf, offset, objects);
++  const result = decodeLiteral(buf, offset, context);
++  // subarray clamps a short read, so a literal claiming more bytes than remain would decode truncated.
++  if (result.offset > buf.length) {
++    throw new Error('OPACK: unexpected end of buffer');
++  }
 +  const value = result.value;
-+  // Containers, single-byte objects and existing values do not add table entries.
-+  if (result.offset - offset > 1 && !Array.isArray(value) && !(value instanceof Map)
-+      && !objects.some(item => Buffer.isBuffer(item) && Buffer.isBuffer(value)
-+        ? item.equals(value) : Object.is(item, value))) {
-+    objects.push(value);
++  // Deduplicate by encoded bytes, as the encoder does, so equal values with different
++  // encodings (int 100 vs float 100.0, UUID vs data) keep separate reference slots.
++  // ponytail: latin1 key copies each literal once; switch to length-bucketed Buffer.equals if large replies get hot.
++  if (result.offset - offset > 1 && !Array.isArray(value) && !(value instanceof Map)) {
++    const key = buf.toString('latin1', offset, result.offset);
++    if (!seen.has(key)) {
++      seen.add(key);
++      objects.push(value);
++    }
 +  }
 +  return result;
 +}
 +
-+function decodeLiteral(buf: Buffer, offset: number, objects: OpackValue[]): DecodeResult {
++function decodeLiteral(buf: Buffer, offset: number, context: DecodeContext): DecodeResult {
    if (offset >= buf.length) {
      throw new Error('OPACK: unexpected end of buffer');
    }
-@@ -277,6 +317,10 @@ function decodeValue(buf: Buffer, offset: number): DecodeResult {
+@@ -276,6 +326,10 @@ function decodeValue(buf: Buffer, offset: number): DecodeResult {
+     return { value: Buffer.from(buf.subarray(offset + 1, offset + 17)), offset: offset + 17 };
    }
  
-   // Small integers 0..39: tags 0x08..0x2F
 +  if (tag === TAG_MINUS_ONE) {
 +    return { value: -1, offset: offset + 1 };
 +  }
 +
+   // Small integers 0..39: tags 0x08..0x2F
    if (tag >= TAG_SMALL_INT_BASE && tag <= TAG_SMALL_INT_BASE + TAG_SMALL_INT_MAX_VALUE) {
      return { value: tag - TAG_SMALL_INT_BASE, offset: offset + 1 };
-   }
-@@ -359,38 +403,38 @@ function decodeValue(buf: Buffer, offset: number): DecodeResult {
+@@ -359,38 +413,38 @@ function decodeValue(buf: Buffer, offset: number): DecodeResult {
    // Arrays: 0xD0..0xDE inline count, 0xDF = terminated
    if (tag >= TAG_ARRAY_BASE && tag < TAG_ARRAY_BASE + TAG_ARRAY_OVERFLOW) {
      const count = tag - TAG_ARRAY_BASE;
 -    return decodeArrayN(buf, offset + 1, count);
-+    return decodeArrayN(buf, offset + 1, count, objects);
++    return decodeArrayN(buf, offset + 1, count, context);
    }
    if (tag === TAG_ARRAY_BASE + TAG_ARRAY_OVERFLOW) {
 -    return decodeArrayTerminated(buf, offset + 1);
-+    return decodeArrayTerminated(buf, offset + 1, objects);
++    return decodeArrayTerminated(buf, offset + 1, context);
    }
  
    // Dicts: 0xE0..0xEE inline count, 0xEF = terminated
    if (tag >= TAG_DICT_BASE && tag < TAG_DICT_BASE + TAG_DICT_OVERFLOW) {
      const count = tag - TAG_DICT_BASE;
 -    return decodeDictN(buf, offset + 1, count);
-+    return decodeDictN(buf, offset + 1, count, objects);
++    return decodeDictN(buf, offset + 1, count, context);
    }
    if (tag === TAG_DICT_BASE + TAG_DICT_OVERFLOW) {
 -    return decodeDictTerminated(buf, offset + 1);
-+    return decodeDictTerminated(buf, offset + 1, objects);
++    return decodeDictTerminated(buf, offset + 1, context);
    }
  
    throw new Error(`OPACK: unknown tag 0x${tag.toString(16)} at offset ${offset}`);
  }
  
 -function decodeArrayN(buf: Buffer, offset: number, count: number): DecodeResult {
-+function decodeArrayN(buf: Buffer, offset: number, count: number, objects: OpackValue[]): DecodeResult {
++function decodeArrayN(buf: Buffer, offset: number, count: number, context: DecodeContext): DecodeResult {
    const arr: OpackValue[] = [];
    for (let i = 0; i < count; i++) {
 -    const item = decodeValue(buf, offset);
-+    const item = decodeValue(buf, offset, objects);
++    const item = decodeValue(buf, offset, context);
      arr.push(item.value);
      offset = item.offset;
    }
@@ -1384,27 +1582,27 @@ index 7641ce2..73244d9 100644
  }
  
 -function decodeArrayTerminated(buf: Buffer, offset: number): DecodeResult {
-+function decodeArrayTerminated(buf: Buffer, offset: number, objects: OpackValue[]): DecodeResult {
++function decodeArrayTerminated(buf: Buffer, offset: number, context: DecodeContext): DecodeResult {
    const arr: OpackValue[] = [];
    while (offset < buf.length && buf[offset] !== TAG_TERMINATOR) {
 -    const item = decodeValue(buf, offset);
-+    const item = decodeValue(buf, offset, objects);
++    const item = decodeValue(buf, offset, context);
      arr.push(item.value);
      offset = item.offset;
    }
-@@ -400,24 +444,24 @@ function decodeArrayTerminated(buf: Buffer, offset: number): DecodeResult {
+@@ -400,24 +454,24 @@ function decodeArrayTerminated(buf: Buffer, offset: number): DecodeResult {
    return { value: arr, offset };
  }
  
 -function decodeDictN(buf: Buffer, offset: number, count: number): DecodeResult {
-+function decodeDictN(buf: Buffer, offset: number, count: number, objects: OpackValue[]): DecodeResult {
++function decodeDictN(buf: Buffer, offset: number, count: number, context: DecodeContext): DecodeResult {
    const dict: OpackDict = new Map();
    for (let i = 0; i < count; i++) {
 -    const key = decodeValue(buf, offset);
-+    const key = decodeValue(buf, offset, objects);
++    const key = decodeValue(buf, offset, context);
      offset = key.offset;
 -    const val = decodeValue(buf, offset);
-+    const val = decodeValue(buf, offset, objects);
++    const val = decodeValue(buf, offset, context);
      offset = val.offset;
      dict.set(key.value, val.value);
    }
@@ -1412,14 +1610,14 @@ index 7641ce2..73244d9 100644
  }
  
 -function decodeDictTerminated(buf: Buffer, offset: number): DecodeResult {
-+function decodeDictTerminated(buf: Buffer, offset: number, objects: OpackValue[]): DecodeResult {
++function decodeDictTerminated(buf: Buffer, offset: number, context: DecodeContext): DecodeResult {
    const dict: OpackDict = new Map();
    while (offset < buf.length && buf[offset] !== TAG_TERMINATOR) {
 -    const key = decodeValue(buf, offset);
-+    const key = decodeValue(buf, offset, objects);
++    const key = decodeValue(buf, offset, context);
      offset = key.offset;
 -    const val = decodeValue(buf, offset);
-+    const val = decodeValue(buf, offset, objects);
++    const val = decodeValue(buf, offset, context);
      offset = val.offset;
      dict.set(key.value, val.value);
    }
@@ -2454,14 +2652,19 @@ index 8851355..58039f6 100644
 +  close(): void { this.shutdown(new Error('AirPlay connection closed')); }
  }
 diff --git a/src/discovery.ts b/src/discovery.ts
-index 3f67678..9f288b2 100644
+index 3f67678..b9be8a9 100644
 --- a/src/discovery.ts
 +++ b/src/discovery.ts
-@@ -50,13 +50,16 @@ export class DiscoveredDevice {
+@@ -50,19 +50,27 @@ export class DiscoveredDevice {
  export interface ScanOptions {
    timeout?: number;
    filter?: (device: DiscoveredDevice) => boolean;
 +  signal?: AbortSignal;
++}
++
++/** Routable IPv4 addresses, in advertised order (link-local 169.254.x.x excluded). */
++function usableAddresses(service: Service): string[] {
++  return (service.addresses ?? []).filter((a) => a.includes('.') && !a.startsWith('169.254'));
  }
  
  export async function scan(options: ScanOptions = {}): Promise<DiscoveredDevice[]> {
@@ -2469,30 +2672,46 @@ index 3f67678..9f288b2 100644
 +  options.signal?.throwIfAborted();
    const devices = new Map<string, DiscoveredDevice>();
 +  const companionPorts = new Map<string, number>();
++  const airplayAddresses = new Map<string, string[]>();
  
 -  return new Promise((resolve) => {
 +  return new Promise((resolve, reject) => {
      const instance = new Bonjour();
  
      const browser = instance.find({ type: 'airplay', protocol: 'tcp' }, (service: Service) => {
-@@ -78,6 +81,7 @@ export async function scan(options: ScanOptions = {}): Promise<DiscoveredDevice[
-             port: service.port,
-             deviceId: parsed.deviceId,
+-      const address = service.addresses?.find(
+-        (a) => a.includes('.') && !a.startsWith('169.254'),
+-      );
++      const addresses = usableAddresses(service);
++      const address = addresses[0];
+       if (!address) return;
+ 
+       const txt = service.txt as Record<string, string>;
+@@ -80,35 +88,47 @@ export async function scan(options: ScanOptions = {}): Promise<DiscoveredDevice[
              model: parsed.model,
-+            companionPort: companionPorts.get(address),
            }),
          );
++        airplayAddresses.set(key, addresses);
        }
-@@ -91,6 +95,8 @@ export async function scan(options: ScanOptions = {}): Promise<DiscoveredDevice[
-         );
-         if (!address) return;
+     });
  
-+        companionPorts.set(address, service.port);
-+
-         for (const device of devices.values()) {
-           if (device.address === address) {
-             device.companionPort = service.port;
-@@ -99,16 +105,27 @@ export async function scan(options: ScanOptions = {}): Promise<DiscoveredDevice[
+     const companionBrowser = instance.find(
+       { type: 'companion-link', protocol: 'tcp' },
+       (service: Service) => {
+-        const address = service.addresses?.find(
+-          (a) => a.includes('.') && !a.startsWith('169.254'),
+-        );
+-        if (!address) return;
+-
+-        for (const device of devices.values()) {
+-          if (device.address === address) {
+-            device.companionPort = service.port;
+-          }
++        // A multihomed TV may list its addresses in a different order per service,
++        // so index the port under every address rather than only the first.
++        for (const address of usableAddresses(service)) {
++          companionPorts.set(address, service.port);
+         }
        },
      );
  
@@ -2513,6 +2732,11 @@ index 3f67678..9f288b2 100644
 +      if (cancelled) { reject(options.signal?.reason); return; }
 +      try {
 +        let result = Array.from(devices.values());
++        // Join once after both browsers stop, independent of advertisement order.
++        for (const [key, device] of devices) {
++          const match = airplayAddresses.get(key)!.find((a) => companionPorts.has(a));
++          device.companionPort = match === undefined ? undefined : companionPorts.get(match);
++        }
 +        if (options.filter) result = result.filter(options.filter);
 +        resolve(result.sort((a, b) => a.name.localeCompare(b.name)));
 +      } catch (error) {
