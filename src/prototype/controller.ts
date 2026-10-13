@@ -38,6 +38,14 @@ type Options = {
 }
 /** Unanswered commands in a row before an otherwise open session is treated as dead. */
 const TIMEOUT_LIMIT = 3
+/** Largest skip one Companion seek request carries; see `CompanionPrototype.seek`. */
+const SEEK_LIMIT = 60
+
+/** Opposite seek ticks netted to zero while queued, so no request was sent. */
+export class SeekCancelled extends CommandNotSent {}
+
+/** A seek still waiting in the queue; later ticks add to it until it is sent. */
+type PendingSeek = { commands: CompanionPrototype; seconds: number; result?: Promise<void> }
 
 /** One line naming an error and the causes it wraps. */
 function describe(error: unknown): string {
@@ -64,6 +72,7 @@ export class NodeController {
 	private outputs: { id: string; name: string }[] | undefined
 	private route: RouteAudio | undefined
 	private timeouts = 0
+	private pendingSeek: PendingSeek | undefined
 	reconnects = 0
 	constructor(
 		private readonly deviceId: string,
@@ -157,6 +166,7 @@ export class NodeController {
 		const session = this.endSession
 		if (this.stopRequested || this.phase !== 'ready' || !commands?.active || !session)
 			throw new CommandNotSent('Not connected; command not sent')
+		if (action.kind === 'seek') return this.seek(commands, session, action.seconds)
 		const audioRevision = commands.audioRevision
 		await this.queueCommand(session, 'Control failed; delivery uncertain', async () => {
 			if ((action.kind === 'volume' || action.kind === 'mute') && audioRevision !== commands.audioRevision)
@@ -166,8 +176,6 @@ export class NodeController {
 					return commands.press(action.button)
 				case 'media':
 					return commands.media(action.command)
-				case 'seek':
-					return commands.seek(action.seconds)
 				case 'volume':
 					return commands.setVolume(action.percent)
 				case 'swipe':
@@ -182,6 +190,39 @@ export class NodeController {
 					throw new RangeError('Unknown action')
 			}
 		})
+	}
+
+	/**
+	 * Encoder ticks arrive faster than the TV answers. A tick joins the seek still
+	 * waiting at the back of the queue, so a fast spin becomes a few larger skips
+	 * instead of one request per tick. Joined ticks share that request's outcome.
+	 */
+	private async seek(
+		commands: CompanionPrototype,
+		session: { reject(error: Error): void },
+		seconds: number,
+	): Promise<void> {
+		if (!Number.isFinite(seconds) || seconds === 0 || Math.abs(seconds) > SEEK_LIMIT)
+			throw new RangeError('Seek must be nonzero and within sixty seconds')
+		const pending = this.pendingSeek
+		if (pending?.result && pending.commands === commands && Math.abs(pending.seconds + seconds) <= SEEK_LIMIT) {
+			pending.seconds += seconds
+			return pending.result
+		}
+		const entry: PendingSeek = { commands, seconds }
+		const result = this.queueCommand(session, 'Control failed; delivery uncertain', async () => {
+			if (this.pendingSeek === entry) this.pendingSeek = undefined
+			if (entry.seconds === 0) throw new SeekCancelled('Opposite seeks cancelled out; nothing sent')
+			return commands.seek(entry.seconds)
+		})
+		// queueCommand clears any pending seek, so this must follow it.
+		entry.result = result
+		this.pendingSeek = entry
+		const settled = (): void => {
+			if (this.pendingSeek === entry) this.pendingSeek = undefined
+		}
+		result.then(settled, settled)
+		return result
 	}
 
 	private async query<T>(operation: (commands: CompanionPrototype) => Promise<T>): Promise<T> {
@@ -209,6 +250,8 @@ export class NodeController {
 		failureReason: string,
 		operation: () => Promise<T>,
 	): Promise<T> {
+		// Anything queued after a pending seek ends it, so seeks never jump ahead of other input.
+		this.pendingSeek = undefined
 		return this.queue.run(async () => {
 			try {
 				const result = await operation()

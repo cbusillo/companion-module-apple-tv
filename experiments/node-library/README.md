@@ -202,7 +202,9 @@ controller registrations and the production credentials.
 and expires input after 500 ms waiting in the queue. A failed or lost session
 invalidates queued input and feedback. Reconnection rediscovers the selected TV
 with bounded backoff; it never repeats a control. Idle health checks share the
-queue, so they cannot interrupt a button-down/up pair or swipe.
+queue, so they cannot interrupt a button-down/up pair or swipe. A seek queued
+behind another request absorbs later seek ticks, netting opposite directions, up
+to the 60-second request limit; the TV still receives one `_mcc` 7 per sent seek.
 
 The command layer supports navigation, Select, Back, Home, Home hold, App Switcher,
 Control Center, play/pause, play, pause, next/previous, relative and absolute volume,

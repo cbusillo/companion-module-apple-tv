@@ -1,5 +1,5 @@
 import { CompanionPairSetup, scan, type DiscoveredDevice, type HAPCredentials } from 'node-appletv-remote'
-import { NodeController, type ControllerLog, type RemoteAction } from './prototype/controller.js'
+import { NodeController, SeekCancelled, type ControllerLog, type RemoteAction } from './prototype/controller.js'
 import { bounded } from './prototype/session.js'
 import { CommandNotSent } from './prototype/queue.js'
 import { CompanionRequestRejected, UnsupportedCommand } from './prototype/companion.js'
@@ -401,13 +401,15 @@ export class NodeBackend {
 			if (this.controller !== controller) return
 			this.hooks.values({
 				last_result:
-					error instanceof CommandNotSent
-						? 'not sent; connection changed or command expired'
-						: error instanceof UnsupportedCommand
-							? 'unavailable for current playback or audio output'
-							: error instanceof CompanionRequestRejected
-								? 'rejected by Apple TV; not retried'
-								: 'delivery uncertain; not retried',
+					error instanceof SeekCancelled
+						? 'opposite seeks cancelled out; nothing sent'
+						: error instanceof CommandNotSent
+							? 'not sent; connection changed or command expired'
+							: error instanceof UnsupportedCommand
+								? 'unavailable for current playback or audio output'
+								: error instanceof CompanionRequestRejected
+									? 'rejected by Apple TV; not retried'
+									: 'delivery uncertain; not retried',
 			})
 		}
 	}

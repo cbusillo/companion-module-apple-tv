@@ -22,6 +22,9 @@ until you have accepted the replacement.
 
 Remote command offers navigation, playback, volume, seeks, swipes, App Switcher,
 Control Center, Screensaver and power. Launch App lists the TV's applications.
+Seeks sent faster than the TV answers, such as from an encoder, are combined into
+fewer skips of up to 60 seconds each; opposite turns subtract. Fast YouTube scrubbing
+with an encoder was confirmed on a real Apple TV.
 Available playback commands and Now Playing metadata depend on the active app.
 Text entry is not implemented.
 

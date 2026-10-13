@@ -121,6 +121,13 @@ used because it did not reliably select AirPods.
 
 - One serialized action queue, at most eight operations, with input expiring
   after 500 ms waiting. Complete button and swipe gestures stay together.
+- Seek ticks that arrive while an earlier seek is still waiting to be sent add
+  to it, so a fast encoder spin becomes a few larger skips instead of one
+  request per tick. One request carries at most 60 seconds; a tick that would
+  pass that starts the next queued seek. A tick in the other direction subtracts,
+  and ticks that cancel out send nothing. Ticks never join a seek queued before
+  other input, and joined ticks share that request's result. The owner confirmed
+  fast YouTube scrubbing on the real Apple TV on October 12, 2026.
 - Failed or lost sessions discard queued actions and stale feedback. Controls
   are never automatically retried, including after uncertain delivery.
 - Remote and metadata connections reconnect together using saved pairing and
