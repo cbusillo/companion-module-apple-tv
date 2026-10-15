@@ -1,8 +1,31 @@
 diff --git a/README.md b/README.md
-index 29f40c1..8865091 100644
+index 29f40c1..3b20a28 100644
 --- a/README.md
 +++ b/README.md
-@@ -147,6 +147,64 @@ atv.sendCompanionMessage('_interest', new Map([['_regEvents', ['SystemStatus']]]
+@@ -24,7 +24,12 @@ atv artwork [deviceId] [out.jpg]  # save current artwork
+ atv messages [deviceId]           # stream raw MRP messages until Ctrl+C
+ ```
+ 
+-Credentials are saved to `~/.atv-credentials.json`. Leave out `deviceId` to use the most recently paired device.
++Credentials are saved to `~/.atv-credentials.json`. Leave out `deviceId` to use the most recently paired device. Each device's last working address is cached in `~/.atv-devices.json`, so commands skip the network scan. If the TV has moved, the CLI rescans automatically.
++
++Two timing knobs exist for older or slower Apple TVs. Both default to `0`:
++
++- `ATV_SETTLE_MS`: pause after the MRP handshake before sending anything (previously a fixed 500 ms). Library equivalent: `atv.connect(credentials, { settleMs: 500 })`.
++- `ATV_POST_SEND_MS`: pause after `atv command` sends a key, before disconnecting (previously a fixed 1000 ms).
+ 
+ ```
+ $ atv state
+@@ -47,6 +52,8 @@ Requires Node.js 18+ (ESM).
+ import { scan, AppleTV } from 'node-appletv-remote';
+ 
+ const [device] = await scan({ timeout: 5000 });
++// or stop as soon as the TV you want shows up:
++// await scan({ until: (d) => d.name === 'Living Room' });
+ const atv = new AppleTV(device);
+ 
+ // AirPlay pairing: a PIN appears on the TV
+@@ -147,6 +154,65 @@ atv.sendCompanionMessage('_interest', new Map([['_regEvents', ['SystemStatus']]]
  
  The OPACK and framing tests use fixtures from pyatv 0.18.0 and the [published OPACK examples](https://pyatv.dev/documentation/protocols/#opack).
  
@@ -44,8 +67,9 @@ index 29f40c1..8865091 100644
 +## AirPlay connection lifetime
 +
 +Each `AirPlayConnection` owns one lifetime. Pass an optional fourth constructor
-+argument `{ timeoutMs, logger }` to set the socket/HTTP/write deadline (default
-+10 seconds) and replace debug logging. `connect({ signal })` accepts cancellation
++argument `{ timeoutMs, logger, settleMs }` to set the write/HTTP/RTSP deadline
++(default 10 seconds; TCP connects use the smaller of it and 5 seconds), replace
++debug logging, and pause after the handshake. A number is still read as `settleMs`. `connect({ signal })` accepts cancellation
 +throughout setup and the connected lifetime. Use a new instance after close or
 +failure. `scan({ signal })` also cancels its mDNS browsers and deadline.
 +
@@ -87,14 +111,21 @@ index 10b4132..4543c03 100644
  const root = new protobuf.Root();
 diff --git a/src/__tests__/airplay-lifecycle.test.ts b/src/__tests__/airplay-lifecycle.test.ts
 new file mode 100644
-index 0000000..7ca26a5
+index 0000000..f2338c0
 --- /dev/null
 +++ b/src/__tests__/airplay-lifecycle.test.ts
-@@ -0,0 +1,296 @@
+@@ -0,0 +1,326 @@
++/**
++ * Tests for the AirPlay connection lifetime: RTSP replies matched by CSeq, MRP replies by
++ * identifier, timeouts, one heartbeat at a time, cancellation, and cleanup on close.
++ * Replies are built by hand from the wire format, not with the code under test.
++ */
 +import { createServer, type AddressInfo, type Socket } from 'node:net';
 +import { setTimeout as delay } from 'node:timers/promises';
 +import { describe, expect, it, vi } from 'vitest';
 +import { AirPlayConnection } from '../connection.js';
++import { AppleTV } from '../appletv.js';
++import { Credentials } from '../credentials.js';
 +import { HAPSession } from '../util/hap-session.js';
 +import { MRPMessage, MessageType } from '../mrp/messages.js';
 +import { buildDataStreamFrame } from '../util/data-stream.js';
@@ -163,6 +194,7 @@ index 0000000..7ca26a5
 +      vi.useRealTimers();
 +    }
 +  });
++
 +  it('keeps decrypted partial replies separate from encrypted TCP fragments', async () => {
 +    const f = fixture();
 +    const pending = outcome(f.transport.sendRTSP('POST', '/feedback'));
@@ -264,7 +296,7 @@ index 0000000..7ca26a5
 +
 +  it('fails only the request on a non-fatal MRP timeout and ignores its late reply', async () => {
 +    const f = fixture();
-+    const request = await MRPMessage.setSystemAudioOutputs(['synthetic-output']);
++    const request = await MRPMessage.sendCommand(MessageType.GetState);
 +    const decoded = await MRPMessage.decode(request);
 +    const messages: Record<string, unknown>[] = [];
 +    f.connection.on('mrp-message', message => messages.push(message));
@@ -387,6 +419,28 @@ index 0000000..7ca26a5
 +    });
 +  });
 +});
++
++describe('AppleTV over AirPlay', () => {
++  it('rejects AppleTV.connect() without an unhandled error when the peer hangs up', async () => {
++    const sockets = new Set<Socket>();
++    const server = createServer(socket => { sockets.add(socket); socket.destroy(); });
++    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
++    try {
++      const { port } = server.address() as AddressInfo;
++      const atv = new AppleTV({ name: 'TV', address: '127.0.0.1', port, deviceId: 'aa:bb', model: 'AppleTV6,2' });
++      const closes = vi.fn();
++      atv.on('close', closes);
++      vi.spyOn(console, 'error').mockImplementation(() => {});
++      const result = await outcome(atv.connect(new Credentials(credentials)));
++      expect(result.error?.message).toMatch(/closed|ECONNRESET|EPIPE/i);
++      expect(closes).toHaveBeenCalledOnce();
++      await atv.close();
++    } finally {
++      vi.restoreAllMocks();
++      await new Promise<void>(resolve => server.close(() => resolve()));
++    }
++  });
++});
 diff --git a/src/__tests__/connection.test.ts b/src/__tests__/connection.test.ts
 index bf59292..ca09b7e 100644
 --- a/src/__tests__/connection.test.ts
@@ -440,7 +494,7 @@ index bf59292..ca09b7e 100644
      const conn = new AirPlayConnection('192.168.1.100', 7000, {
        clientId: 'test',
 diff --git a/src/__tests__/discovery-order.test.ts b/src/__tests__/discovery-order.test.ts
-index a9789e8..43f8e66 100644
+index a9789e8..41ad5df 100644
 --- a/src/__tests__/discovery-order.test.ts
 +++ b/src/__tests__/discovery-order.test.ts
 @@ -17,6 +17,23 @@ beforeEach(() => { vi.useFakeTimers(); mock.callbacks.clear(); vi.clearAllMocks(
@@ -467,6 +521,359 @@ index a9789e8..43f8e66 100644
    for (const order of [['airplay', 'companion-link'], ['companion-link', 'airplay']]) {
      it(`finds the Companion port when ${order[0]} arrives first`, async () => {
        const services: Record<string, Record<string, unknown>> = {
+@@ -47,3 +64,35 @@ describe('mDNS service ordering', () => {
+     expect((await pending)[0].companionPort).toBe(49153);
+   });
+ });
++
++describe('scan until', () => {
++  const tv = { name: 'Synthetic TV', addresses: ['192.0.2.10'], port: 7000, txt: { deviceid: 'synthetic-tv', model: 'AppleTV6,2' } };
++
++  it('resolves as soon as a device matches, without waiting for the timeout', async () => {
++    const pending = scan({ timeout: 5000, until: (d) => d.deviceId === 'synthetic-tv' });
++    mock.callbacks.get('airplay')!(tv);
++    await vi.advanceTimersByTimeAsync(0);
++    const devices = await pending;
++    expect(devices.map((d) => d.deviceId)).toEqual(['synthetic-tv']);
++    expect(mock.destroyed).toHaveBeenCalledOnce();
++  });
++
++  it('checks the condition after the Companion join, so it can wait for the Companion port', async () => {
++    let settled = false;
++    const pending = scan({ timeout: 5000, until: (d) => !!d.companionPort }).then((r) => { settled = true; return r; });
++    mock.callbacks.get('airplay')!(tv);
++    await vi.advanceTimersByTimeAsync(0);
++    expect(settled).toBe(false);
++    mock.callbacks.get('companion-link')!({ addresses: ['192.0.2.10'], port: 49153 });
++    await vi.advanceTimersByTimeAsync(0);
++    expect((await pending)[0].companionPort).toBe(49153);
++  });
++
++  it('falls back to the timeout when nothing matches', async () => {
++    const pending = scan({ timeout: 10, until: () => false });
++    mock.callbacks.get('airplay')!(tv);
++    await vi.advanceTimersByTimeAsync(10);
++    expect(await pending).toHaveLength(1);
++    expect(mock.destroyed).toHaveBeenCalledOnce();
++  });
++});
+diff --git a/src/__tests__/speed.test.ts b/src/__tests__/speed.test.ts
+new file mode 100644
+index 0000000..2a99053
+--- /dev/null
++++ b/src/__tests__/speed.test.ts
+@@ -0,0 +1,62 @@
++/** Tests for connect-speed changes: socket options/timeout and the CLI's cached-address fallback. */
++import { afterEach, describe, expect, it, vi } from 'vitest';
++import { createServer, Socket, type AddressInfo } from 'node:net';
++import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { connectSocket } from '../connection.js';
++import { withCachedDevice } from '../cli/device-cache.js';
++import type { DiscoveredDeviceInfo } from '../discovery.js';
++
++afterEach(() => vi.restoreAllMocks());
++
++describe('connectSocket', () => {
++  it('disables Nagle so small MRP writes are sent immediately', async () => {
++    const server = createServer((s) => s.destroy()).listen(0, '127.0.0.1');
++    await new Promise((r) => server.once('listening', r));
++    const spy = vi.spyOn(Socket.prototype, 'setNoDelay');
++    const sock = await connectSocket('127.0.0.1', (server.address() as AddressInfo).port);
++    expect(spy).toHaveBeenCalledWith(true);
++    sock.destroy();
++    server.close();
++  });
++
++  it('rejects instead of hanging when the host does not answer', async () => {
++    // 192.0.2.0/24 is TEST-NET-1: never routed, so the SYN goes unanswered (or fails fast).
++    await expect(connectSocket('192.0.2.1', 7000, 50)).rejects.toThrow();
++  });
++});
++
++const device: DiscoveredDeviceInfo = { name: 'TV', address: '192.0.2.10', port: 7000, deviceId: 'aa:bb', model: 'AppleTV6,2' };
++const cacheFile = (contents?: object) => {
++  const file = join(mkdtempSync(join(tmpdir(), 'atv-')), 'devices.json');
++  if (contents) writeFileSync(file, JSON.stringify(contents));
++  return file;
++};
++
++describe('device cache', () => {
++  it('connects to the cached device without scanning', async () => {
++    const rescan = vi.fn();
++    const result = await withCachedDevice(cacheFile({ 'aa:bb': device }), 'aa:bb', rescan, async (d) => d.address);
++    expect(result).toBe('192.0.2.10');
++    expect(rescan).not.toHaveBeenCalled();
++  });
++
++  it('rescans, retries once, and caches the new address when the cached one fails', async () => {
++    const file = cacheFile({ 'aa:bb': device });
++    const moved = { ...device, address: '192.0.2.20' };
++    const connect = vi.fn(async (d: DiscoveredDeviceInfo) => {
++      if (d.address === device.address) throw new Error('ECONNREFUSED');
++      return d.address;
++    });
++    expect(await withCachedDevice(file, 'aa:bb', async () => moved, connect)).toBe('192.0.2.20');
++    expect(connect).toHaveBeenCalledTimes(2);
++    expect(JSON.parse(readFileSync(file, 'utf-8'))['aa:bb'].address).toBe('192.0.2.20');
++  });
++
++  it('scans and caches when nothing is cached (missing file)', async () => {
++    const file = cacheFile();
++    expect(await withCachedDevice(file, 'aa:bb', async () => device, async (d) => d.port)).toBe(7000);
++    expect(JSON.parse(readFileSync(file, 'utf-8'))['aa:bb']).toEqual(device);
++  });
++});
+diff --git a/src/appletv.ts b/src/appletv.ts
+index 72acde0..c97f7f9 100644
+--- a/src/appletv.ts
++++ b/src/appletv.ts
+@@ -45,6 +45,15 @@ export enum TextInputActionType {
+   ClearText = 4,
+ }
+ 
++/** Options for AppleTV.connect(). */
++export interface ConnectOptions {
++  /**
++   * Pause after the MRP handshake before connect() resolves, in ms; default 0.
++   * Raise it (e.g. 500) if a command sent right after connecting is ignored.
++   */
++  settleMs?: number;
++}
++
+ /**
+  * Buttons accepted by sendKeyCommand(). Values are HID_KEY_MAP names; keys without
+  * a HID mapping (play, pause, next, previous, skip, wake, suspend, home_hold) are
+@@ -180,10 +189,12 @@ export class AppleTV extends EventEmitter {
+   }
+ 
+   /** Open the AirPlay/MRP connection with stored credentials; emits `connect` once ready. */
+-  async connect(credentials: Credentials): Promise<void> {
+-    this.connection = new AirPlayConnection(this.address, this.port, credentials);
++  async connect(credentials: Credentials, options: ConnectOptions = {}): Promise<void> {
++    this.connection = new AirPlayConnection(this.address, this.port, credentials, { settleMs: options.settleMs });
+     this.connection.on('close', () => this.emit('close'));
+-    this.connection.on('error', (err) => this.emit('error', err));
++    // The failure that ends the connection also rejects connect() and pending requests,
++    // so it is only re-emitted to listeners rather than thrown as an unhandled 'error'.
++    this.connection.on('error', (err) => { if (this.listenerCount('error')) this.emit('error', err); });
+     this.connection.on('mrp-message', (msg: Record<string, unknown>) => {
+       this.handleMRPMessage(msg);
+     });
+diff --git a/src/cli/device-cache.ts b/src/cli/device-cache.ts
+new file mode 100644
+index 0000000..cfd652b
+--- /dev/null
++++ b/src/cli/device-cache.ts
+@@ -0,0 +1,43 @@
++/**
++ * CLI cache of each paired device's last-known address, so commands can skip the
++ * mDNS scan. A stale entry (TV changed IP or port) falls back to a fresh scan.
++ */
++import { readFileSync, writeFileSync } from 'node:fs';
++import type { DiscoveredDeviceInfo } from '../discovery.js';
++
++type Cache = Record<string, DiscoveredDeviceInfo>;
++
++/** Read every cached entry; a missing or unreadable file is an empty cache. */
++function readCache(file: string): Cache {
++  try {
++    return JSON.parse(readFileSync(file, 'utf-8'));
++  } catch {
++    return {};
++  }
++}
++
++/**
++ * Run `connect` against the device cached under `id` in `file`. If there is none or
++ * it fails, `rescan` and run `connect` once more, caching the fresh device on success.
++ */
++export async function withCachedDevice<T>(
++  file: string,
++  id: string,
++  rescan: () => Promise<DiscoveredDeviceInfo>,
++  connect: (device: DiscoveredDeviceInfo) => Promise<T>,
++): Promise<T> {
++  const cache = readCache(file);
++  const cached = cache[id];
++  if (cached) {
++    try {
++      return await connect(cached);
++    } catch {
++      // Stale address; fall through to a fresh scan.
++    }
++  }
++  const device = await rescan();
++  const result = await connect(device);
++  cache[id] = device;
++  writeFileSync(file, JSON.stringify(cache, null, 2));
++  return result;
++}
+diff --git a/src/cli/index.ts b/src/cli/index.ts
+index e528203..1e90673 100644
+--- a/src/cli/index.ts
++++ b/src/cli/index.ts
+@@ -11,12 +11,15 @@ import { MessageType } from '../mrp/messages.js';
+ import { Credentials } from '../credentials.js';
+ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+ import { join } from 'node:path';
++import { withCachedDevice } from './device-cache.js';
+ import { createInterface } from 'node:readline';
+ import type { Message } from '../message.js';
+ import type { KeyboardInfo, TextInputEvent, CompanionEvent } from '../appletv.js';
+ 
+ /** Where paired credentials are stored (falls back to the current directory if HOME is unset). */
+ const CREDS_FILE = join(process.env.HOME ?? '.', '.atv-credentials.json');
++/** Last-known address of each paired device, so commands can skip the mDNS scan. */
++const DEVICES_FILE = join(process.env.HOME ?? '.', '.atv-devices.json');
+ 
+ /** Ask one question on stdin and resolve with the raw answer. */
+ function prompt(question: string): Promise<string> {
+@@ -107,47 +110,63 @@ function loadCredentials(deviceId?: string): { id: string; credentials: Credenti
+ }
+ 
+ /**
+- * Scan and return the device whose ID equals or contains `id`, or whose name contains it (case-insensitive).
++ * Scan (stopping early once found) and return the device whose ID equals or contains `id`, or whose name contains it (case-insensitive).
+  * @throws if nothing matches; the message lists the devices that were found.
+  */
+-async function findDevice(id: string): Promise<DiscoveredDeviceInfo> {
++async function findDevice(id: string, needCompanion: boolean): Promise<DiscoveredDeviceInfo> {
+   console.log('Finding device...');
+-  const devices = await scan({ timeout: 5000 });
+   const idLower = id.toLowerCase();
+-  const device = devices.find((d) =>
++  const matches = (d: DiscoveredDeviceInfo) =>
+     d.deviceId.toLowerCase() === idLower ||
+     d.name.toLowerCase().includes(idLower) ||
+-    d.deviceId.toLowerCase().includes(idLower),
+-  );
++    d.deviceId.toLowerCase().includes(idLower);
++  // Stop as soon as the device (and, if needed, its Companion port) has arrived.
++  const devices = await scan({ timeout: 5000, until: (d) => matches(d) && (!needCompanion || !!d.companionPort) });
++  const device = devices.find(matches);
+   if (!device) {
+     throw new Error(`Device not found on network (looking for "${id}"). Found: ${devices.map((d) => `${d.name} [${d.deviceId}]`).join(', ')}`);
+   }
+   return device;
+ }
+ 
+-/** Load credentials, find the device on the network, and open an AirPlay/MRP connection. */
++/** Run `connect` against the device's cached address, rescanning once if that fails. */
++function connectCached<T>(
++  id: string,
++  needCompanion: boolean,
++  connect: (device: DiscoveredDeviceInfo) => Promise<T>,
++): Promise<T> {
++  return withCachedDevice(DEVICES_FILE, id, () => findDevice(id, needCompanion), connect);
++}
++
++/** Load credentials, locate the device (cache first, then mDNS), and open an AirPlay/MRP connection. */
+ async function connectToDevice(deviceId?: string): Promise<AppleTV> {
+   const { id, credentials } = loadCredentials(deviceId);
+-  const device = await findDevice(id);
+-
+-  console.log(`Connecting to ${device.name} (${device.address}:${device.port})...`);
+-  const atv = new AppleTV(device);
+-  await atv.connect(credentials);
+-  return atv;
++  return connectCached(id, false, async (device) => {
++    console.log(`Connecting to ${device.name} (${device.address}:${device.port})...`);
++    const atv = new AppleTV(device);
++    try {
++      await atv.connect(credentials, { settleMs: Number(process.env.ATV_SETTLE_MS) || 0 });
++    } catch (e) {
++      await atv.close();
++      throw e;
++    }
++    return atv;
++  });
+ }
+ 
+-/** `atv command <cmd> [device]`: send one key, wait 1 s for it to land, then disconnect. */
++/** `atv command <cmd> [device]`: send one key, wait `ATV_POST_SEND_MS` (default 0), then disconnect. */
+ async function cmdCommand(command: string, deviceId?: string) {
+-  const atv = await connectToDevice(deviceId);
+-
+   if (!COMMAND_SET.has(command)) {
+     console.log(`Unknown command: ${command}`);
+     console.log(`Available: ${COMMAND_NAMES.join(', ')}`);
+-  } else {
+-    await atv.sendKeyCommand(command as Key);
+-    console.log(`Sent: ${command}`);
+-    await delay(1000);
++    return;
+   }
++  const atv = await connectToDevice(deviceId);
++  await atv.sendKeyCommand(command as Key);
++  console.log(`Sent: ${command}`);
++  // ponytail: writes have already reached the kernel, so no wait by default. Raise
++  // ATV_POST_SEND_MS (old value 1000) if a key is dropped when the CLI exits.
++  await delay(Number(process.env.ATV_POST_SEND_MS) || 0);
+   await atv.close();
+ }
+ 
+@@ -367,14 +386,15 @@ async function cmdCompanionTest(deviceId?: string) {
+     throw new Error('No companion credentials. Run "atv companion-pair" first.');
+   }
+ 
+-  const device = await findDevice(id);
+-  if (!device.companionPort) {
+-    throw new Error('Device has no companion-link port');
+-  }
+-
+-  const atv = new AppleTV(device);
+-  console.log(`Connecting companion to ${device.name} (${device.address}:${device.companionPort})...`);
+-  await atv.connectCompanion(credentials.companionCredentials);
++  const atv = await connectCached(id, true, async (device) => {
++    if (!device.companionPort) {
++      throw new Error('Device has no companion-link port');
++    }
++    const atv = new AppleTV(device);
++    console.log(`Connecting companion to ${device.name} (${device.address}:${device.companionPort})...`);
++    await atv.connectCompanion(credentials.companionCredentials!);
++    return atv;
++  });
+   console.log('Companion connected! Listening for events (Ctrl+C to stop)...\n');
+ 
+   atv.on('companionEvent', (event: CompanionEvent) => {
+diff --git a/src/companion/__tests__/connect-close.test.ts b/src/companion/__tests__/connect-close.test.ts
+new file mode 100644
+index 0000000..7351ca0
+--- /dev/null
++++ b/src/companion/__tests__/connect-close.test.ts
+@@ -0,0 +1,30 @@
++/** Tests that close() during the TCP connect leaves no socket behind. */
++import { createServer, type AddressInfo } from 'node:net';
++import { expect, it } from 'vitest';
++import { CompanionConnection } from '../connection.js';
++
++it('destroys a socket that finishes connecting after close()', async () => {
++  let accepted = 0;
++  let resolvePeerClosed!: () => void;
++  const peerClosed = new Promise<void>(resolve => { resolvePeerClosed = resolve; });
++  const server = createServer(socket => {
++    accepted++;
++    socket.resume();
++    socket.on('close', () => resolvePeerClosed());
++  });
++  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
++  try {
++    const { port } = server.address() as AddressInfo;
++    const key = Buffer.alloc(32, 7);
++    const connection = new CompanionConnection('127.0.0.1', port, {
++      clientId: 'synthetic', serverId: 'synthetic', clientLTSK: key, clientLTPK: key, serverLTPK: key,
++    });
++    const connecting = connection.connect();
++    connection.close();
++    await expect(connecting).rejects.toThrow(/closed/i);
++    await peerClosed;
++    expect(accepted).toBe(1);
++  } finally {
++    await new Promise<void>(resolve => server.close(() => resolve()));
++  }
++});
 diff --git a/src/companion/__tests__/frame-resilience.test.ts b/src/companion/__tests__/frame-resilience.test.ts
 new file mode 100644
 index 0000000..a338bac
@@ -667,10 +1074,20 @@ index 0000000..148c4f1
 +  });
 +});
 diff --git a/src/companion/connection.ts b/src/companion/connection.ts
-index 8e0da48..242771a 100644
+index 8e0da48..48f4909 100644
 --- a/src/companion/connection.ts
 +++ b/src/companion/connection.ts
-@@ -73,7 +73,9 @@ function envelope(content: OpackDict, type: number): OpackDict {
+@@ -5,7 +5,8 @@
+  */
+ 
+ import { EventEmitter } from 'node:events';
+-import { Socket } from 'node:net';
++import type { Socket } from 'node:net';
++import { connectSocket } from '../connection.js';
+ import {
+   generateKeyPairSync,
+   diffieHellman,
+@@ -73,7 +74,9 @@ function envelope(content: OpackDict, type: number): OpackDict {
  
  /**
   * An authenticated, encrypted Companion link to one Apple TV.
@@ -681,17 +1098,61 @@ index 8e0da48..242771a 100644
   */
  export class CompanionConnection extends EventEmitter {
    private socket: Socket | undefined;
-@@ -120,7 +122,8 @@ export class CompanionConnection extends EventEmitter {
-         reject(err);
-         this.emit('error', err);
-       });
--      this.socket.on('close', () => this.emit('close'));
-+      // Listeners can tell a reset or failed socket from an orderly close by the peer.
-+      this.socket.on('close', (hadError: boolean) => this.emit('close', hadError));
-       this.socket.on('data', (data: Buffer) => this.onData(data));
-     });
+@@ -81,6 +84,8 @@ export class CompanionConnection extends EventEmitter {
+   private buffer: Buffer = Buffer.alloc(0);
+   // A real TV may treat transaction zero as unacknowledged traffic.
+   private transferId = 1;
++  /** Incremented by close(), so a socket that finishes connecting after close() is discarded. */
++  private closeGeneration = 0;
+   // Request IDs that timed out; reserved until the late reply arrives or the window passes.
+   private timedOutIds = new Map<number, NodeJS.Timeout>();
+   /** Requests awaiting a `_t: 3` reply, keyed by their `_x` ID. */
+@@ -107,22 +112,21 @@ export class CompanionConnection extends EventEmitter {
    }
-@@ -453,8 +456,9 @@ export class CompanionConnection extends EventEmitter {
+ 
+   /**
+-   * Connect the socket and wire its events. Socket errors both reject the pending
+-   * connect and are re-emitted as `error`.
++   * Connect the socket (Nagle off, 5 s timeout) and wire its events; later errors are re-emitted as `error`.
++   * @throws if close() is called while the socket is still connecting; that socket is destroyed.
+    */
+-  private openSocket(): Promise<void> {
+-    return new Promise((resolve, reject) => {
+-      this.socket = new Socket();
+-      // Touch events are paced by the caller; Nagle buffering distorts gestures.
+-      this.socket.setNoDelay(true);
+-      this.socket.connect(this.port, this.host, () => resolve());
+-      this.socket.on('error', (err) => {
+-        reject(err);
+-        this.emit('error', err);
+-      });
+-      this.socket.on('close', () => this.emit('close'));
+-      this.socket.on('data', (data: Buffer) => this.onData(data));
+-    });
++  private async openSocket(): Promise<void> {
++    const generation = this.closeGeneration;
++    const socket = await connectSocket(this.host, this.port);
++    if (generation !== this.closeGeneration) {
++      socket.destroy();
++      throw new Error('Connection closed');
++    }
++    this.socket = socket;
++    this.socket.on('error', (err) => this.emit('error', err));
++    // Listeners can tell a reset or failed socket from an orderly close by the peer.
++    this.socket.on('close', (hadError: boolean) => this.emit('close', hadError));
++    this.socket.on('data', (data: Buffer) => this.onData(data));
+   }
+ 
+   /** Send TLV pairing data wrapped in OPACK `{ _pd: tlvBytes, ...extraFields }`, unencrypted. */
+@@ -373,6 +377,7 @@ export class CompanionConnection extends EventEmitter {
+ 
+   /** Reject every pending request, release reserved IDs, and destroy the socket. */
+   close(): void {
++    this.closeGeneration++;
+     for (const [, pending] of this.pendingRequests) {
+       pending.reject(new Error('Connection closed'));
+     }
+@@ -453,8 +458,9 @@ export class CompanionConnection extends EventEmitter {
    // --- Post-encryption frame handling ---
  
    /**
@@ -703,26 +1164,26 @@ index 8e0da48..242771a 100644
     */
    private processEncryptedFrames(): void {
      // Encrypted frames: 4-byte header + ciphertext + 16-byte tag.
-@@ -473,12 +477,22 @@ export class CompanionConnection extends EventEmitter {
+@@ -473,12 +479,22 @@ export class CompanionConnection extends EventEmitter {
        // Companion leaves empty frames unencrypted; decrypting one would consume a nonce.
        if (payloadLen === 0) continue;
  
 +      let plaintext: Buffer;
-       try {
--        const plaintext = this.session!.decrypt(header, encryptedPayload);
--        const decoded = opackDecode(plaintext);
--        this.handleMessage(decoded);
++      try {
 +        plaintext = this.session!.decrypt(header, encryptedPayload);
-       } catch (e) {
--        this.emit('error', new Error(`Companion decrypt error: ${e}`));
++      } catch (e) {
 +        this.emit('error', new Error(`Companion decrypt error: ${e}`, { cause: e }));
 +        continue;
 +      }
 +      // The stream is still in sync after an authenticated frame. One frame this library cannot
 +      // decode or deliver is dropped and reported; it never ends the connection.
-+      try {
+       try {
+-        const plaintext = this.session!.decrypt(header, encryptedPayload);
+-        const decoded = opackDecode(plaintext);
+-        this.handleMessage(decoded);
 +        this.handleMessage(opackDecode(plaintext));
-+      } catch (e) {
+       } catch (e) {
+-        this.emit('error', new Error(`Companion decrypt error: ${e}`));
 +        this.emit('frame-error', new Error(
 +          `Companion frame type ${header[0]} (${plaintext.length} bytes) dropped: ${e instanceof Error ? e.message : String(e)}`,
 +          { cause: e },
@@ -731,10 +1192,10 @@ index 8e0da48..242771a 100644
      }
    }
 diff --git a/src/companion/pair-setup.ts b/src/companion/pair-setup.ts
-index d298c25..db3ef09 100644
+index d298c25..0d4199c 100644
 --- a/src/companion/pair-setup.ts
 +++ b/src/companion/pair-setup.ts
-@@ -7,21 +7,25 @@
+@@ -7,21 +7,27 @@
   */
  
  import { Socket } from 'node:net';
@@ -748,6 +1209,8 @@ index d298c25..db3ef09 100644
  import type { HAPCredentials } from '../auth/types.js';
 +import { PendingRequests } from '../util/pending-requests.js';
  
++/** Bound on the TCP connect, as for connectSocket(); the smaller of this and `timeoutMs` applies. */
++const CONNECT_TIMEOUT_MS = 5000;
  /** DER prefix that turns a raw 32-byte Ed25519 seed into PKCS#8 for node:crypto import. */
  const ED25519_PKCS8_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
 +/** DER prefix that turns a raw 32-byte Ed25519 public key into SPKI for node:crypto import. */
@@ -762,7 +1225,7 @@ index d298c25..db3ef09 100644
   */
  export class CompanionPairSetup {
    private socket: Socket | undefined;
-@@ -39,13 +43,23 @@ export class CompanionPairSetup {
+@@ -39,13 +45,23 @@ export class CompanionPairSetup {
  
    /** Queued frames that arrived before anyone was waiting for them. */
    private frameQueue: Frame[] = [];
@@ -788,7 +1251,7 @@ index d298c25..db3ef09 100644
      this.clientId = randomUUID();
  
      const { publicKey, privateKey } = generateKeyPairSync('ed25519');
-@@ -61,29 +75,60 @@ export class CompanionPairSetup {
+@@ -61,29 +77,65 @@ export class CompanionPairSetup {
     * Open socket and send M1. The Apple TV should display the PIN after this.
     * Call finish(pin) after the user reads the PIN.
     */
@@ -820,16 +1283,20 @@ index d298c25..db3ef09 100644
 +      this.shutdown(new Error('Companion pairing startup failed'));
 +      throw error;
 +    }
-+  }
-+
+   }
+ 
+-  /** Connect the socket and feed incoming data to the frame parser. Errors only reject the connect. */
 +  private get timeoutMs(): number { return this.options.timeoutMs ?? 10000; }
 +
 +  private assertOpen(): void {
 +    if (this.phase === 'closed') throw new Error('Companion pairing is closed');
-   }
- 
--  /** Connect the socket and feed incoming data to the frame parser. Errors only reject the connect. */
-+  /** Connect the socket and feed incoming data to the frame parser. Socket errors, peer close and invalid frames end the attempt. */
++  }
++
++  /**
++   * Connect the socket (Nagle off) and feed incoming data to the frame parser. Socket errors,
++   * peer close and invalid frames end the attempt; close() or an abort destroys the socket even
++   * while it is still connecting. The connect is bounded by the smaller of `timeoutMs` and 5 s.
++   */
    private openSocket(): Promise<void> {
 -    return new Promise((resolve, reject) => {
 -      this.socket = new Socket();
@@ -842,9 +1309,11 @@ index d298c25..db3ef09 100644
 -      });
 -      this.socket.on('data', (data: Buffer) => {
 +    this.assertOpen();
-+    const connected = this.pending.create<void>('connect', this.timeoutMs);
++    const connected = this.pending.create<void>('connect', Math.min(this.timeoutMs, CONNECT_TIMEOUT_MS));
 +    const socket = new Socket();
 +    this.socket = socket;
++    // Pairing replies are small request/response writes; Nagle + delayed ACK would stall them.
++    socket.setNoDelay(true);
 +    socket.on('error', error => this.shutdown(error));
 +    socket.on('close', () => this.shutdown(new Error('Companion pairing connection closed')));
 +    socket.on('data', (data: Buffer) => {
@@ -857,16 +1326,15 @@ index d298c25..db3ef09 100644
 +      } catch {
 +        this.shutdown(new Error('Invalid Companion pairing frame'));
 +      }
-+    });
-+    socket.connect(this.port, this.host, () => {
-+      socket.setNoDelay(true);
-+      this.pending.resolve('connect', undefined);
      });
++    socket.connect(this.port, this.host, () => {
++      this.pending.resolve('connect', undefined);
++    });
 +    return connected;
    }
  
    /**
-@@ -110,6 +155,7 @@ export class CompanionPairSetup {
+@@ -110,6 +162,7 @@ export class CompanionPairSetup {
     */
    private async receivePairingData(): Promise<Buffer> {
      const frame = await this.waitForAnyFrame();
@@ -874,7 +1342,7 @@ index d298c25..db3ef09 100644
      const decoded = opackDecode(frame.payload);
      if (!(decoded instanceof Map)) {
        throw new Error(`Companion PS: expected OPACK dict response, got frame type 0x${frame.type.toString(16)}`);
-@@ -156,6 +202,7 @@ export class CompanionPairSetup {
+@@ -156,6 +209,7 @@ export class CompanionPairSetup {
     * @throws if M4 lacks a proof (e.g. a wrong PIN) or the proof does not verify
     */
    async sendM3(pin: string, salt: Buffer, serverPublicKey: Buffer): Promise<void> {
@@ -882,7 +1350,7 @@ index d298c25..db3ef09 100644
      this.srp.init(salt, pin);
      this.srp.setServerPublicKey(serverPublicKey);
  
-@@ -186,9 +233,10 @@ export class CompanionPairSetup {
+@@ -186,9 +240,10 @@ export class CompanionPairSetup {
     * Send M5 (our identifier, Ed25519 public key and signature, encrypted) and decrypt
     * M6 to learn the Apple TV's identifier and long-term public key.
     * @returns credentials to persist for later pair-verify
@@ -894,7 +1362,7 @@ index d298c25..db3ef09 100644
      if (!this.sessionKey) {
        throw new Error('Session key not available; call sendM3 first');
      }
-@@ -252,10 +300,21 @@ export class CompanionPairSetup {
+@@ -252,10 +307,21 @@ export class CompanionPairSetup {
      const serverInfo = tlvDecode(decrypted);
      const serverId = serverInfo[TlvTag.Identifier];
      const serverLTPK = serverInfo[TlvTag.PublicKey];
@@ -918,7 +1386,7 @@ index d298c25..db3ef09 100644
      return {
        clientId: this.clientId,
        clientLTSK: this.edPrivateKeyRaw,
-@@ -271,9 +330,11 @@ export class CompanionPairSetup {
+@@ -271,9 +337,11 @@ export class CompanionPairSetup {
     * Always closes the socket, whether pairing succeeds or fails.
     */
    async finish(pin: string): Promise<HAPCredentials> {
@@ -931,7 +1399,7 @@ index d298c25..db3ef09 100644
      try {
        await this.sendM3(pin, this.salt, this.serverPublicKey);
        return await this.sendM5();
-@@ -282,39 +343,41 @@ export class CompanionPairSetup {
+@@ -282,39 +350,41 @@ export class CompanionPairSetup {
      }
    }
  
@@ -992,7 +1460,7 @@ index d298c25..db3ef09 100644
    }
  
    /** Parse buffered frames, handing each to the oldest waiter or queuing it. */
-@@ -323,10 +386,10 @@ export class CompanionPairSetup {
+@@ -323,10 +393,10 @@ export class CompanionPairSetup {
      this.buffer = remainder;
  
      for (const frame of frames) {
@@ -1007,18 +1475,10 @@ index d298c25..db3ef09 100644
        }
      }
 diff --git a/src/connection.ts b/src/connection.ts
-index eedd87e..04a01cb 100644
+index eedd87e..59c3f9e 100644
 --- a/src/connection.ts
 +++ b/src/connection.ts
-@@ -16,7 +16,6 @@ import {
-   createPrivateKey,
- } from 'node:crypto';
- import { EventEmitter } from 'node:events';
--import { setTimeout as delay } from 'node:timers/promises';
- import bplistCreator from 'bplist-creator';
- import { parseBuffer } from 'bplist-parser';
- import { HAPSession } from './util/hap-session.js';
-@@ -25,6 +24,7 @@ import { TlvTag, tlvEncode, tlvDecode } from './util/tlv.js';
+@@ -25,6 +25,7 @@ import { TlvTag, tlvEncode, tlvDecode } from './util/tlv.js';
  import { MRPMessage, MessageType } from './mrp/messages.js';
  import { buildDataStreamFrame, buildDataStreamReply, parseDataStreamFrame } from './util/data-stream.js';
  import type { HAPCredentials } from './auth/types.js';
@@ -1026,7 +1486,7 @@ index eedd87e..04a01cb 100644
  
  /** `clientTypeUUID` that asks the receiver for an MRP data stream (stream type 130). */
  const DATA_CHANNEL_TYPE_UUID = '1910A70F-DBC0-4242-AF95-115DB30604E1';
-@@ -39,21 +39,25 @@ interface ParsedHTTP {
+@@ -39,21 +40,25 @@ interface ParsedHTTP {
    body: Buffer;
    /** Bytes consumed from the input (headers + body). */
    totalSize: number;
@@ -1057,7 +1517,7 @@ index eedd87e..04a01cb 100644
    for (let i = 1; i < lines.length; i++) {
      const colonIdx = lines[i].indexOf(':');
      if (colonIdx > 0) {
-@@ -63,29 +67,33 @@ function parseHTTPMessage(buf: Buffer): ParsedHTTP | null {
+@@ -63,29 +68,59 @@ function parseHTTPMessage(buf: Buffer): ParsedHTTP | null {
    }
  
    const bodyStart = headerEnd + 4;
@@ -1075,19 +1535,41 @@ index eedd87e..04a01cb 100644
  
 -/** Open a TCP socket to host:port; rejects on the first socket error before connecting. */
 -function connectSocket(host: string, port: number): Promise<Socket> {
--  return new Promise((resolve, reject) => {
--    const sock = new Socket();
++/** Default bound on a TCP connect, in ms. */
++const CONNECT_TIMEOUT_MS = 5000;
++
++/**
++ * Open a TCP socket to host:port with Nagle disabled.
++ * @throws (rejects) on the first socket error, or if not connected within `timeoutMs` (default 5 s).
++ */
++export function connectSocket(host: string, port: number, timeoutMs = CONNECT_TIMEOUT_MS): Promise<Socket> {
+   return new Promise((resolve, reject) => {
+     const sock = new Socket();
 -    sock.connect(port, host, () => resolve(sock));
--    sock.once('error', reject);
--  });
-+/** Options for AirPlayConnection. */
-+export interface AirPlayConnectionOptions {
-+  /** Bound, in ms, on each connect, write, pairing and RTSP reply; default 10000. */
-+  timeoutMs?: number;
-+  /** Receives progress lines instead of stderr. */
-+  logger?: (message: string) => void;
++    // MRP/RTSP messages are small request/response writes; Nagle + delayed ACK would stall them.
++    sock.setNoDelay(true);
++    sock.setTimeout(timeoutMs, () => sock.destroy(new Error(`Connect to ${host}:${port} timed out`)));
++    sock.connect(port, host, () => {
++      sock.setTimeout(0);
++      resolve(sock);
++    });
+     sock.once('error', reject);
+   });
  }
  
++/** Options for AirPlayConnection. All are optional. */
++export interface AirPlayConnectionOptions {
++  /**
++   * Bound, in ms, on each write, pairing reply and RTSP reply; default 10000.
++   * TCP connects use the smaller of this and 5 s.
++   */
++  timeoutMs?: number;
++  /** Pause after the MRP handshake before resolving connect(); see ConnectOptions.settleMs. */
++  settleMs?: number;
++  /** Receives progress lines instead of stderr. */
++  logger?: (message: string) => void;
++}
++
  /**
   * Owns the three AirPlay sockets (RTSP control, event, data) and their HAP sessions.
   *
@@ -1103,7 +1585,7 @@ index eedd87e..04a01cb 100644
   */
  export class AirPlayConnection extends EventEmitter {
    private socket?: Socket;
-@@ -101,75 +109,140 @@ export class AirPlayConnection extends EventEmitter {
+@@ -101,75 +136,155 @@ export class AirPlayConnection extends EventEmitter {
    private dacpId = randomBytes(8).toString('hex');
    private activeRemote = String(Math.floor(Math.random() * 0xffffffff));
    private localAddress?: string;
@@ -1126,28 +1608,39 @@ index eedd87e..04a01cb 100644
 +  private mrpResponseTypes = new Map<string, number | undefined>();
 +  private incomingMRP = Promise.resolve();
  
++  private options: AirPlayConnectionOptions;
++
++  /** A number as the fourth argument is `settleMs`, as before. */
    constructor(
      private host: string,
      private port: number,
      private credentials: HAPCredentials,
-+    private options: AirPlayConnectionOptions = {},
++    options: AirPlayConnectionOptions | number = {},
    ) {
      super();
++    this.options = typeof options === 'number' ? { settleMs: options } : options;
 +    if (!Number.isFinite(this.timeoutMs) || this.timeoutMs <= 0) throw new RangeError('Invalid AirPlay timeout');
 +  }
 +
++  /** Bound on each step, from `options.timeoutMs`. */
 +  private get timeoutMs(): number { return this.options.timeoutMs ?? 10000; }
 +
++  /** @throws once the connection has closed or failed. */
 +  private assertOpen(): void {
 +    if (this.closed) throw new Error('AirPlay connection closed');
 +  }
 +
++  /**
++   * Open a TCP socket (Nagle off) owned by this connection. Its error or close ends the
++   * connection; close() or an abort destroys it even while it is still connecting.
++   * @throws if not connected within the smaller of `timeoutMs` and 5 s.
++   */
 +  private async openSocket(port: number): Promise<Socket> {
 +    this.assertOpen();
 +    const socket = new Socket();
 +    this.sockets.add(socket); // Own the socket before connect can settle or be cancelled.
 +    const key = `connect:${++this.nextOperation}`;
-+    const connected = this.pending.create<Socket>(key, this.timeoutMs);
++    const connected = this.pending.create<Socket>(key, Math.min(this.timeoutMs, CONNECT_TIMEOUT_MS));
 +    socket.once('connect', () => this.pending.resolve(key, socket));
 +    socket.on('error', error => this.fail(error));
 +    socket.once('close', () => {
@@ -1162,6 +1655,10 @@ index eedd87e..04a01cb 100644
 +    return result;
 +  }
 +
++  /**
++   * Write to one of this connection's sockets and resolve once the data is flushed.
++   * @throws if closed, not connected, or the write fails or does not finish within `timeoutMs`.
++   */
 +  private async write(socket: Socket | undefined, data: Buffer): Promise<void> {
 +    this.assertOpen();
 +    if (!socket || socket.destroyed) throw new Error('AirPlay socket not connected');
@@ -1295,7 +1792,7 @@ index eedd87e..04a01cb 100644
    }
  
    // --- Pair-verify directly on the RTSP socket ---
-@@ -292,56 +365,58 @@ export class AirPlayConnection extends EventEmitter {
+@@ -292,56 +407,58 @@ export class AirPlayConnection extends EventEmitter {
  
    /**
     * Send a plain HTTP POST on the control socket; `onRawData` resolves it with the response
@@ -1391,7 +1888,7 @@ index eedd87e..04a01cb 100644
     */
    private async sendRTSP(
      method: string,
-@@ -349,14 +424,16 @@ export class AirPlayConnection extends EventEmitter {
+@@ -349,14 +466,16 @@ export class AirPlayConnection extends EventEmitter {
      headers: Record<string, string> = {},
      body?: Buffer,
    ): Promise<{ headers: Record<string, string>; body: Buffer }> {
@@ -1409,7 +1906,7 @@ index eedd87e..04a01cb 100644
      };
  
      let request = `${method} ${uri} RTSP/1.0\r\n`;
-@@ -375,12 +452,15 @@ export class AirPlayConnection extends EventEmitter {
+@@ -375,12 +494,15 @@ export class AirPlayConnection extends EventEmitter {
        data = Buffer.from(this.session.encrypt(data));
      }
  
@@ -1431,7 +1928,7 @@ index eedd87e..04a01cb 100644
    }
  
    /** Session URI used for SETUP/RECORD: `rtsp://<local address>/<session id>`. */
-@@ -432,21 +512,16 @@ export class AirPlayConnection extends EventEmitter {
+@@ -432,14 +554,13 @@ export class AirPlayConnection extends EventEmitter {
        const eventInputKey = await hkdfSha512(
          this.sharedSecret!, 'Events-Salt', 'Events-Write-Encryption-Key', 32,
        );
@@ -1448,14 +1945,7 @@ index eedd87e..04a01cb 100644
      }
    }
  
--  /**
--   * RTSP SETUP for an MRP data stream, connect to the returned `dataPort` (falling back to
--   * the control port), derive DataStream keys from the seed, then run the MRP handshake.
--   */
-   private async setupDataChannel(): Promise<void> {
-     // Seed must be an integer (not Buffer) in the bplist so it encodes as uint64.
-     // bplist-creator truncates values > 2^31-1, so we limit to that range.
-@@ -499,16 +574,15 @@ export class AirPlayConnection extends EventEmitter {
+@@ -499,16 +620,15 @@ export class AirPlayConnection extends EventEmitter {
        'DataStream-Input-Encryption-Key',
        32,
      );
@@ -1474,19 +1964,19 @@ index eedd87e..04a01cb 100644
      this.dataSocket.on('end', () => this.log('data channel ended by remote'));
  
      // Initialize MRP protocol on data channel
-@@ -517,8 +591,9 @@ export class AirPlayConnection extends EventEmitter {
+@@ -517,8 +637,9 @@ export class AirPlayConnection extends EventEmitter {
  
    /**
     * MRP handshake on the data channel: DeviceInfo (awaits the reply), SetConnectionState,
 -   * ClientUpdatesConfig, GetKeyboardSession, then a 500 ms settle delay.
 -   * @throws if the DeviceInfo reply does not arrive within 5 s.
 +   * ClientUpdatesConfig and GetKeyboardSession, awaiting the correlated reply to each
-+   * except SetConnectionState.
++   * except SetConnectionState (as pyatv does), then the optional `settleMs` delay (default 0).
 +   * @throws if a reply does not arrive in time (DeviceInfo within 5 s).
     */
    private async initMRPProtocol(): Promise<void> {
      this.log('sending DeviceInfo...');
-@@ -528,10 +603,8 @@ export class AirPlayConnection extends EventEmitter {
+@@ -528,10 +649,8 @@ export class AirPlayConnection extends EventEmitter {
        uniqueIdentifier: this.credentials.clientId,
        name: 'Node ATV Remote',
      });
@@ -1498,7 +1988,7 @@ index eedd87e..04a01cb 100644
      this.log('DeviceInfo exchange complete');
  
      // 2. CryptoPairing is NOT performed over AirPlay transport.
-@@ -543,103 +616,63 @@ export class AirPlayConnection extends EventEmitter {
+@@ -543,103 +662,68 @@ export class AirPlayConnection extends EventEmitter {
      const connState = await MRPMessage.setConnectionState(2);
      await this.sendMRPMessage(connState);
  
@@ -1518,11 +2008,16 @@ index eedd87e..04a01cb 100644
 +    // 5. GetKeyboardSession (pyatv uses send_and_receive)
      const getKeyboard = await MRPMessage.sendCommand(MessageType.GetKeyboardSession);
 -    await this.sendMRPMessage(getKeyboard);
--
++    await this.sendMRPMessageAndWait(getKeyboard, MessageType.Keyboard);
+ 
 -    // Wait a moment for the Apple TV to process init messages and send updates
 -    await delay(500);
--  }
--
++    // ponytail: fixed settle, 0 by default (was 500 ms). Replace with waiting for the first
++    // update message if some Apple TV model turns out to drop the first command.
++    const settleMs = this.options.settleMs ?? 0;
++    if (settleMs > 0) await delay(settleMs);
+   }
+ 
 -  /**
 -   * Resolve with the next MRP message of `type` from the data channel.
 -   * @throws (rejects) after `timeoutMs` with no matching message.
@@ -1543,9 +2038,8 @@ index eedd87e..04a01cb 100644
 -        },
 -      });
 -    });
-+    await this.sendMRPMessageAndWait(getKeyboard, MessageType.Keyboard);
-   }
- 
+-  }
+-
 -  /** Buffer encrypted control-socket bytes after pair-verify and try to extract an RTSP response. */
 +  /** Buffer encrypted control-socket bytes after pair-verify and parse RTSP responses. */
    private onEncryptedData(data: Buffer): void {
@@ -1591,7 +2085,9 @@ index eedd87e..04a01cb 100644
 -    } catch (err) {
 -      this.log(`decrypt error: ${err}`);
 -      return;
--    }
++    } catch (error) {
++      this.fail(error instanceof Error ? error : new Error('Invalid AirPlay RTSP frame'));
+     }
 -
 -    const parsed = parseHTTPMessage(decrypted);
 -    if (!parsed) {
@@ -1616,9 +2112,7 @@ index eedd87e..04a01cb 100644
 -      const totalFrameSize = 2 + frameLen + 16;
 -      if (buf.length - offset < totalFrameSize) return false;
 -      offset += totalFrameSize;
-+    } catch (error) {
-+      this.fail(error instanceof Error ? error : new Error('Invalid AirPlay RTSP frame'));
-     }
+-    }
 -    return true;
    }
  
@@ -1632,7 +2126,7 @@ index eedd87e..04a01cb 100644
      this.eventEncBuffer = Buffer.concat([this.eventEncBuffer, data]);
      if (!this.eventSession) return;
  
-@@ -647,13 +680,14 @@ export class AirPlayConnection extends EventEmitter {
+@@ -647,13 +731,14 @@ export class AirPlayConnection extends EventEmitter {
        const { plaintext, rest } = this.eventSession.decryptAvailable(this.eventEncBuffer);
        this.eventEncBuffer = rest;
        this.eventDecBuffer = Buffer.concat([this.eventDecBuffer, plaintext]);
@@ -1650,7 +2144,7 @@ index eedd87e..04a01cb 100644
    }
  
    /** Answer each buffered event-channel request with an encrypted `RTSP/1.0 200 OK`, echoing CSeq and Server. */
-@@ -674,17 +708,18 @@ export class AirPlayConnection extends EventEmitter {
+@@ -674,17 +759,18 @@ export class AirPlayConnection extends EventEmitter {
  
        const response = `RTSP/1.0 200 OK\r\n${respHeaders.join('\r\n')}\r\n\r\n`;
        const encrypted = this.eventSession!.encrypt(Buffer.from(response));
@@ -1672,7 +2166,7 @@ index eedd87e..04a01cb 100644
      this.dataEncBuffer = Buffer.concat([this.dataEncBuffer, data]);
  
      // Decrypt all complete HAP frames in one pass; one concat per chunk, not per 1 KB frame.
-@@ -694,23 +729,30 @@ export class AirPlayConnection extends EventEmitter {
+@@ -694,23 +780,30 @@ export class AirPlayConnection extends EventEmitter {
        this.dataDecBuffer = Buffer.concat([this.dataDecBuffer, plaintext]);
      } catch (e) {
        this.log(`data channel decrypt error: ${e}`);
@@ -1707,7 +2201,7 @@ index eedd87e..04a01cb 100644
        }
  
        // Advance buffer past this frame
-@@ -719,83 +761,129 @@ export class AirPlayConnection extends EventEmitter {
+@@ -719,83 +812,134 @@ export class AirPlayConnection extends EventEmitter {
    }
  
    /**
@@ -1773,9 +2267,14 @@ index eedd87e..04a01cb 100644
    /**
 -   * Send an MRP message and resolve with the next incoming message of `responseType`.
 -   * The waiter is registered before sending so a fast reply is not missed.
-+   * Send one MRP message and wait for its correlated reply. A timeout fails the connection
-+   * unless `fatalTimeout: false` is given; then only this request rejects and a late reply
-+   * is ignored. Use that for requests whose acknowledgement may be slow or absent.
++   * Send one MRP message and wait for its correlated reply: the message with the same
++   * identifier, or the next one of `responseType` if the request has no identifier (as pyatv
++   * matches them). A reply with a nonzero `errorCode`, or of a type other than
++   * `responseType`, rejects; leave `responseType` out to accept any reply type.
++   * @throws if the reply does not arrive within `timeoutMs`; that also ends the connection
++   * unless `fatalTimeout: false` is given. Then only this request rejects and a late reply
++   * is ignored; use that for requests whose acknowledgement may be slow or absent, such as
++   * an output route change.
     */
    async sendMRPMessageAndWait(
      protobufData: Buffer,
@@ -1868,21 +2367,29 @@ index eedd87e..04a01cb 100644
 +  close(): void { this.shutdown(new Error('AirPlay connection closed')); }
  }
 diff --git a/src/discovery.ts b/src/discovery.ts
-index 21aca07..b990510 100644
+index 21aca07..9c04e1c 100644
 --- a/src/discovery.ts
 +++ b/src/discovery.ts
-@@ -67,6 +67,8 @@ export interface ScanOptions {
+@@ -67,6 +67,13 @@ export interface ScanOptions {
    timeout?: number;
    /** Keep only devices for which this returns true. */
    filter?: (device: DiscoveredDevice) => boolean;
++  /**
++   * Stop browsing early once any (filtered) device satisfies this; `timeout` still caps the wait.
++   * Checked after every mDNS record, once the Companion port has been joined.
++   */
++  until?: (device: DiscoveredDevice) => boolean;
 +  /** Aborting stops the browsers and rejects with the signal's reason. */
 +  signal?: AbortSignal;
  }
  
  /** Routable IPv4 addresses, in advertised order (link-local 169.254.x.x excluded). */
-@@ -77,15 +79,16 @@ function usableAddresses(service: Service): string[] {
+@@ -75,18 +82,52 @@ function usableAddresses(service: Service): string[] {
+ }
+ 
  /**
-  * Browse the local network for `timeout` ms and return discovered Apple TVs
+- * Browse the local network for `timeout` ms and return discovered Apple TVs
++ * Browse the local network for `timeout` ms (or until `until` matches) and return discovered Apple TVs
   * sorted by name. Devices are deduplicated by AirPlay device ID (or address);
 - * services with no routable IPv4 address are skipped. Never rejects.
 + * services with no routable IPv4 address are skipped. Rejects only when `signal` aborts.
@@ -1897,22 +2404,62 @@ index 21aca07..b990510 100644
 -  return new Promise((resolve) => {
 +  return new Promise((resolve, reject) => {
      const instance = new Bonjour();
++    let done = false;
++    let timer: ReturnType<typeof setTimeout> | undefined;
++
++    // Join devices to Companion ports (independent of advertisement order) and apply the filter.
++    const collect = (): DiscoveredDevice[] => {
++      for (const [key, device] of devices) {
++        const match = airplayAddresses.get(key)!.find((a) => companionPorts.has(a));
++        device.companionPort = match === undefined ? undefined : companionPorts.get(match);
++      }
++      const all = Array.from(devices.values());
++      return options.filter ? all.filter(options.filter) : all;
++    };
++
++    const finish = (cancelled = false): void => {
++      if (done) return;
++      done = true;
++      clearTimeout(timer);
++      options.signal?.removeEventListener('abort', onAbort);
++      browser.stop();
++      companionBrowser.stop();
++      instance.destroy();
++      if (cancelled) { reject(options.signal?.reason); return; }
++      try {
++        resolve(collect().sort((a, b) => a.name.localeCompare(b.name)));
++      } catch (error) {
++        reject(error);
++      }
++    };
++    const onAbort = (): void => finish(true);
++
++    const check = (): void => {
++      if (!done && options.until && collect().some(options.until)) finish();
++    };
  
      const browser = instance.find({ type: 'airplay', protocol: 'tcp' }, (service: Service) => {
-@@ -123,21 +126,32 @@ export async function scan(options: ScanOptions = {}): Promise<DiscoveredDevice[
+       const addresses = usableAddresses(service);
+@@ -110,6 +151,7 @@ export async function scan(options: ScanOptions = {}): Promise<DiscoveredDevice[
+         );
+         airplayAddresses.set(key, addresses);
+       }
++      check();
+     });
+ 
+     const companionBrowser = instance.find(
+@@ -120,24 +162,12 @@ export async function scan(options: ScanOptions = {}): Promise<DiscoveredDevice[
+         for (const address of usableAddresses(service)) {
+           companionPorts.set(address, service.port);
+         }
++        check();
        },
      );
  
 -    setTimeout(() => {
-+    let finished = false;
-+    const finish = (cancelled = false) => {
-+      if (finished) return;
-+      finished = true;
-+      clearTimeout(timer);
-+      options.signal?.removeEventListener('abort', onAbort);
-       browser.stop();
-       companionBrowser.stop();
-       instance.destroy();
+-      browser.stop();
+-      companionBrowser.stop();
+-      instance.destroy();
 -
 -      let result = Array.from(devices.values());
 -      // Join once after both browsers stop, independent of advertisement order.
@@ -1922,32 +2469,27 @@ index 21aca07..b990510 100644
 -      }
 -      if (options.filter) {
 -        result = result.filter(options.filter);
-+      if (cancelled) { reject(options.signal?.reason); return; }
-+      try {
-+        let result = Array.from(devices.values());
-+        // Join once after both browsers stop, independent of advertisement order.
-+        for (const [key, device] of devices) {
-+          const match = airplayAddresses.get(key)!.find((a) => companionPorts.has(a));
-+          device.companionPort = match === undefined ? undefined : companionPorts.get(match);
-+        }
-+        if (options.filter) result = result.filter(options.filter);
-+        resolve(result.sort((a, b) => a.name.localeCompare(b.name)));
-+      } catch (error) {
-+        reject(error);
-       }
+-      }
 -      resolve(result.sort((a, b) => a.name.localeCompare(b.name)));
 -    }, timeout);
-+    };
-+    const onAbort = () => finish(true);
-+    const timer = setTimeout(() => finish(), timeout);
++    timer = setTimeout(() => finish(), timeout);
 +    options.signal?.addEventListener('abort', onAbort, { once: true });
 +    if (options.signal?.aborted) onAbort();
    });
  }
 diff --git a/src/index.ts b/src/index.ts
-index 2678e5b..d07afec 100644
+index 2678e5b..fe9c862 100644
 --- a/src/index.ts
 +++ b/src/index.ts
+@@ -5,7 +5,7 @@
+ 
+ export { scan } from './discovery.js';
+ export { AppleTV, Key, TextInputActionType, ShuffleState, RepeatState, PowerState } from './appletv.js';
+-export type { KeyboardInfo, TextInputEvent, CompanionEvent, App, UserAccount } from './appletv.js';
++export type { KeyboardInfo, TextInputEvent, CompanionEvent, App, UserAccount, ConnectOptions } from './appletv.js';
+ export { CompanionConnection } from './companion/connection.js';
+ export { PairSetup } from './auth/pair-setup.js';
+ export { CompanionPairSetup } from './companion/pair-setup.js';
 @@ -18,6 +18,8 @@ export { Credentials, parseCredentials } from './credentials.js';
  export { NowPlayingInfo, PlaybackState } from './now-playing-info.js';
  export { SupportedCommand, Command } from './supported-command.js';
@@ -1972,6 +2514,23 @@ index 9212cfa..ecde786 100644
      this.identifier = (decoded.identifier as string) ?? '';
      this.payload = decoded;
    }
+diff --git a/src/mrp/__tests__/messages.test.ts b/src/mrp/__tests__/messages.test.ts
+index 8ed8e46..3145970 100644
+--- a/src/mrp/__tests__/messages.test.ts
++++ b/src/mrp/__tests__/messages.test.ts
+@@ -25,6 +25,12 @@ describe('MRP Messages', () => {
+     expect(decoded).toBeDefined();
+   });
+ 
++  it('decodes field 4 as errorCode, as in pyatv 0.18.0', async () => {
++    // Independent wire encoding: identifier field 2 = "A", errorCode field 4 = 6.
++    const decoded = await MRPMessage.decode(Buffer.from([0x12, 0x01, 0x41, 0x20, 0x06]));
++    expect(decoded.errorCode).toBe(6);
++  });
++
+   it('creates a SendButtonEventMessage', async () => {
+     const msg = await MRPMessage.sendButtonEvent(1, 0x8C, true);
+     expect(msg).toBeInstanceOf(Buffer);
 diff --git a/src/mrp/__tests__/metadata-fixtures.json b/src/mrp/__tests__/metadata-fixtures.json
 new file mode 100644
 index 0000000..ebc9e1b
@@ -2903,21 +3462,29 @@ index 2e7bcf1..ba02fb4 100644
  /** Build a header-only "rply" frame acknowledging the received sync frame with `seqno`. */
 diff --git a/src/util/pending-requests.ts b/src/util/pending-requests.ts
 new file mode 100644
-index 0000000..9c2fa3d
+index 0000000..bbd53cc
 --- /dev/null
 +++ b/src/util/pending-requests.ts
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,50 @@
++/**
++ * Correlated request/reply waits for AirPlayConnection: each wait has a key (an RTSP CSeq,
++ * an MRP identifier, a socket operation), a timeout, and is settled exactly once.
++ */
++
++/** Settlers for one pending wait. */
 +type Pending = { resolve(value: unknown): void; reject(error: Error): void };
 +
-+/** Correlated waits with exact cleanup and a shared connection shutdown boundary. */
++/** Pending waits keyed by what will answer them. A timeout also calls `onTimeout`, which ends the connection. */
 +export class PendingRequests {
 +  private entries = new Map<string, Pending>();
 +
 +  constructor(private onTimeout: (error: Error) => void, private label = 'AirPlay') {}
 +
 +  /**
-+   * Wait for one correlated reply. By default a timeout also shuts the connection down;
-+   * pass `fatalTimeout: false` when a missing reply is expected and only this wait should fail.
++   * Wait for the reply to `key`. The timer and entry are removed as soon as it settles.
++   * @throws (rejects) after `timeoutMs`, and then calls `onTimeout` unless `fatalTimeout`
++   *   is false, for a reply that may be slow or absent where only this wait should fail.
++   * @throws synchronously if a wait for `key` is already pending.
 +   */
 +  create<T>(key: string, timeoutMs: number, options: { fatalTimeout?: boolean } = {}): Promise<T> {
 +    if (this.entries.has(key)) throw new Error(`An equivalent ${this.label} request is already pending`);
@@ -2935,12 +3502,16 @@ index 0000000..9c2fa3d
 +    });
 +  }
 +
++  /** True while a wait for `key` is pending. */
 +  has(key: string): boolean { return this.entries.has(key); }
 +
++  /** Resolve the wait for `key`, if any. */
 +  resolve(key: string, value: unknown): void { this.entries.get(key)?.resolve(value); }
 +
++  /** Reject the wait for `key`, if any. */
 +  reject(key: string, error: Error): void { this.entries.get(key)?.reject(error); }
 +
++  /** Reject every pending wait with `error`. */
 +  rejectAll(error: Error): void {
 +    for (const entry of this.entries.values()) entry.reject(error);
 +  }

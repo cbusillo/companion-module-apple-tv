@@ -21,6 +21,15 @@ wraps bare Companion content in the `{ _i, _t, _c, _x }` envelope. The module
 already sends prebuilt `{ _t, _c }` envelopes; the library copies those and only
 sets `_i` and `_x`, so the bytes sent are unchanged.
 
+This test build's patch also carries unreleased upstream work, so the owner can
+exercise it on the TV: energee's default branch at `67e7d82` (#7, faster connects:
+`scan({ until })`, a shared 5-second `connectSocket`, `settleMs`) and the proposed
+`work/airplay-lifetime` branch (`d76772d`), whose AirPlay lifetime, non-fatal MRP
+timeout and `errorCode` field replace this module's earlier versions of the same
+features. Companion pairing keeps its own cancellable connect, bounded by the smaller
+of its timeout and 5 seconds; `CompanionConnection` discards a socket that finishes
+connecting after `close()`.
+
 The remaining patch adds only what 0.4.0 lacks:
 
 - AirPlay connection lifetime: one bounded, cancellable lifetime per instance,
