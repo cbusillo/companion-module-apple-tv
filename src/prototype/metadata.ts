@@ -154,6 +154,10 @@ export class MetadataState {
 			case 17:
 				this.capabilities = fields(message['.volumeControlAvailabilityMessage'])
 				return
+			// GetVolumeControlCapabilitiesResult: tvOS 26 answers the query instead of pushing type 17.
+			case 63:
+				this.capabilities = fields(fields(message['.getVolumeControlCapabilitiesResultMessage'])?.capabilities)
+				return
 			case 64: {
 				const update = fields(message['.volumeControlCapabilitiesDidChangeMessage'])
 				const id = text(update?.outputDeviceUID)

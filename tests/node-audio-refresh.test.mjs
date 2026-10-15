@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { once } from 'node:events'
+import { EventEmitter, once } from 'node:events'
 import { setTimeout as delay } from 'node:timers/promises'
 import test from 'node:test'
 import { MRPMessage } from 'node-appletv-remote'
@@ -45,7 +45,10 @@ async function session(peer, operation, signal = new AbortController().signal) {
 test('output changes recover capability and correlated volume without device controls', async () => {
 	const peer = new ReadPeer()
 	await session(peer, async (snapshots) => {
-		assert.equal(snapshots.at(-1).audio.volume, 35)
+		await until(() => peer.reads.length === 1)
+		peer.reads[0].resolve(reply(0.35))
+		await until(() => snapshots.at(-1).audio.volume === 35)
+		const startup = peer.requests.length
 		peer.volume(50) // A transitional report arrives before the output identity.
 		const reading = once(peer, 'read')
 		peer.route(['headphones'])
@@ -53,11 +56,12 @@ test('output changes recover capability and correlated volume without device con
 		assert.equal(snapshots.at(-1).audio.volume, undefined)
 		assert.equal(snapshots.at(-1).audio.absolute, false)
 		// The session subscribes to output-device updates once after connecting.
-		const [subscription, ...renewal] = peer.requests
+		const [subscription] = peer.requests
 		assert.equal(subscription['.clientUpdatesConfigMessage'].outputDeviceUpdates, true)
+		const renewal = peer.requests.slice(startup)
 		assert.deepEqual(
 			renewal.map((message) => message.type),
-			[16, 16, 49],
+			[16, 16, 62, 49],
 		)
 		assert.deepEqual(
 			renewal.slice(0, 2).map((message) => message['.clientUpdatesConfigMessage'].volumeUpdates),
@@ -68,7 +72,7 @@ test('output changes recover capability and correlated volume without device con
 			for (const key of ['artworkUpdates', 'nowPlayingUpdates', 'keyboardUpdates', 'outputDeviceUpdates'])
 				assert.equal(config[key], true)
 		}
-		peer.reads[0].resolve(reply(0.625))
+		peer.reads[1].resolve(reply(0.625))
 		await until(() => snapshots.at(-1).audio.volume === 62.5)
 		assert.equal(snapshots.at(-1).audio.absolute, true)
 		const count = peer.requests.length
@@ -78,6 +82,52 @@ test('output changes recover capability and correlated volume without device con
 	})
 	assert.equal(peer.closed, true)
 	assert.equal(peer.listenerCount('mrp-message'), 0)
+})
+
+/** Mirrors tvOS 26 on the wire: no type 17, 64 or 52 at connect; capabilities only as the type 63 answer. */
+class TvosPeer extends EventEmitter {
+	requests = []
+	closed = false
+	async connect() {
+		this.emit('mrp-message', {
+			type: 15,
+			'.deviceInfoMessage': { clusterID: 'tv-output', name: 'TV', isGroupLeader: true, isProxyGroupPlayer: false },
+		})
+		this.answerCapabilities()
+	}
+	answerCapabilities() {
+		this.emit('mrp-message', {
+			type: 63,
+			'.getVolumeControlCapabilitiesResultMessage': {
+				capabilities: { volumeControlAvailable: true, volumeCapabilities: 2 },
+			},
+		})
+	}
+	async sendMRPMessage(data) {
+		const request = await MRPMessage.decode(data)
+		this.requests.push(request)
+		if (request.type === 62) this.answerCapabilities()
+	}
+	async sendMRPMessageAndWait(data) {
+		this.requests.push(await MRPMessage.decode(data))
+		return reply(0.4)
+	}
+	close() {
+		this.closed = true
+	}
+}
+
+test('a TV that pushes no volume at connect still reports it from the startup read', async () => {
+	const peer = new TvosPeer()
+	await session(peer, async (snapshots) => {
+		await until(() => snapshots.at(-1).audio.volume === 40)
+		assert.equal(snapshots.at(-1).audio.absolute, true)
+		assert.ok(
+			peer.requests.some(
+				(message) => message.type === 49 && message['.getVolumeMessage']?.outputDeviceUID === 'tv-output',
+			),
+		)
+	})
 })
 
 test('a late read cannot cross an output round trip or start concurrent renewals', async () => {

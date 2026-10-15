@@ -21,7 +21,7 @@ wraps bare Companion content in the `{ _i, _t, _c, _x }` envelope. The module
 already sends prebuilt `{ _t, _c }` envelopes; the library copies those and only
 sets `_i` and `_x`, so the bytes sent are unchanged.
 
-Test build 0.5.1-dev.8 bundles energee's unreleased default branch at `5cfc6af`
+Test builds 0.5.1-dev.8 and dev.9 bundle energee's unreleased default branch at `5cfc6af`
 (through #63) instead; 0.5.1-dev.6 and dev.7 used `a189ea6`. That branch already covers what this module used
 to patch for the AirPlay lifetime (cancellable setup through `close()`,
 CSeq-correlated RTSP and identifier-correlated MRP replies, non-fatal reply
@@ -37,8 +37,12 @@ Since `a189ea6`, energee's branch also delivers every protobuf in a batched
 DataStream frame, one after another in wire order (#31), and declares
 VolumeControlCapabilitiesDidChange (type 64) and reads volume capabilities
 during the handshake (#53). The module's own versions of those changes are
-dropped. The handshake now also sends GetVolumeControlCapabilities (62); the
-module does not read its type 63 reply. Companion `sendRequest` now rejects a reply that
+dropped. The handshake now also sends GetVolumeControlCapabilities (62). On the
+owner's tvOS 26 Apple TV the wire shows no type 17, 64 or 52 at connect, only
+the type 63 answer, so dev.8 never showed a volume until the output changed.
+Since dev.9 the module reads type 63 as the general capabilities, and the first
+output identity also starts an audio read (volume subscription toggle,
+GetVolumeControlCapabilities, GetVolume), as an output change already did. Companion `sendRequest` now rejects a reply that
 carries `_em` (#32); the module still reports that as a refused request, not a
 lost session, and the pyatv loopback peer refuses one launch and one
 TVRCSessionStart to check it.

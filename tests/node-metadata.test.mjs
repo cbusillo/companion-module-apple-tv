@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { EventEmitter, once } from 'node:events'
 import { spawnSync } from 'node:child_process'
 import test from 'node:test'
+import { MRPMessage } from 'node-appletv-remote'
 import { MetadataState } from '../dist/prototype/metadata.js'
 import { observeMetadata } from '../dist/prototype/metadata-pilot.js'
 
@@ -209,7 +210,19 @@ class Observer extends EventEmitter {
 		volume(receiver, 'tv-output', 0.3)
 		this.emit('test-ready')
 	}
-	async sendMRPMessage() {}
+	async sendMRPMessage(data) {
+		// Like tvOS 26: capabilities arrive as the type 63 answer, not as a push.
+		if ((await MRPMessage.decode(data)).type === 62)
+			this.emit('mrp-message', {
+				type: 63,
+				'.getVolumeControlCapabilitiesResultMessage': {
+					capabilities: { volumeControlAvailable: true, volumeCapabilities: 3 },
+				},
+			})
+	}
+	async sendMRPMessageAndWait() {
+		return { type: 50, '.getVolumeResultMessage': { volume: 0.3 } }
+	}
 	close() {
 		this.closes++
 		this.emit('close')

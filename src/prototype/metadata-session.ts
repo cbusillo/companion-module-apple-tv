@@ -1,4 +1,4 @@
-import { AirPlayConnection, MRPMessage, type HAPCredentials } from 'node-appletv-remote'
+import { AirPlayConnection, MessageType, MRPMessage, type HAPCredentials } from 'node-appletv-remote'
 import { MetadataState, type MetadataSnapshot } from './metadata.js'
 import { bounded } from './session.js'
 
@@ -92,6 +92,10 @@ export async function withMetadataSession<T>(
 						signal.throwIfAborted()
 						await connection!.sendMRPMessage(request)
 					}
+					// tvOS 26 may push no type 17 or 64 after the toggle; its type 63 answer carries the capabilities.
+					const capabilities = await MRPMessage.sendCommand(MessageType.GetVolumeControlCapabilities)
+					signal.throwIfAborted()
+					await connection!.sendMRPMessage(capabilities)
 					const request = await MRPMessage.getVolume(read.outputId)
 					signal.throwIfAborted()
 					const response = await connection!.sendMRPMessageAndWait(request, undefined, 3000)
@@ -111,7 +115,8 @@ export async function withMetadataSession<T>(
 		if (closing || signal.aborted) return
 		const generation = state.audioGeneration
 		state.receive(message)
-		if (generation !== state.audioGeneration && (started || generation > 0)) {
+		// The first output identity also needs a read: tvOS pushes no volume or capability at connect.
+		if (generation !== state.audioGeneration) {
 			if (started) refreshAudio()
 			else refreshRequested = true
 		}
