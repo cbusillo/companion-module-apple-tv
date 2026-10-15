@@ -35,11 +35,7 @@ export async function observeMetadata(
 			undefined,
 			signal,
 		)
-		const devices = await bounded(
-			dependencies.discover ?? (async () => scan({ timeout: 5000, signal })),
-			undefined,
-			signal,
-		)
+		const devices = await bounded(dependencies.discover ?? (async () => scan({ timeout: 5000 })), undefined, signal)
 		const matches = devices.filter((device) => device.deviceId === saved.deviceId && device.model.startsWith('AppleTV'))
 		if (matches.length !== 1) throw new Error('Metadata connection failed: selected TV not uniquely discovered')
 		await withMetadataSession(

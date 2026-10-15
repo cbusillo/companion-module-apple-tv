@@ -1,4 +1,4 @@
-import { AirPlayConnection, MRPMessage, MessageType, type HAPCredentials } from 'node-appletv-remote'
+import { AirPlayConnection, MRPMessage, type HAPCredentials } from 'node-appletv-remote'
 import { MetadataState, type MetadataSnapshot } from './metadata.js'
 import { bounded } from './session.js'
 
@@ -7,10 +7,23 @@ export type MetadataTarget = { address: string; port: number }
 export type RouteAudio = (outputDeviceUIDs: readonly string[]) => Promise<boolean>
 export class OutputRouteRejected extends Error {}
 const ROUTE_ACKNOWLEDGEMENT_MS = 3000
+/** ModifyOutputContextRequest context that also selects personal outputs such as AirPods (pyatv#2834). */
+const SHARED_SYSTEM_AUDIO = 2
 export type MetadataConnection = Pick<
 	AirPlayConnection,
 	'connect' | 'close' | 'on' | 'off' | 'sendMRPMessage' | 'sendMRPMessageAndWait'
 >
+
+/** The library logs AirPlay setup progress to stderr; this session reports through its own results. */
+class QuietAirPlayConnection extends AirPlayConnection {
+	protected override log(): void {}
+}
+
+/** A reply that carries a non-zero MRP errorCode is a rejection, not an answer. */
+function rejected(reply: Record<string, unknown>): boolean {
+	const code = Object.hasOwn(reply, 'errorCode') ? reply.errorCode : undefined
+	return typeof code === 'number' && code !== 0
+}
 
 /**
  * One authenticated lifetime. The operation must honor its signal and finish cleanup before returning.
@@ -23,7 +36,7 @@ export async function withMetadataSession<T>(
 	onSnapshot: (snapshot: MetadataSnapshot) => void,
 	operation: (signal: AbortSignal, routeAudio: RouteAudio) => Promise<T>,
 	createConnection: (target: MetadataTarget, credentials: HAPCredentials) => MetadataConnection = (device, keys) =>
-		new AirPlayConnection(device.address, device.port, keys, { logger: () => {} }),
+		new QuietAirPlayConnection(device.address, device.port, keys),
 ): Promise<T> {
 	ownerSignal.throwIfAborted()
 	const state = new MetadataState()
@@ -81,8 +94,9 @@ export async function withMetadataSession<T>(
 					}
 					const request = await MRPMessage.getVolume(read.outputId)
 					signal.throwIfAborted()
-					const response = await connection!.sendMRPMessageAndWait(request, MessageType.GetVolumeResult, 3000)
+					const response = await connection!.sendMRPMessageAndWait(request, undefined, 3000)
 					if (signal.aborted || closing) return
+					if (rejected(response)) throw new Error(`GetVolume rejected with MRP error ${String(response.errorCode)}`)
 					state.finishAudioRead(read, response)
 					publish()
 				}
@@ -106,20 +120,28 @@ export async function withMetadataSession<T>(
 	// One write and no retry. The acknowledgement only proves receipt; callers confirm the
 	// route from later reported output devices. tvOS can take well over the acknowledgement
 	// wait to answer while it takes AirPods over from another device, so a late or missing
-	// acknowledgement must reject only this wait, never fail the shared connection.
+	// acknowledgement must reject only this wait, never fail the shared connection. The
+	// library's reply timeout does exactly that; an error reply resolves with its errorCode.
 	const routeAudio: RouteAudio = async (outputDeviceUIDs) => {
 		signal.throwIfAborted()
-		const request = await MRPMessage.setSystemAudioOutputs(outputDeviceUIDs)
+		if (
+			outputDeviceUIDs.length === 0 ||
+			!outputDeviceUIDs.every((uid) => typeof uid === 'string' && uid.length > 0) ||
+			new Set(outputDeviceUIDs).size !== outputDeviceUIDs.length
+		)
+			throw new TypeError('One or more distinct output device identifiers are required')
+		const request = await MRPMessage.modifyOutputDevices('set', [...outputDeviceUIDs], SHARED_SYSTEM_AUDIO)
 		if (closing || signal.aborted || !connection) throw new Error('Metadata connection closed')
+		let reply: Record<string, unknown>
 		try {
-			await connection.sendMRPMessageAndWait(request, undefined, ROUTE_ACKNOWLEDGEMENT_MS, { fatalTimeout: false })
-			return true
+			reply = await connection.sendMRPMessageAndWait(request, undefined, ROUTE_ACKNOWLEDGEMENT_MS)
 		} catch (error) {
 			if (closing || signal.aborted) throw new Error('Metadata connection closed', { cause: error })
-			if (error instanceof Error && error.message.startsWith('AirPlay MRP error'))
-				throw new OutputRouteRejected('Apple TV rejected the output change')
 			return false
 		}
+		if (closing || signal.aborted) throw new Error('Metadata connection closed')
+		if (rejected(reply)) throw new OutputRouteRejected('Apple TV rejected the output change')
+		return true
 	}
 	let result: T
 	try {
@@ -127,7 +149,19 @@ export async function withMetadataSession<T>(
 		connection.on('mrp-message', onMessage)
 		connection.on('error', onLost)
 		connection.on('close', onLost)
-		await bounded(async () => connection!.connect({ signal }), 10000, signal)
+		// On abort or timeout, close() in finally also cancels the library's pending setup.
+		await bounded(async () => connection!.connect(), 10000, signal)
+		signal.throwIfAborted()
+		// The library's handshake subscribes to everything except output-device updates.
+		await connection.sendMRPMessage(
+			await MRPMessage.clientUpdatesConfig({
+				artworkUpdates: true,
+				nowPlayingUpdates: true,
+				volumeUpdates: true,
+				keyboardUpdates: true,
+				outputDeviceUpdates: true,
+			}),
+		)
 		signal.throwIfAborted()
 		state.setConnected()
 		started = true

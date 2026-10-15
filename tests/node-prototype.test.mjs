@@ -155,25 +155,29 @@ test('patched npm package interoperates with independently generated encrypted C
 	assert.deepEqual(states, [3, 1])
 })
 
-test('patched npm package drops an undecodable or empty frame and keeps the session usable', () => {
+test('library build keeps the session through a dated or empty frame and ends it on an undecodable one', () => {
 	const key = Buffer.alloc(32, 7)
-	const connection = new CompanionConnection('unused.invalid', 1, {
-		clientId: 'test',
-		clientLTSK: key,
-		clientLTPK: key,
-		serverLTPK: key,
-		serverId: 'test',
-	})
-	// Test-only entry into the authenticated parser; never opens a socket.
-	connection.session = new CompanionSession(key, key)
-	const peer = new CompanionSession(key, key)
-	const errors = []
-	const dropped = []
-	const states = []
-	connection.on('error', (error) => errors.push(error.message))
-	connection.on('frame-error', (error) => dropped.push(error.message))
-	connection.on('event', ({ data }) => states.push(data.get('_c').get('state')))
-	const status = (state) =>
+	const open = () => {
+		const connection = new CompanionConnection('unused.invalid', 1, {
+			clientId: 'test',
+			clientLTSK: key,
+			clientLTPK: key,
+			serverLTPK: key,
+			serverId: 'test',
+		})
+		// Test-only entry into the authenticated parser; never opens a socket.
+		connection.session = new CompanionSession(key, key)
+		connection.socket = { destroy() {} }
+		const errors = []
+		const states = []
+		connection.on('error', (error) => errors.push(error.message))
+		connection.on('event', ({ data }) => {
+			const state = data.get('_c')?.get('state')
+			if (state !== undefined) states.push(state)
+		})
+		return { connection, errors, states, peer: new CompanionSession(key, key) }
+	}
+	const status = (peer, state) =>
 		peer.encrypt(
 			FrameType.E_OPACK,
 			opackEncode(
@@ -184,17 +188,27 @@ test('patched npm package drops an undecodable or empty frame and keeps the sess
 				]),
 			),
 		)
-	const first = status(3)
-	// {"_t": <OPACK date>}: pyatv 0.18.0 decodes tag 0x06; this decoder does not.
-	const dated = peer.encrypt(FrameType.E_OPACK, Buffer.concat([Buffer.from('e1425f7406', 'hex'), Buffer.alloc(8)]))
-	// pyatv decrypts only non-empty frames, so an empty one consumes no receive nonce.
-	const empty = Buffer.from([0x01, 0, 0, 0])
-	connection.onData(Buffer.concat([first, dated, empty, status(1)]))
-	assert.deepEqual(errors, [])
-	assert.deepEqual(states, [3, 1])
-	assert.equal(dropped.length, 1)
-	assert.match(dropped[0], /^Companion frame type 8 \(13 bytes\) dropped: OPACK: unknown tag 0x6/)
-	// A frame that fails authentication still ends the connection.
-	connection.onData(Buffer.concat([Buffer.from([FrameType.E_OPACK, 0, 0, 20]), Buffer.alloc(20, 9)]))
-	assert.equal(errors.length, 1)
+	{
+		const { connection, errors, states, peer } = open()
+		const first = status(peer, 3)
+		// {"_t": <OPACK date>}: pyatv 0.18.0 decodes tag 0x06 as an integer, and so does the library.
+		const dated = peer.encrypt(FrameType.E_OPACK, Buffer.concat([Buffer.from('e1425f7406', 'hex'), Buffer.alloc(8)]))
+		// pyatv decrypts only non-empty frames, so an empty one consumes no receive nonce.
+		const empty = Buffer.from([0x01, 0, 0, 0])
+		connection.onData(Buffer.concat([first, dated, empty, status(peer, 1)]))
+		assert.deepEqual(errors, [])
+		assert.deepEqual(states, [3, 1])
+	}
+	{
+		// An authenticated frame the decoder cannot read ends the connection with an error naming it.
+		const { connection, errors, states, peer } = open()
+		let closes = 0
+		connection.on('close', () => closes++)
+		const unreadable = peer.encrypt(FrameType.E_OPACK, Buffer.from('e1425f7400', 'hex'))
+		connection.onData(Buffer.concat([unreadable, status(peer, 1)]))
+		assert.equal(errors.length, 1)
+		assert.match(errors[0], /^Companion decrypt error: .*OPACK/)
+		assert.equal(closes, 1)
+		assert.deepEqual(states, [])
+	}
 })

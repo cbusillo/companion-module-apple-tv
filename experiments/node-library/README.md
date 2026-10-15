@@ -21,26 +21,33 @@ wraps bare Companion content in the `{ _i, _t, _c, _x }` envelope. The module
 already sends prebuilt `{ _t, _c }` envelopes; the library copies those and only
 sets `_i` and `_x`, so the bytes sent are unchanged.
 
-The remaining patch adds only what 0.4.0 lacks:
+Test build 0.5.1-dev.6 bundles energee's unreleased default branch at `a189ea6`
+(#7, #25, #26, #27) instead. That branch already covers what this module used
+to patch for the AirPlay lifetime (cancellable setup through `close()`,
+CSeq-correlated RTSP and identifier-correlated MRP replies, non-fatal reply
+timeouts, a single outstanding heartbeat, full cleanup), the `errorCode` and
+`errorDescription` fields, the player, client-removal, grouped-output and
+cluster-identity schemas, `ModifyOutputContextRequest`, and the Companion
+connection's cancellable setup. The module now uses those upstream APIs: it
+closes the connection to cancel setup, reads `errorCode` from replies, silences
+the AirPlay progress log in a subclass, and subscribes to output-device updates
+itself after connecting.
 
-- AirPlay connection lifetime: one bounded, cancellable lifetime per instance,
-  CSeq-correlated RTSP replies, identifier-correlated MRP replies, error and
-  wrong-type rejection, a single outstanding heartbeat, and full cleanup on close.
-- `sendMRPMessageAndWait(..., { fatalTimeout: false })` for the slow output-route
-  acknowledgement.
-- Every protobuf in a DataStream batch, in wire order, with malformed lengths
-  rejected.
-- Metadata schemas: GetVolume/GetVolumeResult, volume capabilities, active player,
-  client/player removal, grouped outputs, cluster identity, `errorCode`, and
-  untyped acknowledgements as type 0. These are compiled into the bundled schema.
-- `MRPMessage.setSystemAudioOutputs` and `MRPMessage.getVolume`, with `MRPMessage`,
-  `MessageType` and `OutputContextType` exported.
-- Companion `frame-error` for an authenticated frame that cannot be decoded, and
-  `close` with Node's `hadError` flag.
-- Companion pairing lifetime: bounded waits, cancellation, peer-close
-  notification while awaiting the PIN, a four-digit PIN check, and M6 identity
-  signature verification.
-- `scan({ signal })` cancellation.
+The remaining patch on `a189ea6` adds only:
+
+- GetVolume/GetVolumeResult and VolumeControlCapabilitiesDidChange messages, and
+  `MRPMessage.getVolume`.
+- An optional context type for `MRPMessage.modifyOutputDevices`; the module passes
+  `SharedSystemAudio` (2).
+- Every protobuf in a DataStream frame, in wire order.
+- OPACK absolute time (`0x06`) decoded as pyatv 0.18.0 does, as an integer.
+- Companion pairing lifetime: a `start({ signal })` cancellation, a `closed`
+  promise for peer close while awaiting the PIN, a `stage` getter, immediate
+  rejection on socket loss, and M6 identity signature verification.
+- `MRPMessage` and `MessageType` exported from the package entry.
+
+The upstream build also imports `plist`, which the npm 0.4.0 manifest lacks;
+`.yarnrc.yml` adds it through `packageExtensions`.
 
 Release 0.4.0 also adds high-level controls on its `AppleTV` class: MRP skip,
 position, shuffle/repeat and `SetVolume`, plus Companion apps, accounts and power.
@@ -114,7 +121,7 @@ An independent loopback session caught that mistake; regenerated fixtures use
 receive regression checks failed before correcting the library's counter layout.
 
 The remaining source changes and their regression tests are in
-`upstream-opack.patch`, based on upstream tag `v0.4.0`. The Yarn patch under
+`upstream-opack.patch`, based on energee commit `a189ea6`. The Yarn patch under
 `patches/` applies the corresponding compiled JavaScript, declarations, source
 maps and bundled schema to the published npm package. The patch-only `.proto`
 files are build input; the npm package carries no `.proto` files. This makes the experiment reproducible without
@@ -123,7 +130,7 @@ or permanent fork decision is implied.
 
 ## System audio output selection
 
-`MRPMessage.setSystemAudioOutputs(outputDeviceUIDs)` encodes MRP message type 48
+`MRPMessage.modifyOutputDevices('set', outputDeviceUIDs, 2)` encodes MRP message type 48
 (`ModifyOutputContextRequestMessage`, extension field 52) with context type
 `SharedSystemAudio` (2) and the UIDs in both `settingDevices` and
 `clusterAwareSettingDevices`. The context enum follows the Ghidra-derived protos
@@ -134,12 +141,10 @@ decodes a locked-pyatv packet built the same way as the supervised probe in
 Media Control Relay #114. pyatv serializes the raw enum varint after the device
 fields; this library emits canonical field order with the same decoded content.
 
-`sendMRPMessageAndWait` and the shared pending-request table accept
-`{ fatalTimeout: false }`. A timeout then rejects only that request and a late
-reply is ignored; every other request keeps the fatal timeout that closes the
-connection. The module uses it for the route acknowledgement, which tvOS can
-delay for many seconds during an AirPods takeover. Before this option, such a
-delay closed the whole AirPlay session about three seconds after the press.
+A reply timeout from `sendMRPMessageAndWait` rejects only that wait, and a late
+reply is ignored. The module relies on this for the route acknowledgement, which
+tvOS can delay for many seconds during an AirPods takeover; an earlier library
+closed the whole AirPlay session about three seconds after the press.
 
 ## Frames the library cannot use
 
@@ -152,13 +157,13 @@ failed and consumed a receive nonce, so every later frame failed too. pyatv
 decrypts only non-empty frames and logs, rather than fails on, a frame it
 cannot handle.
 
-The candidate skips empty frames without consuming a nonce. A frame that fails
-authentication is still a connection `error`. A frame that authenticates but
-cannot be decoded or delivered is dropped and reported as a `frame-error`
-event. `close` now carries Node's `hadError` flag. The module records the last
-dropped frame and names the close or error, with its code, in the session-loss
-log line. Which frame, if any, the TV sends at the end of a list has not been
-observed.
+The library skips empty frames without consuming a nonce. In the dev.6 build an
+authenticated frame that cannot be decoded ends the Companion connection, as
+upstream intends; the patch decodes the `0x06` date as pyatv does, so that case
+no longer ends it. Upstream closes a failed connection and then emits the error
+that caused it, so the module waits one microtask after `close` and names that
+error, with its code, in the session-loss log line. Which frame, if any, the TV
+sends at the end of a list has not been observed.
 
 ## Run offline
 
@@ -192,7 +197,7 @@ session about every 255 requests (roughly every two hours of health checks;
 issue #25). Release 0.4.0 keeps request IDs in 1 to 127, skipping any still
 awaiting a reply, and decodes `0x07` as -1.
 
-To verify the library source patch in a separate checkout of tag `v0.4.0`, apply
+To verify the library source patch in a separate checkout of energee `a189ea6`, apply
 `upstream-opack.patch`, install with the upstream lockfile
 (`pnpm install --frozen-lockfile`), then run `npm test` and `npm run build`. The
 source patch includes its tests. The resulting `dist`, without `__tests__`, matches

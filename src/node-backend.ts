@@ -125,7 +125,7 @@ export class NodeBackend {
 	}
 	private async discover(signal: AbortSignal): Promise<DiscoveredDevice[]> {
 		const devices = (
-			await bounded(async () => (this.options.discover ?? scan)({ timeout: 5000, signal }), 7000, signal)
+			await bounded(async () => (this.options.discover ?? scan)({ timeout: 5000 }), 7000, signal)
 		).filter((device) => device.model.startsWith('AppleTV') && device.deviceId && device.companionPort && device.port)
 		if (signal.aborted) throw new Error('Discovery cancelled')
 		this.devices = [

@@ -547,7 +547,7 @@ test('system audio routing sends one SharedSystemAudio request on the metadata s
 		assert.equal(request['.modifyOutputContextRequestMessage'].type, 2)
 		assert.deepEqual(request['.modifyOutputContextRequestMessage'].settingDevices, ['synthetic-airpods'])
 		assert.deepEqual(request['.modifyOutputContextRequestMessage'].clusterAwareSettingDevices, ['synthetic-airpods'])
-		assert.deepEqual(request['.modifyOutputContextRequestMessage'].addingDevices, [])
+		assert.equal(request['.modifyOutputContextRequestMessage'].addingDevices, undefined)
 		await until(() => controller.audioOutputs?.outputs.length === 2)
 		metadataPeers[0].routeMode = 'ignore'
 		assert.equal(await controller.routeAudio(before.epoch, ['tv-output']), true)
@@ -736,15 +736,20 @@ test('an idle session the TV closes logs how the connection ended, not a generic
 	controller.start()
 	try {
 		await controller.waitUntilReady(2000)
-		peers[0].emit('frame-error', new Error('Companion frame type 8 (13 bytes) dropped: OPACK: unknown tag 0x6'))
-		peers[0].emit('close', false)
+		peers[0].emit('close')
 		await until(() => controller.reconnects === 1)
+		await controller.waitUntilReady(2000)
+		// The library closes a failed connection first, then emits the error that caused it.
+		peers[1].emit('close')
+		peers[1].emit('error', new Error('Companion decrypt error: OPACK: unknown tag 0x0 at offset 4'))
+		await until(() => controller.reconnects === 2)
 		const lost = logs.filter(({ message }) => message.startsWith('Apple TV session lost'))
 		assert.deepEqual(
 			lost.map(({ message }) => message),
 			[
-				'Apple TV session lost: Companion connection closed by the TV; last dropped frame: ' +
-					'Companion frame type 8 (13 bytes) dropped: OPACK: unknown tag 0x6; retrying in 0.005 s',
+				'Apple TV session lost: Companion connection closed by the TV; retrying in 0.005 s',
+				'Apple TV session lost: Companion connection error: Companion decrypt error: ' +
+					'OPACK: unknown tag 0x0 at offset 4; retrying in 0.005 s',
 			],
 		)
 	} finally {

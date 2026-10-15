@@ -590,6 +590,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@xmldom/xmldom@npm:^0.9.10":
+  version: 0.9.12
+  resolution: "@xmldom/xmldom@npm:0.9.12"
+  checksum: 10c0/0a9ef38e203213717dde8d16c62743c26c37eb4195aeb4f286550a0aec2145c063a6c3633f253c29f75202f922d7c961d1acaad4dd93e5db1ef05c813354d178
+  languageName: node
+  linkType: hard
+
 "acorn-jsx@npm:^5.3.2":
   version: 5.3.2
   resolution: "acorn-jsx@npm:5.3.2"
@@ -631,6 +638,13 @@ __metadata:
   version: 4.0.4
   resolution: "balanced-match@npm:4.0.4"
   checksum: 10c0/07e86102a3eb2ee2a6a1a89164f29d0dbaebd28f2ca3f5ca786f36b8b23d9e417eb3be45a4acf754f837be5ac0a2317de90d3fcb7f4f4dc95720a1f36b26a17b
+  languageName: node
+  linkType: hard
+
+"base64-js@npm:^1.5.1":
+  version: 1.5.1
+  resolution: "base64-js@npm:1.5.1"
+  checksum: 10c0/f23823513b63173a001030fae4f2dabe283b99a9d324ade3ad3d148e218134676f1ee8568c877cd79ec1c53158dcf2d2ba527a97c606618928ba99dd930102bf
   languageName: node
   linkType: hard
 
@@ -1446,7 +1460,7 @@ __metadata:
 
 "node-appletv-remote@patch:node-appletv-remote@npm%3A0.4.0#~/experiments/node-library/patches/node-appletv-remote-npm-0.4.0-4a36632b41.patch":
   version: 0.4.0
-  resolution: "node-appletv-remote@patch:node-appletv-remote@npm%3A0.4.0#~/experiments/node-library/patches/node-appletv-remote-npm-0.4.0-4a36632b41.patch::version=0.4.0&hash=5dbe3c"
+  resolution: "node-appletv-remote@patch:node-appletv-remote@npm%3A0.4.0#~/experiments/node-library/patches/node-appletv-remote-npm-0.4.0-4a36632b41.patch::version=0.4.0&hash=2c9d34"
   dependencies:
     "@noble/ciphers": "npm:^1.3.0"
     bonjour-service: "npm:^1.3.0"
@@ -1456,7 +1470,7 @@ __metadata:
     protobufjs: "npm:^8.0.0"
   bin:
     atv: dist/cli/index.js
-  checksum: 10c0/f6f237397a6463679952d28abfb9608ea5b61fccc5cd6dc5b0491bcf7d6445a49f28fc5b60552e38f0fe6ab1f7d408402119a527415b2e98ab68a1955cbad963
+  checksum: 10c0/ac4317d5e02237985efc7a4d124fb5736a1e8222a8d1805cdef60106c47fc5edf7a6c78cb4be17f8e40f5aeafd1a2c54ccb35663dfa6879b66e820b231388456
   languageName: node
   linkType: hard
 
@@ -1548,6 +1562,17 @@ __metadata:
   languageName: node
   linkType: hard
 
+"plist@npm:^3.1.0":
+  version: 3.1.1
+  resolution: "plist@npm:3.1.1"
+  dependencies:
+    "@xmldom/xmldom": "npm:^0.9.10"
+    base64-js: "npm:^1.5.1"
+    xmlbuilder: "npm:^15.1.1"
+  checksum: 10c0/af681277c2e541c6aab0ddee57f59459c43beeea1ee7aa2d4218aa39595fb41c068e2d2be3e4abb17e3252eaf2c1b806ecfb1d402fa5a3f4a6e1a7a32c880c9a
+  languageName: node
+  linkType: hard
+
 "prelude-ls@npm:^1.2.1":
   version: 1.2.1
   resolution: "prelude-ls@npm:1.2.1"
@@ -1574,11 +1599,11 @@ __metadata:
   linkType: hard
 
 "protobufjs@npm:^8.0.0":
-  version: 8.8.0
-  resolution: "protobufjs@npm:8.8.0"
+  version: 8.8.1
+  resolution: "protobufjs@npm:8.8.1"
   dependencies:
     long: "npm:^5.3.2"
-  checksum: 10c0/2aa7fc766dce41858ce45ad750d9bfb2d30e9121f8c4f581ee3e5deda21440cae6bb23f41ec599d33b34963164e85f38eace687ba025d804fe926ab057c05703
+  checksum: 10c0/6d0bbbc7d8f9e2bd559fc7c360184062133f010e9f85257d9cb1f0671b3d73f153956b5678a88e95420023efc6be8646e41f0fb664909add6ec3ee8f38dfe294
   languageName: node
   linkType: hard
 
@@ -1824,6 +1849,13 @@ __metadata:
   version: 1.2.5
   resolution: "word-wrap@npm:1.2.5"
   checksum: 10c0/e0e4a1ca27599c92a6ca4c32260e8a92e8a44f4ef6ef93f803f8ed823f486e0889fc0b93be4db59c8d51b3064951d25e43d434e95dc8c960cc3a63d65d00ba20
+  languageName: node
+  linkType: hard
+
+"xmlbuilder@npm:^15.1.1":
+  version: 15.1.1
+  resolution: "xmlbuilder@npm:15.1.1"
+  checksum: 10c0/665266a8916498ff8d82b3d46d3993913477a254b98149ff7cff060d9b7cc0db7cf5a3dae99aed92355254a808c0e2e3ec74ad1b04aa1061bdb8dfbea26c18b8
   languageName: node
   linkType: hard
 

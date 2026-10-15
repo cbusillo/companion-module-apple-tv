@@ -209,6 +209,7 @@ class Observer extends EventEmitter {
 		volume(receiver, 'tv-output', 0.3)
 		this.emit('test-ready')
 	}
+	async sendMRPMessage() {}
 	close() {
 		this.closes++
 		this.emit('close')

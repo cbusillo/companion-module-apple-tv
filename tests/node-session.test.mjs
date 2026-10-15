@@ -207,21 +207,20 @@ test('unexpected socket error aborts a pending request without an unhandled Even
 	assert.equal(connection.closed, true)
 })
 
-test('a session the TV closes names the close, a prior socket error and the last dropped frame', async () => {
-	for (const [hadError, dropped, expected] of [
-		[false, undefined, 'Companion connection closed by the TV'],
-		[true, undefined, 'Companion connection closed by the TV after a socket error'],
+test('a session the TV closes names the close, or the failure the library reports with it', async () => {
+	for (const [failure, expected] of [
+		[undefined, 'Companion connection closed by the TV'],
 		[
-			false,
-			'Companion frame type 8 (13 bytes) dropped: OPACK: unknown tag 0x6 at offset 4',
-			'Companion connection closed by the TV; last dropped frame: Companion frame type 8 (13 bytes) dropped: OPACK: unknown tag 0x6 at offset 4',
+			'Companion decrypt error: OPACK: unknown tag 0x6 at offset 4',
+			'Companion connection error: Companion decrypt error: OPACK: unknown tag 0x6 at offset 4',
 		],
 	]) {
 		const connection = new FakeConnection()
 		await assert.rejects(
 			run(connection, async () => {
-				if (dropped) connection.emit('frame-error', new Error(dropped))
-				connection.emit('close', hadError)
+				// The library closes first and then emits the error that caused the close.
+				connection.emit('close')
+				if (failure) connection.emit('error', new Error(failure))
 				await new Promise(() => {})
 			}),
 			{ message: expected },

@@ -52,15 +52,18 @@ test('output changes recover capability and correlated volume without device con
 		await reading
 		assert.equal(snapshots.at(-1).audio.volume, undefined)
 		assert.equal(snapshots.at(-1).audio.absolute, false)
+		// The session subscribes to output-device updates once after connecting.
+		const [subscription, ...renewal] = peer.requests
+		assert.equal(subscription['.clientUpdatesConfigMessage'].outputDeviceUpdates, true)
 		assert.deepEqual(
-			peer.requests.map((message) => message.type),
+			renewal.map((message) => message.type),
 			[16, 16, 49],
 		)
 		assert.deepEqual(
-			peer.requests.slice(0, 2).map((message) => message['.clientUpdatesConfigMessage'].volumeUpdates),
+			renewal.slice(0, 2).map((message) => message['.clientUpdatesConfigMessage'].volumeUpdates),
 			[false, true],
 		)
-		for (const request of peer.requests.slice(0, 2)) {
+		for (const request of renewal.slice(0, 2)) {
 			const config = request['.clientUpdatesConfigMessage']
 			for (const key of ['artworkUpdates', 'nowPlayingUpdates', 'keyboardUpdates', 'outputDeviceUpdates'])
 				assert.equal(config[key], true)

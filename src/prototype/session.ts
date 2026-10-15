@@ -63,11 +63,6 @@ export async function withCompanionSession<T>(
 	const connection = createConnection(target, credentials)
 	const lost = new AbortController()
 	const active = AbortSignal.any([signal, lost.signal])
-	// The library drops a frame it cannot decode; remember it in case the TV then closes.
-	let dropped: string | undefined
-	const onDropped = (error: unknown): void => {
-		dropped = transportDetail(error)
-	}
 	// A reply the library could not match to a pending request arrives as an event. Remember the
 	// last one so a request timeout can say what the TV actually sent back.
 	let unmatched: string | undefined
@@ -77,20 +72,16 @@ export async function withCompanionSession<T>(
 		const kind = typeof id === 'object' ? (id === null ? 'null' : (id.constructor?.name ?? 'object')) : typeof id
 		return `_i=${String(data.get('_i'))} _x=${String(id)} (${kind})`
 	}
-	const timeoutDetail = (): string =>
-		[unmatched && `last unmatched reply: ${unmatched}`, dropped && `last dropped frame: ${dropped}`]
-			.filter(Boolean)
-			.join('; ')
+	const timeoutDetail = (): string => (unmatched ? `last unmatched reply: ${unmatched}` : '')
 	const lose = (reason: string): void => {
-		if (!lost.signal.aborted)
-			lost.abort(new ConnectionLost(dropped ? `${reason}; last dropped frame: ${dropped}` : reason))
+		if (!lost.signal.aborted) lost.abort(new ConnectionLost(reason))
 	}
+	// A socket or frame failure closes the library connection and then emits its error in the
+	// same turn, so a close waits one microtask to let that error name the cause.
 	const onError = (error: unknown): void => lose(`Companion connection error: ${transportDetail(error)}`)
-	const onClose = (hadError?: unknown): void =>
-		lose(`Companion connection closed by the TV${hadError === true ? ' after a socket error' : ''}`)
+	const onClose = (): void => queueMicrotask(() => lose('Companion connection closed by the TV'))
 	connection.on('error', onError)
 	connection.on('close', onClose)
-	connection.on('frame-error', onDropped)
 	const client = {
 		sendCompanionRequest: async (
 			identifier: string,

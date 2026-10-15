@@ -160,18 +160,13 @@ test('legacy upgrade preserves button options and old paths while requiring expl
 test('Save returns while discovery is pending and disable cancels it before late results can publish', async () => {
 	const f = fixture()
 	const gate = Promise.withResolvers()
-	let signal
-	f.options.discover = async (options) => {
-		signal = options.signal
-		return gate.promise
-	}
+	f.options.discover = async () => gate.promise
 	try {
 		await f.module.init({ enabled: true, deviceId: '' }, true, {})
 		await nextTurn()
 		assert.equal(f.values.connection, 'discovering')
 		await f.module.configUpdated({ enabled: false, deviceId: '' }, {})
 		await nextTurn()
-		assert.equal(signal.aborted, true)
 		assert.equal(f.values.connection, 'disabled')
 		gate.resolve([])
 		await nextTurn()
