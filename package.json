@@ -1,6 +1,6 @@
 {
   "name": "companion-module-apple-tv",
-  "version": "0.5.1-dev.1",
+  "version": "0.5.1-dev.4",
   "main": "dist/main.js",
   "type": "module",
   "scripts": {
@@ -30,7 +30,7 @@
   },
   "dependencies": {
     "@companion-module/base": "2.2.1",
-    "node-appletv-remote": "patch:node-appletv-remote@npm%3A0.3.2#~/experiments/node-library/patches/node-appletv-remote-npm-0.3.2-9e89db7504.patch"
+    "node-appletv-remote": "patch:node-appletv-remote@npm%3A0.4.0#~/experiments/node-library/patches/node-appletv-remote-npm-0.4.0-4a36632b41.patch"
   },
   "devDependencies": {
     "@companion-module/tools": "^3.1.1",

@@ -177,15 +177,15 @@ uv run --python 3.13 --locked python experiments/node-library/mrp_fixtures.py | 
 
 CI checks the bundle on Linux, macOS and Windows. Synthetic tests cover setup,
 secret persistence, restart, cancellation, migration, encryption, metadata,
-queue expiry and reconnect without replay. The package test loads the real bundle
-and schemas with filesystem access restricted to the package. The independent
+queue expiry and reconnect without replay. The package test loads the real bundle,
+with its compiled schemas, and filesystem access restricted to the package. The independent
 pyatv peer also exercises real bundled PIN pairing, closure while awaiting a PIN
 and rejection of an invalid identity signature. Hardware testing
 so far covers one Apple TV; this does not establish compatibility with every tvOS
 version, app, audio route or operating-system installation.
 
 The [library patch and qualification notes](experiments/node-library/README.md)
-describe the reproducible extensions to `node-appletv-remote` 0.3.2 and the separate
+describe the reproducible extensions to `node-appletv-remote` 0.4.0 and the separate
 developer harness. Source and compiled patches are checked in together. No
 upstream acceptance or distribution approval is implied by the candidate.
 
