@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict'
 import { CompanionPairSetup } from 'node-appletv-remote'
 import { withCompanionSession } from '../../dist/prototype/session.js'
+import { CompanionRequestRejected } from '../../dist/prototype/companion.js'
 
 const target = { address: '127.0.0.1', companionPort: Number(process.argv[2]) }
 const pair = new CompanionPairSetup(target.address, target.companionPort)
@@ -21,6 +22,9 @@ for (let i = 0; i < 2; i++) {
 		])
 		assert.equal(await commands.readPower(), 'On')
 		if (i === 0) {
+			// A refused request is a rejection, not a lost session: the next command still runs.
+			await assert.rejects(commands.launchApp('com.example.refused'), CompanionRequestRejected)
+			await commands.launchApp('com.example.one')
 			await commands.press('select')
 			await commands.press('appSwitcher')
 			await commands.press('homeHold')

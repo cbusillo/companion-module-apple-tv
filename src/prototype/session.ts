@@ -93,6 +93,10 @@ export async function withCompanionSession<T>(
 			try {
 				return await bounded(async () => connection.sendRequest(identifier, content, wait + 1000), wait, active)
 			} catch (error) {
+				// The library rejects a reply carrying `_em` (the TV refused the request) with a plain
+				// Error; keep it a rejection so callers do not treat it as a lost session.
+				if (error instanceof Error && error.message.startsWith(`Companion ${identifier} failed: `))
+					throw new CompanionRequestRejected('Apple TV rejected the request', { cause: error })
 				const detail = error instanceof OperationTimedOut && timeoutDetail()
 				if (error instanceof OperationTimedOut && detail)
 					throw new OperationTimedOut(`${error.message}; ${detail}`, { cause: error })

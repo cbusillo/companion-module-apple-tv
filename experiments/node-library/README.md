@@ -38,7 +38,10 @@ DataStream frame, one after another in wire order (#31), and declares
 VolumeControlCapabilitiesDidChange (type 64) and reads volume capabilities
 during the handshake (#53). The module's own versions of those changes are
 dropped. The handshake now also sends GetVolumeControlCapabilities (62); the
-module does not read its type 63 reply.
+module does not read its type 63 reply. Companion `sendRequest` now rejects a reply that
+carries `_em` (#32); the module still reports that as a refused request, not a
+lost session, and the pyatv loopback peer refuses one launch and one
+TVRCSessionStart to check it.
 
 The remaining patch on `5cfc6af` adds only:
 

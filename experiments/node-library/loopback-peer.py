@@ -19,6 +19,7 @@ class PeerState(TypedDict):
     right_down: int
     drop_next_right: bool
     swipes: int
+    tvrc_starts: int
 
 
 class Peer(CompanionServerAuth, asyncio.Protocol):
@@ -158,11 +159,27 @@ class Peer(CompanionServerAuth, asyncio.Protocol):
             else:
                 assert command in (1, 2, 3, 4)
         elif identifier == "_launchApp":
-            assert args["_bundleID"] in ("com.example.one", "com.example.two")
-        elif identifier not in ("_systemInfo", "TVRCSessionStart"):
+            assert args["_bundleID"] in ("com.example.one", "com.example.two", "com.example.refused")
+            if args["_bundleID"] == "com.example.refused":
+                self.refuse(identifier, message["_x"])
+                return
+        elif identifier == "TVRCSessionStart":
+            self.state["tvrc_starts"] += 1
+            # Older TVs refuse this optional registration; the second session sees that.
+            if self.state["tvrc_starts"] == 2:
+                self.refuse(identifier, message["_x"])
+                return
+        elif identifier != "_systemInfo":
             raise AssertionError("Unexpected command")
         self.send_to_client(FrameType.E_OPACK, {
             "_i": identifier, "_x": message["_x"], "_t": 3, "_c": content,
+        })
+
+
+    def refuse(self, identifier: str, transaction: int) -> None:
+        # The error reply the live TV sends for a request it has no handler for.
+        self.send_to_client(FrameType.E_OPACK, {
+            "_i": identifier, "_x": transaction, "_t": 3, "_em": "No request handler", "_ec": 58822,
         })
 
 
@@ -197,7 +214,7 @@ async def check_package(bundle: str) -> None:
     root = Path(__file__).resolve().parents[2]
     for peer_type, mode in ((Peer, "success"), (ClosedPairingPeer, "closed"), (BadSignaturePeer, "invalid-identity")):
         failures: list[Exception] = []
-        state: PeerState = {"right_down": 0, "drop_next_right": False, "swipes": 0}
+        state: PeerState = {"right_down": 0, "drop_next_right": False, "swipes": 0, "tvrc_starts": 0}
         def packaged_peer() -> Peer:
             peer = peer_type(failures, state)
             # Fixed synthetic salt plus the Node fixture's reproducible client
@@ -233,7 +250,7 @@ async def main() -> None:
         await check_package(sys.argv[2])
         return
     failures: list[Exception] = []
-    state: PeerState = {"right_down": 0, "drop_next_right": False, "swipes": 0}
+    state: PeerState = {"right_down": 0, "drop_next_right": False, "swipes": 0, "tvrc_starts": 0}
     server = await asyncio.get_running_loop().create_server(lambda: Peer(failures, state), "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
     root = Path(__file__).resolve().parents[2]
@@ -248,6 +265,7 @@ async def main() -> None:
                 raise RuntimeError("Independent loopback protocol test failed")
         assert state["right_down"] == 1, "A failed action was replayed"
         assert state["swipes"] == 4, "Missing complete swipe gestures"
+        assert state["tvrc_starts"] >= 2, "The refused TV remote registration was not exercised"
         bad_server = await asyncio.get_running_loop().create_server(lambda: BadSignaturePeer(failures, state), "127.0.0.1", 0)
         try:
             bad_port = bad_server.sockets[0].getsockname()[1]
