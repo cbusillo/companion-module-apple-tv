@@ -1,11 +1,53 @@
 # Node library extensions and qualification
 
-These are reproducible extensions to `node-appletv-remote` 0.3.2, with offline
+These are reproducible extensions to `node-appletv-remote` 0.4.0, with offline
 tests and a separate, explicit-target live harness. Version 0.5 integrates the
 controller into Companion's normal entry point and bundles the patched library.
-Development build 0.5.0-dev.10 runs in the Director's Companion; the earlier
-Python environment, keys and package are kept as rollback material. See the root
+Development builds run in the Director's Companion; the earlier Python
+environment, keys and package are kept as rollback material. See the root
 README for the normal-user discovery and PIN flow.
+
+## Library 0.4.0 baseline
+
+The module depends on the published npm `node-appletv-remote@0.4.0` (tag
+`v0.4.0`, `7a557f72`). Building that tag reproduces the published `dist`
+exactly. Release 0.4.0 already contains the Companion compatibility work this
+module first carried as a patch: the OPACK float, unsigned 64-bit and pointer
+support, `0x07` as -1, tag-inclusive frame lengths, the Companion nonce layout,
+request IDs 1 to 127 with timed-out IDs reserved for 30 seconds, event/request
+separation, transaction IDs on outbound events, discovery port matching in either
+advertisement order, skipped empty frames and Nagle disabled. Release 0.4.0 also
+wraps bare Companion content in the `{ _i, _t, _c, _x }` envelope. The module
+already sends prebuilt `{ _t, _c }` envelopes; the library copies those and only
+sets `_i` and `_x`, so the bytes sent are unchanged.
+
+The remaining patch adds only what 0.4.0 lacks:
+
+- AirPlay connection lifetime: one bounded, cancellable lifetime per instance,
+  CSeq-correlated RTSP replies, identifier-correlated MRP replies, error and
+  wrong-type rejection, a single outstanding heartbeat, and full cleanup on close.
+- `sendMRPMessageAndWait(..., { fatalTimeout: false })` for the slow output-route
+  acknowledgement.
+- Every protobuf in a DataStream batch, in wire order, with malformed lengths
+  rejected.
+- Metadata schemas: GetVolume/GetVolumeResult, volume capabilities, active player,
+  client/player removal, grouped outputs, cluster identity, `errorCode`, and
+  untyped acknowledgements as type 0. These are compiled into the bundled schema.
+- `MRPMessage.setSystemAudioOutputs` and `MRPMessage.getVolume`, with `MRPMessage`,
+  `MessageType` and `OutputContextType` exported.
+- Companion `frame-error` for an authenticated frame that cannot be decoded, and
+  `close` with Node's `hadError` flag.
+- Companion pairing lifetime: bounded waits, cancellation, peer-close
+  notification while awaiting the PIN, a four-digit PIN check, and M6 identity
+  signature verification.
+- `scan({ signal })` cancellation.
+
+Release 0.4.0 also adds high-level controls on its `AppleTV` class: MRP skip,
+position, shuffle/repeat and `SetVolume`, plus Companion apps, accounts and power.
+The module does not use that class. Its own Companion `_mcc` seek and volume
+requests, app and power requests, queue and bounded sessions are what the TV has
+accepted, so the wire behavior is unchanged. The 0.4.0 removal of the MRP
+encryption class and MRP pair-verify path removed nothing the module uses.
 
 The prototype composes app listing/launching, explicit seek intervals, absolute
 volume read/write, and power-state queries through the library's public
@@ -13,7 +55,7 @@ volume read/write, and power-state queries through the library's public
 The live harness supplies an authenticated session through the library's public
 connection API. It does not read the installed module's configuration or credentials.
 
-## Findings
+## Findings against 0.3.2
 
 The public request API is sufficient for the command layer, but the published
 codec and encrypted framing need changes before they can carry all the required
@@ -71,10 +113,11 @@ An independent loopback session caught that mistake; regenerated fixtures use
 `nonce_length=12`, as pyatv's actual Companion connection does. Both the send and
 receive regression checks failed before correcting the library's counter layout.
 
-The source changes and regression tests are in `upstream-opack.patch`, based on
-upstream commit `5e39c1e219f020d51aa0b051694f65b1edda5431`. The Yarn patch under
-`patches/` applies the corresponding compiled JavaScript, declarations, and source
-maps to the published npm package. This makes the experiment reproducible without
+The remaining source changes and their regression tests are in
+`upstream-opack.patch`, based on upstream tag `v0.4.0`. The Yarn patch under
+`patches/` applies the corresponding compiled JavaScript, declarations, source
+maps and bundled schema to the published npm package. The patch-only `.proto`
+files are build input; the npm package carries no `.proto` files. This makes the experiment reproducible without
 a local filesystem dependency or an unpublished package. No upstream submission
 or permanent fork decision is implied.
 
@@ -146,12 +189,24 @@ Apple TVs read one-byte OPACK integers as signed. A request ID from 128 to 255
 therefore came back changed: 255 returned as the one-byte -1 (`0x07`), which the
 decoder rejected. The frame was dropped and the request timed out, ending the
 session about every 255 requests (roughly every two hours of health checks;
-issue #25). The patch keeps request IDs in 1 to 127, skipping any still awaiting
-a reply, and decodes `0x07` as -1.
+issue #25). Release 0.4.0 keeps request IDs in 1 to 127, skipping any still
+awaiting a reply, and decodes `0x07` as -1.
 
-To verify the library source patch in a separate checkout of the exact upstream
-commit, apply `upstream-opack.patch`, then run the upstream `npm install`,
-`npm test`, and `npm run build` commands. The source patch includes its tests.
+To verify the library source patch in a separate checkout of tag `v0.4.0`, apply
+`upstream-opack.patch`, install with the upstream lockfile
+(`pnpm install --frozen-lockfile`), then run `npm test` and `npm run build`. The
+source patch includes its tests. The resulting `dist`, without `__tests__`, matches
+the files the Yarn patch installs.
+
+To regenerate the Yarn patch after changing the source patch: build the patched
+checkout, run `yarn patch node-appletv-remote@npm:0.4.0`, copy the built `dist`
+without `__tests__` into the printed directory, set `dist/cli/index.js` to mode
+755, run `yarn patch-commit -s` on that directory, shorten the blob hashes on the
+patch's `index` lines to seven characters, and run `yarn install`.
+
+`.yarnrc.yml` preapproves exactly `node-appletv-remote@0.4.0` past the three-day
+npm age gate, because it was published on October 14, 2026. The entry can be
+removed after October 17, 2026; later versions remain gated.
 
 ## Supervised device test
 
@@ -609,7 +664,7 @@ harness.
 
 ## References
 
-- [Upstream public API](https://github.com/energee/node-appletv-remote/blob/5e39c1e219f020d51aa0b051694f65b1edda5431/src/appletv.ts)
+- [Upstream public API](https://github.com/energee/node-appletv-remote/blob/v0.4.0/src/appletv.ts)
 - [pyatv Companion API reference implementation](https://github.com/postlund/pyatv/blob/v0.18.0/pyatv/protocols/companion/api.py)
 - [pyatv media and power commands](https://github.com/postlund/pyatv/blob/v0.18.0/pyatv/protocols/companion/__init__.py)
 - [OPACK protocol and reference examples](https://pyatv.dev/documentation/protocols/#opack)

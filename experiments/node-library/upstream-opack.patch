@@ -1,27 +1,12 @@
 diff --git a/README.md b/README.md
-index 1fc2eb1..b5c0df3 100644
+index 29f40c1..8865091 100644
 --- a/README.md
 +++ b/README.md
-@@ -277,6 +277,79 @@ src/
+@@ -147,6 +147,64 @@ atv.sendCompanionMessage('_interest', new Map([['_regEvents', ['SystemStatus']]]
  
- ## Development
+ The OPACK and framing tests use fixtures from pyatv 0.18.0 and the [published OPACK examples](https://pyatv.dev/documentation/protocols/#opack).
  
-+### OPACK values
-+
-+For low-level Companion requests, wrap integral values in `new OpackFloat(value)`
-+when the protocol requires a floating-point value, such as skip seconds or the
-+volume endpoints 0 and 1. Ordinary nonnegative safe integers keep their compact
-+integer encoding. Negative numbers use float64; unsigned 64-bit identifiers
-+must use `bigint` to preserve precision. The decoder accepts compact and extended
-+object references in device replies.
-+
-+Encrypted Companion frame lengths include their authentication tag. Independent
-+pyatv fixtures verify both encryption and streaming reception of these frames.
-+
-+The compatibility tests include independent fixtures from pyatv 0.18.0 and the
-+[published OPACK protocol examples](https://pyatv.dev/documentation/protocols/#opack).
-+
-+### AirPlay metadata compatibility
++## AirPlay metadata compatibility
 +
 +DataStream frames can carry several length-prefixed protobufs. The receive path
 +delivers all of them in wire order, including across encrypted TCP fragments.
@@ -56,7 +41,7 @@ index 1fc2eb1..b5c0df3 100644
 +Consumers must track explicit active player/output selection and invalidate
 +feedback on connection loss; these extensions do not provide a complete reducer.
 +
-+### AirPlay connection lifetime
++## AirPlay connection lifetime
 +
 +Each `AirPlayConnection` owns one lifetime. Pass an optional fourth constructor
 +argument `{ timeoutMs, logger }` to set the socket/HTTP/write deadline (default
@@ -79,16 +64,27 @@ index 1fc2eb1..b5c0df3 100644
 +and exited naturally without remaining TCP sockets. Longer outage/soak coverage
 +and integration into a persistent application controller remain separate work.
 +
- ```bash
- # Install dependencies
- npm install
-@@ -291,4 +364,4 @@ npm test
- npm run test:watch
- ```
+ ## Development
  
--Requires Node.js 18+ (ES2022 target, ESM modules).
-\ No newline at end of file
-+Requires Node.js 18+ (ES2022 target, ESM modules).
+ ```bash
+diff --git a/scripts/gen-proto.mjs b/scripts/gen-proto.mjs
+index 10b4132..4543c03 100644
+--- a/scripts/gen-proto.mjs
++++ b/scripts/gen-proto.mjs
+@@ -42,6 +42,13 @@ const PROTO_FILES = [
+   'SendHIDEventMessage.proto',
+   'SetVolumeMessage.proto',
+   'VolumeDidChangeMessage.proto',
++  'GetVolumeMessage.proto',
++  'GetVolumeResultMessage.proto',
++  'VolumeControlCapabilitiesDidChangeMessage.proto',
++  'RemoveClientMessage.proto',
++  'RemovePlayerMessage.proto',
++  'SetNowPlayingPlayerMessage.proto',
++  'ModifyOutputContextRequestMessage.proto',
+ ];
+ 
+ const root = new protobuf.Root();
 diff --git a/src/__tests__/airplay-lifecycle.test.ts b/src/__tests__/airplay-lifecycle.test.ts
 new file mode 100644
 index 0000000..7ca26a5
@@ -444,29 +440,13 @@ index bf59292..ca09b7e 100644
      const conn = new AirPlayConnection('192.168.1.100', 7000, {
        clientId: 'test',
 diff --git a/src/__tests__/discovery-order.test.ts b/src/__tests__/discovery-order.test.ts
-new file mode 100644
-index 0000000..6d24eb5
---- /dev/null
+index a9789e8..43f8e66 100644
+--- a/src/__tests__/discovery-order.test.ts
 +++ b/src/__tests__/discovery-order.test.ts
-@@ -0,0 +1,52 @@
-+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-+import { scan } from '../discovery.js';
-+
-+const mock = vi.hoisted(() => ({ callbacks: new Map<string, (service: Record<string, unknown>) => void>(), stopped: vi.fn(), destroyed: vi.fn() }));
-+vi.mock('bonjour-service', () => ({
-+  Bonjour: class {
-+    find(options: { type: string }, callback: (service: Record<string, unknown>) => void) {
-+      mock.callbacks.set(options.type, callback);
-+      return { stop: mock.stopped };
-+    }
-+    destroy() { mock.destroyed(); }
-+  },
-+}));
-+
-+beforeEach(() => { vi.useFakeTimers(); mock.callbacks.clear(); vi.clearAllMocks(); });
-+afterEach(() => vi.useRealTimers());
-+
-+describe('mDNS service ordering', () => {
+@@ -17,6 +17,23 @@ beforeEach(() => { vi.useFakeTimers(); mock.callbacks.clear(); vi.clearAllMocks(
+ afterEach(() => vi.useRealTimers());
+ 
+ describe('mDNS service ordering', () => {
 +  it('does not start discovery when already cancelled', async () => {
 +    await expect(scan({ signal: AbortSignal.abort() })).rejects.toThrow();
 +    expect(mock.callbacks.size).toBe(0);
@@ -484,145 +464,16 @@ index 0000000..6d24eb5
 +    expect(vi.getTimerCount()).toBe(0);
 +  });
 +
-+  for (const order of [['airplay', 'companion-link'], ['companion-link', 'airplay']]) {
-+    it(`finds the Companion port when ${order[0]} arrives first`, async () => {
-+      const services: Record<string, Record<string, unknown>> = {
-+        airplay: { name: 'Synthetic TV', addresses: ['192.0.2.10'], port: 7000, txt: { deviceid: 'synthetic-tv', model: 'AppleTV6,2' } },
-+        'companion-link': { addresses: ['192.0.2.10'], port: 49153 },
-+      };
-+      const pending = scan({ timeout: 10 });
-+      for (const service of order) mock.callbacks.get(service)!(services[service]);
-+      await vi.advanceTimersByTimeAsync(10);
-+      const devices = await pending;
-+      expect(devices).toHaveLength(1);
-+      expect(devices[0].companionPort).toBe(services['companion-link'].port);
-+      expect(mock.stopped).toHaveBeenCalledTimes(2);
-+      expect(mock.destroyed).toHaveBeenCalledOnce();
-+    });
-+  }
-+});
-diff --git a/src/companion/__tests__/companion-session.test.ts b/src/companion/__tests__/companion-session.test.ts
-index 1fb65bc..cc1c76c 100644
---- a/src/companion/__tests__/companion-session.test.ts
-+++ b/src/companion/__tests__/companion-session.test.ts
-@@ -22,9 +22,9 @@ describe('CompanionSession', () => {
-     // Encrypted output: 4-byte header + ciphertext + 16-byte tag
-     const header = encrypted.subarray(0, 4);
-     expect(header[0]).toBe(FrameType.E_OPACK);
--    // Length in header should be plaintext length
--    const payloadLen = (header[1] << 16) | (header[2] << 8) | header[3];
--    expect(payloadLen).toBe(plaintext.length);
-+    // Header length describes the complete wire payload, including its tag.
-+    const payloadLen = header.readUIntBE(1, 3);
-+    expect(payloadLen).toBe(encrypted.length - header.length);
- 
-     const encryptedPayload = encrypted.subarray(4);
-     const decrypted = receiver.decrypt(header, encryptedPayload);
-diff --git a/src/companion/__tests__/event-correlation.test.ts b/src/companion/__tests__/event-correlation.test.ts
-new file mode 100644
-index 0000000..36b837c
---- /dev/null
-+++ b/src/companion/__tests__/event-correlation.test.ts
-@@ -0,0 +1,92 @@
-+import { describe, expect, it } from 'vitest';
-+import { CompanionConnection } from '../connection.js';
-+import { CompanionSession } from '../companion-session.js';
-+import { FrameType } from '../framing.js';
-+import { opackDecode, opackEncode, type OpackDict, type OpackValue } from '../opack.js';
-+
-+function fixture() {
-+  const key = Buffer.alloc(32, 7);
-+  const connection = new CompanionConnection('unused.invalid', 1, {
-+    clientId: 'synthetic', serverId: 'synthetic', clientLTSK: key, clientLTPK: key, serverLTPK: key,
-+  });
-+  const parser = connection as unknown as {
-+    session: CompanionSession;
-+    socket: { write(data: Buffer): void; destroy(): void };
-+    onData(data: Buffer): void;
-+  };
-+  parser.session = new CompanionSession(key, key);
-+  const peer = new CompanionSession(key, key);
-+  const requests: OpackDict[] = [];
-+  parser.socket = {
-+    write(data): void { requests.push(opackDecode(peer.decrypt(data.subarray(0, 4), data.subarray(4))) as OpackDict); },
-+    destroy(): void {},
-+  };
-+  const receive = (body: OpackDict): void => parser.onData(peer.encrypt(FrameType.E_OPACK, opackEncode(body)));
-+  return { connection, requests, receive };
-+}
-+
-+describe('Companion request and event correlation', () => {
-+  it('keeps request IDs in 1..127 so a signed one-byte echo still matches', async () => {
-+    const { connection, requests, receive } = fixture();
-+    try {
-+      for (let n = 0; n < 300; n++) {
-+        const pending = connection.sendRequest('_ping', new Map<OpackValue, OpackValue>([['_t', 2], ['_c', new Map()]]));
-+        const id = requests.at(-1)!.get('_x') as number;
-+        expect(id).toBeGreaterThanOrEqual(1);
-+        expect(id).toBeLessThanOrEqual(127);
-+        receive(new Map<OpackValue, OpackValue>([['_x', id], ['_t', 3], ['_c', new Map()]]));
-+        await pending;
-+      }
-+      expect(requests.map((r) => r.get('_x')).slice(125, 129)).toEqual([126, 127, 1, 2]);
-+    } finally {
-+      connection.close();
-+    }
-+  });
-+
-+  it('skips a request ID that is still awaiting its reply', async () => {
-+    const { connection, requests, receive } = fixture();
-+    try {
-+      const held = connection.sendRequest('_held', new Map<OpackValue, OpackValue>([['_t', 2], ['_c', new Map()]]));
-+      held.catch(() => {});
-+      expect(requests[0].get('_x')).toBe(1);
-+      for (let n = 0; n < 127; n++) {
-+        const pending = connection.sendRequest('_ping', new Map<OpackValue, OpackValue>([['_t', 2], ['_c', new Map()]]));
-+        receive(new Map<OpackValue, OpackValue>([['_x', requests.at(-1)!.get('_x')!], ['_t', 3], ['_c', new Map()]]));
-+        await pending;
-+      }
-+      expect(requests.at(-1)!.get('_x')).toBe(2);
-+    } finally {
-+      connection.close();
-+    }
-+  });
-+
-+  it('delivers an event with a colliding ID without resolving the pending request', async () => {
-+    const { connection, requests, receive } = fixture();
-+    const events: unknown[] = [];
-+    connection.on('event', (event) => events.push(event));
-+    try {
-+      const pending = connection.sendRequest('_mcc', new Map<OpackValue, OpackValue>([['_t', 2], ['_c', new Map()]]));
-+      const id = requests[0].get('_x');
-+      receive(new Map<OpackValue, OpackValue>([['_x', id!], ['_t', 1], ['_i', '_iMC'], ['_c', new Map([['_mcF', 256]])]]));
-+      receive(new Map<OpackValue, OpackValue>([['_x', id!], ['_t', 3], ['_c', new Map([['_vol', 0.25]])]]));
-+      const reply = await pending;
-+      expect(reply.get('_t')).toBe(3);
-+      expect((reply.get('_c') as OpackDict).get('_vol')).toBe(0.25);
-+      expect(events).toHaveLength(1);
-+    } finally { connection.close(); }
-+  });
-+
-+  it('numbers public event messages and subsequent requests independently', async () => {
-+    const { connection, requests, receive } = fixture();
-+    try {
-+      connection.sendMessage('_interest', new Map<OpackValue, OpackValue>([['_t', 1], ['_c', new Map()]]));
-+      const first = requests[0].get('_x');
-+      expect(first).toBeGreaterThan(0);
-+      const pending = connection.sendRequest('_systemInfo', new Map<OpackValue, OpackValue>([['_t', 2], ['_c', new Map()]]));
-+      const second = requests[1].get('_x');
-+      expect(second).not.toBe(first);
-+      receive(new Map<OpackValue, OpackValue>([['_x', second!], ['_t', 3], ['_c', new Map()]]));
-+      await pending;
-+    } finally { connection.close(); }
-+  });
-+});
+   for (const order of [['airplay', 'companion-link'], ['companion-link', 'airplay']]) {
+     it(`finds the Companion port when ${order[0]} arrives first`, async () => {
+       const services: Record<string, Record<string, unknown>> = {
 diff --git a/src/companion/__tests__/frame-resilience.test.ts b/src/companion/__tests__/frame-resilience.test.ts
 new file mode 100644
-index 0000000..c123b55
+index 0000000..a338bac
 --- /dev/null
 +++ b/src/companion/__tests__/frame-resilience.test.ts
-@@ -0,0 +1,70 @@
-+import { describe, expect, it } from 'vitest';
+@@ -0,0 +1,99 @@
++import { describe, expect, it, vi } from 'vitest';
 +import { CompanionConnection } from '../connection.js';
 +import { CompanionSession } from '../companion-session.js';
 +import { FrameType } from '../framing.js';
@@ -683,6 +534,35 @@ index 0000000..c123b55
 +    } finally { connection.close(); }
 +  });
 +
++  it('keeps the connection after a request timeout and drops its late reply silently', async () => {
++    vi.useFakeTimers();
++    const { connection, requests, reply, errors, dropped } = fixture();
++    const closed: unknown[] = [];
++    connection.on('close', (hadError: unknown) => closed.push(hadError));
++    try {
++      const late = connection.sendRequest('_late', new Map<OpackValue, OpackValue>([['_t', 2], ['_c', new Map()]]), 10);
++      const lateId = requests[0].get('_x')!;
++      const timedOut = expect(late).rejects.toThrow(/timeout/);
++      await vi.advanceTimersByTimeAsync(10);
++      await timedOut;
++      const next = connection.sendRequest('_next', new Map<OpackValue, OpackValue>([['_t', 2], ['_c', new Map()]]));
++      const nextId = requests[1].get('_x')!;
++      expect(nextId).not.toBe(lateId);
++      const events: unknown[] = [];
++      connection.on('event', (event: unknown) => events.push(event));
++      reply(lateId);
++      reply(nextId);
++      expect((await next).get('_x')).toBe(nextId);
++      expect(events).toEqual([]);
++      expect(errors).toEqual([]);
++      expect(dropped).toEqual([]);
++      expect(closed).toEqual([]);
++    } finally {
++      connection.close();
++      vi.useRealTimers();
++    }
++  });
++
 +  it('still reports a frame that fails authentication as a connection error', () => {
 +    const { connection, receiveRaw, errors } = fixture();
 +    try {
@@ -692,229 +572,12 @@ index 0000000..c123b55
 +    } finally { connection.close(); }
 +  });
 +});
-diff --git a/src/companion/__tests__/framing-compatibility.test.ts b/src/companion/__tests__/framing-compatibility.test.ts
-new file mode 100644
-index 0000000..ff480cb
---- /dev/null
-+++ b/src/companion/__tests__/framing-compatibility.test.ts
-@@ -0,0 +1,105 @@
-+import { describe, expect, it } from 'vitest';
-+import { CompanionSession } from '../companion-session.js';
-+import { CompanionConnection } from '../connection.js';
-+import { FrameType } from '../framing.js';
-+import { opackDecode, opackEncode, type OpackDict, type OpackValue } from '../opack.js';
-+
-+// pyatv 0.18.0 Chacha20Cipher(nonce_length=12), bytes(range(32)), counters 0 and 1.
-+// Public synthetic keys and payloads; no pairing or live device data.
-+const key = Buffer.from(Array.from({ length: 32 }, (_, i) => i));
-+const payload = Buffer.from('e3425f7409425f694c53797374656d537461747573425f63e14573746174650b', 'hex');
-+const frames = [
-+  '08000030fbfa1d45a4a4f9b85f322512db2623748cd0878092ef043f0dbd8f664b4110571c4015ebed81b6c162b40204067f16f7',
-+  '08000030777d249acda1c3433b08aa80195ab00855d984ad5ebb865e7405842d76d574c49e0fde4f7f681f246d79893979ca6ee5',
-+].map(hex => Buffer.from(hex, 'hex'));
-+
-+function receiver() {
-+  const connection = new CompanionConnection('unused.invalid', 1, {
-+    clientId: 'test', clientLTSK: key, clientLTPK: key,
-+    serverLTPK: key, serverId: 'test',
-+  });
-+  // Enter the post-authentication parser without opening a socket.
-+  const parser = connection as unknown as {
-+    session: CompanionSession;
-+    socket: { write(data: Buffer): void; destroy(): void };
-+    onData(data: Buffer): void;
-+  };
-+  parser.session = new CompanionSession(key, key);
-+  const states: unknown[] = [];
-+  const errors: Error[] = [];
-+  connection.on('event', ({ data }: { data: OpackDict }) =>
-+    states.push((data.get('_c') as OpackDict).get('state')));
-+  connection.on('error', error => errors.push(error));
-+  return { connection, parser, states, errors };
-+}
-+
-+describe('Companion encrypted framing compatibility', () => {
-+  it('uses nonzero transaction IDs and correlates successive public requests', async () => {
-+    const { connection, parser, errors } = receiver();
-+    const peer = new CompanionSession(key, key);
-+    const ids: number[] = [];
-+    parser.socket = {
-+      write(frame: Buffer): void {
-+        const request = opackDecode(peer.decrypt(frame.subarray(0, 4), frame.subarray(4))) as OpackDict;
-+        const id = request.get('_x') as number;
-+        // Observed TV behavior: transaction zero is never acknowledged.
-+        expect(id).toBeGreaterThan(0);
-+        expect(ids).not.toContain(id);
-+        ids.push(id);
-+        const reply = new Map<OpackValue, OpackValue>([['_x', id], ['_t', 3], ['_c', new Map()]]);
-+        queueMicrotask(() => parser.onData(peer.encrypt(FrameType.E_OPACK, opackEncode(reply))));
-+      },
-+      destroy(): void {},
-+    };
-+    try {
-+      for (const identifier of ['_systemInfo', '_sessionStart']) {
-+        const reply = await connection.sendRequest(identifier, new Map<OpackValue, OpackValue>([
-+          ['_t', 2], ['_c', new Map()],
-+        ]));
-+        expect(reply.get('_t')).toBe(3);
-+      }
-+      expect(ids).toHaveLength(2);
-+      expect(errors).toEqual([]);
-+    } finally {
-+      connection.close();
-+    }
-+  });
-+
-+  it('matches an independently encrypted packet including the tag in its header', () => {
-+    const sender = new CompanionSession(key, key);
-+    expect(sender.encrypt(FrameType.E_OPACK, payload)).toEqual(frames[0]);
-+  });
-+
-+  it('accepts a single complete real-format packet without waiting for extra bytes', () => {
-+    const { parser, states, errors } = receiver();
-+    parser.onData(frames[0]);
-+    expect(errors).toEqual([]);
-+    expect(states).toEqual([3]);
-+  });
-+
-+  it('uses the Companion 96-bit little-endian nonce after the first packet', () => {
-+    const sender = new CompanionSession(key, key);
-+    sender.encrypt(FrameType.E_OPACK, payload);
-+    const second = Buffer.from(payload);
-+    second[second.length - 1] = 0x09; // State 1, rather than state 3.
-+    expect(sender.encrypt(FrameType.E_OPACK, second)).toEqual(frames[1]);
-+  });
-+
-+  it('separates coalesced packets and preserves the receive counter', () => {
-+    const { parser, states, errors } = receiver();
-+    parser.onData(Buffer.concat(frames));
-+    expect(errors).toEqual([]);
-+    expect(states).toEqual([3, 1]);
-+  });
-+
-+  it('waits for every possible split point in an encrypted packet', () => {
-+    for (let split = 1; split < frames[0].length; split++) {
-+      const { parser, states, errors } = receiver();
-+      parser.onData(frames[0].subarray(0, split));
-+      expect(states).toEqual([]);
-+      parser.onData(frames[0].subarray(split));
-+      expect(errors).toEqual([]);
-+      expect(states).toEqual([3]);
-+    }
-+  });
-+});
-diff --git a/src/companion/__tests__/opack-compatibility.test.ts b/src/companion/__tests__/opack-compatibility.test.ts
-new file mode 100644
-index 0000000..fb9a21e
---- /dev/null
-+++ b/src/companion/__tests__/opack-compatibility.test.ts
-@@ -0,0 +1,81 @@
-+import { describe, expect, it } from 'vitest';
-+import { opackDecode, opackEncode, OpackFloat } from '../opack.js';
-+
-+// Independent wire fixtures: pyatv 0.18.0 and its published OPACK examples.
-+// These test protocol compatibility, rather than just this codec's round trips.
-+describe('Companion OPACK compatibility', () => {
-+  it('preserves a backward seek instead of decoding it as a huge positive integer', () => {
-+    expect(opackEncode(-10).toString('hex')).toBe('3600000000000024c0');
-+    expect(opackDecode(opackEncode(-10))).toBe(-10);
-+  });
-+
-+  it('supports a combined session identifier with its top bit set', () => {
-+    const sessionId = 0x8000000000000001n;
-+    expect(opackEncode(sessionId).toString('hex')).toBe('330100000000000080');
-+    expect(opackDecode(opackEncode(sessionId))).toBe(sessionId);
-+  });
-+
-+  it('decodes an app-list reply containing a repeated app-name reference', () => {
-+    const packet = Buffer.from(
-+      'e2425f740b425f63e24f636f6d2e6578616d706c652e6f6e654b4578616d706c65204170704f636f6d2e6578616d706c652e74776fa3',
-+      'hex',
-+    );
-+    expect(opackDecode(packet)).toEqual(new Map<string, unknown>([
-+      ['_t', 3],
-+      ['_c', new Map([
-+        ['com.example.one', 'Example App'],
-+        ['com.example.two', 'Example App'],
-+      ])],
-+    ]));
-+  });
-+
-+  it('decodes the documented pointer example without indexing the boolean', () =>
-+    expect(opackDecode(Buffer.from('e3416102416244746573744163a2', 'hex')))
-+      .toEqual(new Map<string, unknown>([['a', false], ['b', 'test'], ['c', 'test']])));
-+
-+  it.each([
-+    [30, '360000000000003e40'],
-+    [0, '360000000000000000'],
-+    [1, '36000000000000f03f'],
-+    [-10, '3600000000000024c0'],
-+  ])('preserves an explicit float wire type for %s', (value, hex) => {
-+    const encoded = opackEncode(new OpackFloat(value));
-+    expect(encoded.toString('hex')).toBe(hex);
-+    expect(opackDecode(encoded)).toBe(value);
-+  });
-+
-+  it('keeps ordinary positive integers and negative zero distinct', () => {
-+    expect(opackEncode(30)).toEqual(Buffer.from([0x26]));
-+    expect(Object.is(opackDecode(opackEncode(-0)), -0)).toBe(true);
-+  });
-+
-+  it('rejects unsigned overflow, negative bigint and imprecise integer input', () => {
-+    expect(() => opackEncode(1n << 64n)).toThrow(RangeError);
-+    expect(() => opackEncode(-1n)).toThrow(RangeError);
-+    expect(() => opackEncode(Number.MAX_SAFE_INTEGER + 1)).toThrow(RangeError);
-+    expect(opackDecode(opackEncode((1n << 64n) - 1n))).toBe((1n << 64n) - 1n);
-+  });
-+
-+  it('shares the object table across nested containers without indexing containers', () =>
-+    expect(opackDecode(Buffer.from('d343666f6fd1426261a1', 'hex')))
-+      .toEqual(['foo', ['ba'], 'ba']));
-+
-+  it('does not add duplicate literals or references to the object table', () =>
-+    expect(opackDecode(Buffer.from('d543666f6f43666f6fa043626172a1', 'hex')))
-+      .toEqual(['foo', 'foo', 'foo', 'bar', 'bar']));
-+
-+  it.each([1, 2, 3, 4])('decodes an extended reference with %s index bytes', width => {
-+    const pointer = Buffer.alloc(1 + width);
-+    pointer[0] = 0xc0 + width;
-+    pointer.writeUIntLE(1, 1, width);
-+    expect(opackDecode(Buffer.concat([Buffer.from('d343666f6f43626172', 'hex'), pointer])))
-+      .toEqual(['foo', 'bar', 'bar']);
-+  });
-+
-+  it('resets references between messages and rejects missing or truncated references', () => {
-+    expect(opackDecode(Buffer.from('d243666f6fa0', 'hex'))).toEqual(['foo', 'foo']);
-+    expect(() => opackDecode(Buffer.from('a0', 'hex'))).toThrow(/reference/);
-+    expect(() => opackDecode(Buffer.from('d243666f6fa1', 'hex'))).toThrow(/reference/);
-+    expect(() => opackDecode(Buffer.from('d243666f6fc2', 'hex'))).toThrow();
-+  });
-+});
-diff --git a/src/companion/__tests__/opack.test.ts b/src/companion/__tests__/opack.test.ts
-index 7a5b665..2300d36 100644
---- a/src/companion/__tests__/opack.test.ts
-+++ b/src/companion/__tests__/opack.test.ts
-@@ -3,6 +3,14 @@ import { opackEncode, opackDecode, type OpackDict, type OpackValue } from '../op
- 
- describe('OPACK', () => {
-   describe('primitives', () => {
-+    it('decodes 0x07 as -1, as an Apple TV echoes a request ID it read as signed 255', () => {
-+      expect(opackDecode(Buffer.from([0x07]))).toBe(-1);
-+      // { _x: -1, _t: 3 } with a one-byte _x, the shape of the reply that ended sessions.
-+      const reply = opackDecode(Buffer.from('e2425f7807425f740b', 'hex')) as OpackDict;
-+      expect(reply.get('_x')).toBe(-1);
-+      expect(reply.get('_t')).toBe(3);
-+    });
-+
-     it('encodes and decodes null', () => {
-       const buf = opackEncode(null);
-       expect(buf).toEqual(Buffer.from([0x04]));
 diff --git a/src/companion/__tests__/pairing-lifecycle.test.ts b/src/companion/__tests__/pairing-lifecycle.test.ts
 new file mode 100644
-index 0000000..adc2669
+index 0000000..148c4f1
 --- /dev/null
 +++ b/src/companion/__tests__/pairing-lifecycle.test.ts
-@@ -0,0 +1,87 @@
+@@ -0,0 +1,88 @@
 +import { createServer, type Socket, type AddressInfo } from 'node:net';
 +import { once } from 'node:events';
 +import { describe, expect, it } from 'vitest';
@@ -966,7 +629,8 @@ index 0000000..adc2669
 +    await peer(async (port, sockets) => {
 +      const pair = new CompanionPairSetup('127.0.0.1', port);
 +      const started = pair.start();
-+      const rejected = expect(started).rejects.toThrow(/closed/);
++      // The peer's close arrives as an orderly close or, with unread data, as a reset.
++      const rejected = expect(started).rejects.toThrow(/closed|ECONNRESET/);
 +      while (!sockets.size) await new Promise(resolve => setTimeout(resolve, 1));
 +      for (const socket of sockets) socket.destroy();
 +      await rejected;
@@ -1002,123 +666,22 @@ index 0000000..adc2669
 +    }, true);
 +  });
 +});
-diff --git a/src/companion/__tests__/socket-latency.test.ts b/src/companion/__tests__/socket-latency.test.ts
-new file mode 100644
-index 0000000..3a1fba5
---- /dev/null
-+++ b/src/companion/__tests__/socket-latency.test.ts
-@@ -0,0 +1,24 @@
-+import { createServer, Socket } from 'node:net';
-+import { expect, it, vi } from 'vitest';
-+import { CompanionConnection } from '../connection.js';
-+
-+it('disables TCP batching before time-sensitive Companion events', async () => {
-+  const server = createServer(socket => socket.resume());
-+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
-+  const address = server.address();
-+  if (!address || typeof address === 'string') throw new Error('Missing loopback port');
-+  const key = Buffer.alloc(32, 7);
-+  const connection = new CompanionConnection('127.0.0.1', address.port, {
-+    clientId: 'synthetic', serverId: 'synthetic', clientLTSK: key, clientLTPK: key, serverLTPK: key,
-+  });
-+  const noDelay = vi.spyOn(Socket.prototype, 'setNoDelay');
-+  try {
-+    // Exercise the real socket setup without pairing or contacting any device.
-+    await (connection as unknown as { openSocket(): Promise<void> }).openSocket();
-+    expect(noDelay).toHaveBeenCalledWith(true);
-+  } finally {
-+    connection.close();
-+    noDelay.mockRestore();
-+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-+  }
-+});
-diff --git a/src/companion/companion-session.ts b/src/companion/companion-session.ts
-index 9500d2e..5e3db8d 100644
---- a/src/companion/companion-session.ts
-+++ b/src/companion/companion-session.ts
-@@ -1,16 +1,24 @@
- /**
-  * ChaCha20-Poly1305 encryption session for the Companion protocol.
-  * Differs from HAPSession:
-- * - AAD = the 4-byte frame header (type + 3-byte length of plaintext)
-+ * - AAD = the 4-byte frame header (type + 3-byte ciphertext-and-tag length)
-  * - Encrypts whole messages (no 1024-byte chunking)
-  * - Counter-based nonce, separate TX/RX counters
-  */
- 
--import { encryptChaCha20, decryptChaCha20, generateNonce } from '../util/crypto.js';
-+import { encryptChaCha20, decryptChaCha20 } from '../util/crypto.js';
- import { FrameType } from './framing.js';
- 
- const AUTH_TAG_LENGTH = 16;
- 
-+function companionNonce(counter: bigint): Buffer {
-+  // Companion counts from byte zero of a 12-byte little-endian nonce.
-+  // HAP/AirPlay instead put four zero bytes before their 8-byte counter.
-+  const nonce = Buffer.alloc(12);
-+  nonce.writeBigUInt64LE(counter, 0);
-+  return nonce;
-+}
-+
- export class CompanionSession {
-   private outCounter = 0n;
-   private inCounter = 0n;
-@@ -25,15 +33,13 @@ export class CompanionSession {
-    * Returns a complete frame: 4-byte header + ciphertext + 16-byte auth tag.
-    */
-   encrypt(frameType: FrameType, plaintext: Buffer): Buffer {
--    const nonce = generateNonce(this.outCounter);
-+    const nonce = companionNonce(this.outCounter);
-     this.outCounter++;
- 
-     // Build the frame header (used as AAD)
-     const header = Buffer.alloc(4);
-     header[0] = frameType;
--    header[1] = (plaintext.length >> 16) & 0xff;
--    header[2] = (plaintext.length >> 8) & 0xff;
--    header[3] = plaintext.length & 0xff;
-+    header.writeUIntBE(plaintext.length + AUTH_TAG_LENGTH, 1, 3);
- 
-     const { ciphertext, tag } = encryptChaCha20(
-       this.outKey,
-@@ -51,7 +57,7 @@ export class CompanionSession {
-    * The header bytes are needed as AAD.
-    */
-   decrypt(header: Buffer, encryptedPayload: Buffer): Buffer {
--    const nonce = generateNonce(this.inCounter);
-+    const nonce = companionNonce(this.inCounter);
-     this.inCounter++;
- 
-     const ciphertext = encryptedPayload.subarray(0, encryptedPayload.length - AUTH_TAG_LENGTH);
 diff --git a/src/companion/connection.ts b/src/companion/connection.ts
-index 351e7fb..03b19c1 100644
+index 8e0da48..242771a 100644
 --- a/src/companion/connection.ts
 +++ b/src/companion/connection.ts
-@@ -53,11 +53,15 @@ function ed25519PrivateKeyFromSeed(seed: Buffer): KeyObject {
-   });
- }
+@@ -73,7 +73,9 @@ function envelope(content: OpackDict, type: number): OpackDict {
  
-+
-+/** Largest request ID an Apple TV echoes unchanged (one-byte OPACK integers are signed). */
-+const MAX_TRANSFER_ID = 127;
+ /**
+  * An authenticated, encrypted Companion link to one Apple TV.
+- * Emits `event` ({ identifier, data }) for unsolicited messages, plus `error` and `close`.
++ * Emits `event` ({ identifier, data }) for unsolicited messages, `frame-error` for an
++ * authenticated frame it could not decode or deliver (the connection stays up), `error`,
++ * and `close` with Node's `hadError` flag.
+  */
  export class CompanionConnection extends EventEmitter {
    private socket: Socket | undefined;
-   private session: CompanionSession | undefined;
-   private buffer: Buffer = Buffer.alloc(0);
--  private transferId = 0;
-+  // A real TV may treat transaction zero as unacknowledged traffic.
-+  private transferId = 1;
-   private pendingRequests = new Map<number, {
-     resolve: (value: OpackDict) => void;
-     reject: (error: Error) => void;
-@@ -79,12 +83,15 @@ export class CompanionConnection extends EventEmitter {
-   private openSocket(): Promise<void> {
-     return new Promise((resolve, reject) => {
-       this.socket = new Socket();
-+      // Touch events are paced by the caller; Nagle buffering distorts gestures.
-+      this.socket.setNoDelay(true);
-       this.socket.connect(this.port, this.host, () => resolve());
-       this.socket.on('error', (err) => {
+@@ -120,7 +122,8 @@ export class CompanionConnection extends EventEmitter {
          reject(err);
          this.emit('error', err);
        });
@@ -1128,82 +691,38 @@ index 351e7fb..03b19c1 100644
        this.socket.on('data', (data: Buffer) => this.onData(data));
      });
    }
-@@ -252,7 +259,7 @@ export class CompanionConnection extends EventEmitter {
-       throw new Error('Companion not connected');
-     }
+@@ -453,8 +456,9 @@ export class CompanionConnection extends EventEmitter {
+   // --- Post-encryption frame handling ---
  
--    const tid = this.transferId++;
-+    const tid = this.nextTransferId();
-     content.set('_i', identifier);
-     content.set('_x', tid);
- 
-@@ -279,6 +286,20 @@ export class CompanionConnection extends EventEmitter {
-     });
-   }
- 
-+  /**
-+   * Apple TVs read one-byte OPACK integers as signed, so an ID from 128 to 255 comes back
-+   * changed (255 returns as -1) and its reply never matches. Keep IDs in 1..127, skipping
-+   * any still awaiting a reply.
-+   */
-+  private nextTransferId(): number {
-+    for (let attempt = 0; attempt < MAX_TRANSFER_ID; attempt++) {
-+      const id = this.transferId;
-+      this.transferId = id >= MAX_TRANSFER_ID ? 1 : id + 1;
-+      if (!this.pendingRequests.has(id)) return id;
-+    }
-+    throw new Error('Companion has no free request ID');
-+  }
-+
    /**
-    * Send an OPACK message without waiting for a response.
+-   * Decrypt and dispatch every complete frame in the buffer. A decrypt or decode failure
+-   * emits `error` and skips that frame. The frame type byte is not checked.
++   * Decrypt and dispatch every complete frame in the buffer. A decrypt failure emits `error`;
++   * an authenticated frame that cannot be decoded or delivered is dropped and reported as
++   * `frame-error`. Empty frames are skipped. The frame type byte is not checked.
     */
-@@ -288,6 +309,7 @@ export class CompanionConnection extends EventEmitter {
-     }
- 
-     content.set('_i', identifier);
-+    if (!content.has('_x')) content.set('_x', this.nextTransferId());
-     const payload = opackEncode(content);
-     const encrypted = this.session.encrypt(FrameType.E_OPACK, payload);
-     this.writeRaw(encrypted);
-@@ -365,11 +387,10 @@ export class CompanionConnection extends EventEmitter {
- 
    private processEncryptedFrames(): void {
-     // Encrypted frames: 4-byte header + ciphertext + 16-byte tag
--    // The header contains the plaintext length, so total = 4 + plaintextLen + 16
-+    // The header length already includes the authentication tag.
-     while (this.buffer.length >= 4) {
--      const plaintextLen =
--        (this.buffer[1] << 16) | (this.buffer[2] << 8) | this.buffer[3];
--      const totalLen = 4 + plaintextLen + 16;
-+      const payloadLen = this.buffer.readUIntBE(1, 3);
-+      const totalLen = 4 + payloadLen;
+     // Encrypted frames: 4-byte header + ciphertext + 16-byte tag.
+@@ -473,12 +477,22 @@ export class CompanionConnection extends EventEmitter {
+       // Companion leaves empty frames unencrypted; decrypting one would consume a nonce.
+       if (payloadLen === 0) continue;
  
-       if (this.buffer.length < totalLen) break;
- 
-@@ -377,12 +398,25 @@ export class CompanionConnection extends EventEmitter {
-       const encryptedPayload = this.buffer.subarray(4, totalLen);
-       this.buffer = Buffer.from(this.buffer.subarray(totalLen));
- 
-+      // An empty frame carries no ciphertext and does not consume a nonce, as in pyatv.
-+      if (payloadLen === 0) continue;
-+
 +      let plaintext: Buffer;
-+      try {
+       try {
+-        const plaintext = this.session!.decrypt(header, encryptedPayload);
+-        const decoded = opackDecode(plaintext);
+-        this.handleMessage(decoded);
 +        plaintext = this.session!.decrypt(header, encryptedPayload);
-+      } catch (e) {
+       } catch (e) {
+-        this.emit('error', new Error(`Companion decrypt error: ${e}`));
 +        this.emit('error', new Error(`Companion decrypt error: ${e}`, { cause: e }));
 +        continue;
 +      }
 +      // The stream is still in sync after an authenticated frame. One frame this library cannot
 +      // decode or deliver is dropped and reported; it never ends the connection.
-       try {
--        const plaintext = this.session!.decrypt(header, encryptedPayload);
--        const decoded = opackDecode(plaintext);
--        this.handleMessage(decoded);
++      try {
 +        this.handleMessage(opackDecode(plaintext));
-       } catch (e) {
--        this.emit('error', new Error(`Companion decrypt error: ${e}`));
++      } catch (e) {
 +        this.emit('frame-error', new Error(
 +          `Companion frame type ${header[0]} (${plaintext.length} bytes) dropped: ${e instanceof Error ? e.message : String(e)}`,
 +          { cause: e },
@@ -1211,223 +730,11 @@ index 351e7fb..03b19c1 100644
        }
      }
    }
-@@ -395,7 +429,7 @@ export class CompanionConnection extends EventEmitter {
-     const identifier = dict.get('_i');
- 
-     // Check if this is a response to a pending request
--    if (typeof transferId === 'number' && this.pendingRequests.has(transferId)) {
-+    if (dict.get('_t') === 3 && typeof transferId === 'number' && this.pendingRequests.has(transferId)) {
-       const pending = this.pendingRequests.get(transferId)!;
-       this.pendingRequests.delete(transferId);
-       pending.resolve(dict);
-diff --git a/src/companion/opack.ts b/src/companion/opack.ts
-index 7641ce2..73244d9 100644
---- a/src/companion/opack.ts
-+++ b/src/companion/opack.ts
-@@ -11,11 +11,17 @@ export type OpackValue =
-   | bigint
-   | string
-   | Buffer
-+  | OpackFloat
-   | OpackValue[]
-   | OpackDict;
- 
- export type OpackDict = Map<OpackValue, OpackValue>;
- 
-+/** Preserve a floating-point wire type for integral seconds and volume limits. */
-+export class OpackFloat {
-+  constructor(readonly value: number) {}
-+}
-+
- // --- Type tags (matched to pyatv) ---
- const TAG_NULL = 0x04;
- const TAG_TRUE = 0x01;
-@@ -25,6 +31,9 @@ const TAG_TERMINATOR = 0x03;
- // UUID: 0x05 + 16 raw bytes
- const TAG_UUID = 0x05;
- 
-+// Minus one: Apple encodes -1 as 0x07, the slot before the small integers.
-+const TAG_MINUS_ONE = 0x07;
-+
- // Small integers: 0x08 + value, for values 0..39
- const TAG_SMALL_INT_BASE = 0x08;
- const TAG_SMALL_INT_MAX_VALUE = 0x27; // 39
-@@ -85,7 +94,11 @@ function encodeValue(value: OpackValue, parts: Buffer[]): void {
-   }
- 
-   if (typeof value === 'number') {
--    if (Number.isInteger(value)) {
-+    // OPACK integers are unsigned. Negative numbers must use a float.
-+    if (Number.isInteger(value) && value >= 0 && !Object.is(value, -0)) {
-+      if (!Number.isSafeInteger(value)) {
-+        throw new RangeError('Use bigint for OPACK integers above Number.MAX_SAFE_INTEGER');
-+      }
-       encodeInteger(value, parts);
-     } else {
-       encodeFloat(value, parts);
-@@ -93,6 +106,11 @@ function encodeValue(value: OpackValue, parts: Buffer[]): void {
-     return;
-   }
- 
-+  if (value instanceof OpackFloat) {
-+    encodeFloat(value.value, parts);
-+    return;
-+  }
-+
-   if (typeof value === 'string') {
-     encodeString(value, parts);
-     return;
-@@ -150,14 +168,14 @@ function encodeInteger(value: number, parts: Buffer[]): void {
-   // Fall through to int64
-   const buf = Buffer.alloc(9);
-   buf[0] = TAG_INT64;
--  buf.writeBigInt64LE(BigInt(value), 1);
-+  buf.writeBigUInt64LE(BigInt(value), 1);
-   parts.push(buf);
- }
- 
- function encodeBigInt(value: bigint, parts: Buffer[]): void {
-   const buf = Buffer.alloc(9);
-   buf[0] = TAG_INT64;
--  buf.writeBigInt64LE(value, 1);
-+  buf.writeBigUInt64LE(value, 1);
-   parts.push(buf);
- }
- 
-@@ -242,7 +260,7 @@ function encodeDict(value: OpackDict, parts: Buffer[]): void {
- // --- Decoder ---
- 
- export function opackDecode(buffer: Buffer): OpackValue {
--  const result = decodeValue(buffer, 0);
-+  const result = decodeValue(buffer, 0, []);
-   return result.value;
- }
- 
-@@ -251,7 +269,29 @@ interface DecodeResult {
-   offset: number;
- }
- 
--function decodeValue(buf: Buffer, offset: number): DecodeResult {
-+function decodeValue(buf: Buffer, offset: number, objects: OpackValue[]): DecodeResult {
-+  const tag = buf[offset];
-+  if (tag >= 0xa0 && tag <= 0xc4) {
-+    const width = tag <= 0xc0 ? 0 : tag - 0xc0;
-+    const index = width === 0 ? tag - 0xa0 : buf.readUIntLE(offset + 1, width);
-+    if (index >= objects.length) {
-+      throw new Error(`OPACK: invalid object reference ${index}`);
-+    }
-+    return { value: objects[index], offset: offset + 1 + width };
-+  }
-+
-+  const result = decodeLiteral(buf, offset, objects);
-+  const value = result.value;
-+  // Containers, single-byte objects and existing values do not add table entries.
-+  if (result.offset - offset > 1 && !Array.isArray(value) && !(value instanceof Map)
-+      && !objects.some(item => Buffer.isBuffer(item) && Buffer.isBuffer(value)
-+        ? item.equals(value) : Object.is(item, value))) {
-+    objects.push(value);
-+  }
-+  return result;
-+}
-+
-+function decodeLiteral(buf: Buffer, offset: number, objects: OpackValue[]): DecodeResult {
-   if (offset >= buf.length) {
-     throw new Error('OPACK: unexpected end of buffer');
-   }
-@@ -277,6 +317,10 @@ function decodeValue(buf: Buffer, offset: number): DecodeResult {
-   }
- 
-   // Small integers 0..39: tags 0x08..0x2F
-+  if (tag === TAG_MINUS_ONE) {
-+    return { value: -1, offset: offset + 1 };
-+  }
-+
-   if (tag >= TAG_SMALL_INT_BASE && tag <= TAG_SMALL_INT_BASE + TAG_SMALL_INT_MAX_VALUE) {
-     return { value: tag - TAG_SMALL_INT_BASE, offset: offset + 1 };
-   }
-@@ -359,38 +403,38 @@ function decodeValue(buf: Buffer, offset: number): DecodeResult {
-   // Arrays: 0xD0..0xDE inline count, 0xDF = terminated
-   if (tag >= TAG_ARRAY_BASE && tag < TAG_ARRAY_BASE + TAG_ARRAY_OVERFLOW) {
-     const count = tag - TAG_ARRAY_BASE;
--    return decodeArrayN(buf, offset + 1, count);
-+    return decodeArrayN(buf, offset + 1, count, objects);
-   }
-   if (tag === TAG_ARRAY_BASE + TAG_ARRAY_OVERFLOW) {
--    return decodeArrayTerminated(buf, offset + 1);
-+    return decodeArrayTerminated(buf, offset + 1, objects);
-   }
- 
-   // Dicts: 0xE0..0xEE inline count, 0xEF = terminated
-   if (tag >= TAG_DICT_BASE && tag < TAG_DICT_BASE + TAG_DICT_OVERFLOW) {
-     const count = tag - TAG_DICT_BASE;
--    return decodeDictN(buf, offset + 1, count);
-+    return decodeDictN(buf, offset + 1, count, objects);
-   }
-   if (tag === TAG_DICT_BASE + TAG_DICT_OVERFLOW) {
--    return decodeDictTerminated(buf, offset + 1);
-+    return decodeDictTerminated(buf, offset + 1, objects);
-   }
- 
-   throw new Error(`OPACK: unknown tag 0x${tag.toString(16)} at offset ${offset}`);
- }
- 
--function decodeArrayN(buf: Buffer, offset: number, count: number): DecodeResult {
-+function decodeArrayN(buf: Buffer, offset: number, count: number, objects: OpackValue[]): DecodeResult {
-   const arr: OpackValue[] = [];
-   for (let i = 0; i < count; i++) {
--    const item = decodeValue(buf, offset);
-+    const item = decodeValue(buf, offset, objects);
-     arr.push(item.value);
-     offset = item.offset;
-   }
-   return { value: arr, offset };
- }
- 
--function decodeArrayTerminated(buf: Buffer, offset: number): DecodeResult {
-+function decodeArrayTerminated(buf: Buffer, offset: number, objects: OpackValue[]): DecodeResult {
-   const arr: OpackValue[] = [];
-   while (offset < buf.length && buf[offset] !== TAG_TERMINATOR) {
--    const item = decodeValue(buf, offset);
-+    const item = decodeValue(buf, offset, objects);
-     arr.push(item.value);
-     offset = item.offset;
-   }
-@@ -400,24 +444,24 @@ function decodeArrayTerminated(buf: Buffer, offset: number): DecodeResult {
-   return { value: arr, offset };
- }
- 
--function decodeDictN(buf: Buffer, offset: number, count: number): DecodeResult {
-+function decodeDictN(buf: Buffer, offset: number, count: number, objects: OpackValue[]): DecodeResult {
-   const dict: OpackDict = new Map();
-   for (let i = 0; i < count; i++) {
--    const key = decodeValue(buf, offset);
-+    const key = decodeValue(buf, offset, objects);
-     offset = key.offset;
--    const val = decodeValue(buf, offset);
-+    const val = decodeValue(buf, offset, objects);
-     offset = val.offset;
-     dict.set(key.value, val.value);
-   }
-   return { value: dict, offset };
- }
- 
--function decodeDictTerminated(buf: Buffer, offset: number): DecodeResult {
-+function decodeDictTerminated(buf: Buffer, offset: number, objects: OpackValue[]): DecodeResult {
-   const dict: OpackDict = new Map();
-   while (offset < buf.length && buf[offset] !== TAG_TERMINATOR) {
--    const key = decodeValue(buf, offset);
-+    const key = decodeValue(buf, offset, objects);
-     offset = key.offset;
--    const val = decodeValue(buf, offset);
-+    const val = decodeValue(buf, offset, objects);
-     offset = val.offset;
-     dict.set(key.value, val.value);
-   }
 diff --git a/src/companion/pair-setup.ts b/src/companion/pair-setup.ts
-index e3b1fed..b666e5d 100644
+index d298c25..db3ef09 100644
 --- a/src/companion/pair-setup.ts
 +++ b/src/companion/pair-setup.ts
-@@ -6,15 +6,17 @@
+@@ -7,21 +7,25 @@
   */
  
  import { Socket } from 'node:net';
@@ -1441,15 +748,25 @@ index e3b1fed..b666e5d 100644
  import type { HAPCredentials } from '../auth/types.js';
 +import { PendingRequests } from '../util/pending-requests.js';
  
+ /** DER prefix that turns a raw 32-byte Ed25519 seed into PKCS#8 for node:crypto import. */
  const ED25519_PKCS8_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
++/** DER prefix that turns a raw 32-byte Ed25519 public key into SPKI for node:crypto import. */
 +const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
  
+ /**
+  * One pair-setup attempt over its own TCP connection. Call start(), show the user the
+  * PIN the Apple TV displays, then finish(pin). Generates a fresh client ID and Ed25519
+- * long-term key pair per instance.
++ * long-term key pair per instance. Every wait is bounded, and closing, cancellation,
++ * a peer close or an invalid frame ends the attempt; a closed instance cannot be reused.
+  */
  export class CompanionPairSetup {
    private socket: Socket | undefined;
-@@ -31,12 +33,23 @@ export class CompanionPairSetup {
+@@ -39,13 +43,23 @@ export class CompanionPairSetup {
  
    /** Queued frames that arrived before anyone was waiting for them. */
    private frameQueue: Frame[] = [];
+-  /** Waiters for the next frame, served in FIFO order regardless of frame type. */
 -  private pendingFrameResolvers: Array<(frame: Frame) => void> = [];
 +  private pending = new PendingRequests(error => this.shutdown(error), 'Companion pairing');
 +  private phase: 'new' | 'starting' | 'pin' | 'finishing' | 'closed' = 'new';
@@ -1471,7 +788,7 @@ index e3b1fed..b666e5d 100644
      this.clientId = randomUUID();
  
      const { publicKey, privateKey } = generateKeyPairSync('ed25519');
-@@ -52,28 +65,59 @@ export class CompanionPairSetup {
+@@ -61,29 +75,60 @@ export class CompanionPairSetup {
     * Open socket and send M1. The Apple TV should display the PIN after this.
     * Call finish(pin) after the user reads the PIN.
     */
@@ -1511,6 +828,8 @@ index e3b1fed..b666e5d 100644
 +    if (this.phase === 'closed') throw new Error('Companion pairing is closed');
    }
  
+-  /** Connect the socket and feed incoming data to the frame parser. Errors only reject the connect. */
++  /** Connect the socket and feed incoming data to the frame parser. Socket errors, peer close and invalid frames end the attempt. */
    private openSocket(): Promise<void> {
 -    return new Promise((resolve, reject) => {
 -      this.socket = new Socket();
@@ -1547,7 +866,7 @@ index e3b1fed..b666e5d 100644
    }
  
    /**
-@@ -99,6 +143,7 @@ export class CompanionPairSetup {
+@@ -110,6 +155,7 @@ export class CompanionPairSetup {
     */
    private async receivePairingData(): Promise<Buffer> {
      const frame = await this.waitForAnyFrame();
@@ -1555,23 +874,27 @@ index e3b1fed..b666e5d 100644
      const decoded = opackDecode(frame.payload);
      if (!(decoded instanceof Map)) {
        throw new Error(`Companion PS: expected OPACK dict response, got frame type 0x${frame.type.toString(16)}`);
-@@ -135,6 +180,7 @@ export class CompanionPairSetup {
-   }
- 
+@@ -156,6 +202,7 @@ export class CompanionPairSetup {
+    * @throws if M4 lacks a proof (e.g. a wrong PIN) or the proof does not verify
+    */
    async sendM3(pin: string, salt: Buffer, serverPublicKey: Buffer): Promise<void> {
 +    this.pairingStage = 'proof';
      this.srp.init(salt, pin);
      this.srp.setServerPublicKey(serverPublicKey);
  
-@@ -162,6 +208,7 @@ export class CompanionPairSetup {
-   }
- 
+@@ -186,9 +233,10 @@ export class CompanionPairSetup {
+    * Send M5 (our identifier, Ed25519 public key and signature, encrypted) and decrypt
+    * M6 to learn the Apple TV's identifier and long-term public key.
+    * @returns credentials to persist for later pair-verify
+-   * @throws if called before sendM3, or if M6 is missing or malformed
++   * @throws if called before sendM3, or if M6 is missing, malformed, or fails its identity signature check
+    */
    async sendM5(): Promise<HAPCredentials> {
 +    this.pairingStage = 'identity';
      if (!this.sessionKey) {
        throw new Error('Session key not available; call sendM3 first');
      }
-@@ -225,10 +272,21 @@ export class CompanionPairSetup {
+@@ -252,10 +300,21 @@ export class CompanionPairSetup {
      const serverInfo = tlvDecode(decrypted);
      const serverId = serverInfo[TlvTag.Identifier];
      const serverLTPK = serverInfo[TlvTag.PublicKey];
@@ -1595,8 +918,8 @@ index e3b1fed..b666e5d 100644
      return {
        clientId: this.clientId,
        clientLTSK: this.edPrivateKeyRaw,
-@@ -243,9 +301,11 @@ export class CompanionPairSetup {
-    * start() must have been called first (sends M1, receives M2).
+@@ -271,9 +330,11 @@ export class CompanionPairSetup {
+    * Always closes the socket, whether pairing succeeds or fails.
     */
    async finish(pin: string): Promise<HAPCredentials> {
 -    if (!this.salt || !this.serverPublicKey) {
@@ -1608,9 +931,12 @@ index e3b1fed..b666e5d 100644
      try {
        await this.sendM3(pin, this.salt, this.serverPublicKey);
        return await this.sendM5();
-@@ -255,35 +315,37 @@ export class CompanionPairSetup {
+@@ -282,39 +343,41 @@ export class CompanionPairSetup {
+     }
    }
  
+-  /** Close the socket. Safe to call more than once. */
++  /** Close the attempt and reject anything pending. Safe to call more than once. */
    destroy(): void {
 +    this.shutdown(new Error('Companion pairing closed'));
 +  }
@@ -1629,6 +955,8 @@ index e3b1fed..b666e5d 100644
 +    this.resolveClosed();
    }
  
+-  /** Frame and write a payload; a no-op once the socket is gone. */
++  /** Frame and write a payload; a write error ends the attempt. */
    private writeFrame(type: FrameType, payload: Buffer): void {
 +    this.assertOpen();
 +    if (!this.socket) throw new Error('Companion pairing is not connected');
@@ -1637,6 +965,7 @@ index e3b1fed..b666e5d 100644
 +    this.socket.write(frame, error => { if (error) this.shutdown(error); });
    }
  
+   /** Resolve with the next frame of any type, taking from the queue first. */
 -  private waitForAnyFrame(timeoutMs = 10000): Promise<Frame> {
 +  private waitForAnyFrame(): Promise<Frame> {
 +    this.assertOpen();
@@ -1662,8 +991,8 @@ index e3b1fed..b666e5d 100644
 +    return this.pending.create<Frame>('frame', this.timeoutMs);
    }
  
-   private processFrames(): void {
-@@ -291,10 +353,10 @@ export class CompanionPairSetup {
+   /** Parse buffered frames, handing each to the oldest waiter or queuing it. */
+@@ -323,10 +386,10 @@ export class CompanionPairSetup {
      this.buffer = remainder;
  
      for (const frame of frames) {
@@ -1678,25 +1007,41 @@ index e3b1fed..b666e5d 100644
        }
      }
 diff --git a/src/connection.ts b/src/connection.ts
-index 8851355..58039f6 100644
+index eedd87e..04a01cb 100644
 --- a/src/connection.ts
 +++ b/src/connection.ts
-@@ -18,6 +18,7 @@ import { TlvTag, tlvEncode, tlvDecode } from './util/tlv.js';
+@@ -16,7 +16,6 @@ import {
+   createPrivateKey,
+ } from 'node:crypto';
+ import { EventEmitter } from 'node:events';
+-import { setTimeout as delay } from 'node:timers/promises';
+ import bplistCreator from 'bplist-creator';
+ import { parseBuffer } from 'bplist-parser';
+ import { HAPSession } from './util/hap-session.js';
+@@ -25,6 +24,7 @@ import { TlvTag, tlvEncode, tlvDecode } from './util/tlv.js';
  import { MRPMessage, MessageType } from './mrp/messages.js';
  import { buildDataStreamFrame, buildDataStreamReply, parseDataStreamFrame } from './util/data-stream.js';
  import type { HAPCredentials } from './auth/types.js';
 +import { PendingRequests } from './util/pending-requests.js';
  
+ /** `clientTypeUUID` that asks the receiver for an MRP data stream (stream type 130). */
  const DATA_CHANNEL_TYPE_UUID = '1910A70F-DBC0-4242-AF95-115DB30604E1';
- const X25519_SPKI_PREFIX = Buffer.from('302a300506032b656e032100', 'hex');
-@@ -28,17 +29,19 @@ interface ParsedHTTP {
-   headers: Record<string, string>;
+@@ -39,21 +39,25 @@ interface ParsedHTTP {
    body: Buffer;
+   /** Bytes consumed from the input (headers + body). */
    totalSize: number;
++  /** Status code of a response; undefined for a request. */
 +  statusCode?: number;
  }
  
- /** Parse an HTTP message (request or response) from a buffer. Returns null if incomplete. */
+ /**
+  * Parse one HTTP or RTSP message (request or response) from the start of a buffer.
+- * Header names are lower-cased; the start line is ignored. Returns null until the headers
+- * and `Content-Length` bytes of body have all arrived.
++ * Header names are lower-cased. Returns null until the headers and `Content-Length`
++ * bytes of body have all arrived.
++ * @throws on an invalid start line or `Content-Length`
+  */
  function parseHTTPMessage(buf: Buffer): ParsedHTTP | null {
 -  const text = buf.toString('utf-8');
 -  const headerEnd = text.indexOf('\r\n\r\n');
@@ -1712,7 +1057,7 @@ index 8851355..58039f6 100644
    for (let i = 1; i < lines.length; i++) {
      const colonIdx = lines[i].indexOf(':');
      if (colonIdx > 0) {
-@@ -48,21 +51,19 @@ function parseHTTPMessage(buf: Buffer): ParsedHTTP | null {
+@@ -63,29 +67,33 @@ function parseHTTPMessage(buf: Buffer): ParsedHTTP | null {
    }
  
    const bodyStart = headerEnd + 4;
@@ -1728,20 +1073,37 @@ index 8851355..58039f6 100644
 +  return { headers, body: Buffer.from(body), totalSize, statusCode: status ? Number(status[1]) : undefined };
  }
  
--/** Connect a socket to host:port and return it once connected. */
+-/** Open a TCP socket to host:port; rejects on the first socket error before connecting. */
 -function connectSocket(host: string, port: number): Promise<Socket> {
 -  return new Promise((resolve, reject) => {
 -    const sock = new Socket();
 -    sock.connect(port, host, () => resolve(sock));
 -    sock.once('error', reject);
 -  });
++/** Options for AirPlayConnection. */
 +export interface AirPlayConnectionOptions {
++  /** Bound, in ms, on each connect, write, pairing and RTSP reply; default 10000. */
 +  timeoutMs?: number;
++  /** Receives progress lines instead of stderr. */
 +  logger?: (message: string) => void;
  }
  
+ /**
+  * Owns the three AirPlay sockets (RTSP control, event, data) and their HAP sessions.
+  *
+- * Events: `mrp-message` (every decoded MRP message from the data channel), `close` and
+- * `error` (from the control socket). `rtsp-response` is internal plumbing for `sendRTSP`.
+- * Progress is logged to stderr with an `[AirPlay]` prefix.
++ * Events: `mrp-message` (every decoded MRP message from the data channel, in wire order),
++ * `close` once when the connection ends for any reason, and `error` (only when a listener
++ * is attached) for the failure that ended it. Loss of any socket, invalid input or a
++ * timed-out request ends the whole connection and rejects everything pending.
++ * `rtsp-response` is internal plumbing. Progress is logged to stderr with an `[AirPlay]`
++ * prefix unless a logger is given.
+  */
  export class AirPlayConnection extends EventEmitter {
-@@ -79,69 +80,133 @@ export class AirPlayConnection extends EventEmitter {
+   private socket?: Socket;
+@@ -101,75 +109,140 @@ export class AirPlayConnection extends EventEmitter {
    private dacpId = randomBytes(8).toString('hex');
    private activeRemote = String(Math.floor(Math.random() * 0xffffffff));
    private localAddress?: string;
@@ -1758,7 +1120,7 @@ index 8851355..58039f6 100644
    private feedbackInterval?: ReturnType<typeof setInterval>;
    private dataDecBuffer = Buffer.alloc(0);
 -  private pendingMRPResolvers: Array<{
--    type?: number;
+-    type: number;
 -    resolve: (msg: Record<string, unknown>) => void;
 -  }> = [];
 +  private mrpResponseTypes = new Map<string, number | undefined>();
@@ -1772,48 +1134,8 @@ index 8851355..58039f6 100644
    ) {
      super();
 +    if (!Number.isFinite(this.timeoutMs) || this.timeoutMs <= 0) throw new RangeError('Invalid AirPlay timeout');
-   }
- 
--  async connect(): Promise<void> {
--    // Step 1: Open TCP connection
--    this.log('opening TCP connection...');
--    this.socket = await connectSocket(this.host, this.port);
--    this.localAddress = this.socket.localAddress;
--    this.log(`TCP connected (local ${this.localAddress})`);
--
--    // Initially handle raw (unencrypted) data for pair-verify
--    this.socket.on('data', (data) => this.onRawData(Buffer.from(data)));
--    this.socket.on('close', () => this.emit('close'));
--    this.socket.on('error', (err) => this.emit('error', err));
--
--    // Step 2: Pair-verify on this connection
--    this.log('pair-verify...');
--    const { outputKey, inputKey, sharedSecret } = await this.pairVerifyOnSocket();
--    this.session = new HAPSession(outputKey, inputKey);
--    this.sharedSecret = sharedSecret;
--    this.log('pair-verify OK');
--
--    // Switch from raw mode to encrypted RTSP mode
--    this.socket.removeAllListeners('data');
--    this.socket.on('data', (data) => this.onEncryptedData(Buffer.from(data)));
--
--    // Step 3: Set up event channel via RTSP SETUP
--    this.log('SETUP event channel...');
--    await this.setupEventChannel();
--    this.log('event channel OK');
--
--    // Step 4: RECORD
--    this.log('RECORD...');
--    await this.sendRTSP('RECORD', this.rtspUri);
--    this.log('RECORD OK');
--
--    // Step 5: Start FEEDBACK heartbeat (every 2 seconds)
--    this.startFeedbackHeartbeat();
--
--    // Step 6: Set up data channel (MRP tunnel)
--    this.log('SETUP data channel...');
--    await this.setupDataChannel();
--    this.log('data channel OK');
++  }
++
 +  private get timeoutMs(): number { return this.options.timeoutMs ?? 10000; }
 +
 +  private assertOpen(): void {
@@ -1852,9 +1174,56 @@ index 8851355..58039f6 100644
 +      });
 +    } catch (error) { this.fail(error instanceof Error ? error : new Error('AirPlay write failed')); }
 +    return written;
-+  }
-+
-+  /** One connection lifetime; use a new instance after close or failure. */
+   }
+ 
+   /**
+    * Run the full setup sequence: TCP connect, pair-verify, event-channel SETUP, RECORD,
+    * start the FEEDBACK heartbeat, then data-channel SETUP and the MRP handshake.
+-   * @throws if any step fails (e.g. pair-verify rejected, DeviceInfo reply timeout).
++   * One connection lifetime; use a new instance after close or failure. Aborting the
++   * signal closes the connection.
++   * @throws if any step fails or times out (e.g. pair-verify rejected, no DeviceInfo reply).
+    */
+-  async connect(): Promise<void> {
+-    // Step 1: Open TCP connection
+-    this.log('opening TCP connection...');
+-    this.socket = await connectSocket(this.host, this.port);
+-    this.localAddress = this.socket.localAddress;
+-    this.log(`TCP connected (local ${this.localAddress})`);
+-
+-    // Initially handle raw (unencrypted) data for pair-verify
+-    this.socket.on('data', (data: Buffer) => this.onRawData(data));
+-    this.socket.on('close', () => this.emit('close'));
+-    this.socket.on('error', (err) => this.emit('error', err));
+-
+-    // Step 2: Pair-verify on this connection
+-    this.log('pair-verify...');
+-    const { outputKey, inputKey, sharedSecret } = await this.pairVerifyOnSocket();
+-    this.session = new HAPSession(outputKey, inputKey);
+-    this.sharedSecret = sharedSecret;
+-    this.log('pair-verify OK');
+-
+-    // Switch from raw mode to encrypted RTSP mode
+-    this.socket.removeAllListeners('data');
+-    this.socket.on('data', (data: Buffer) => this.onEncryptedData(data));
+-
+-    // Step 3: Set up event channel via RTSP SETUP
+-    this.log('SETUP event channel...');
+-    await this.setupEventChannel();
+-    this.log('event channel OK');
+-
+-    // Step 4: RECORD
+-    this.log('RECORD...');
+-    await this.sendRTSP('RECORD', this.rtspUri);
+-    this.log('RECORD OK');
+-
+-    // Step 5: Start FEEDBACK heartbeat (every 2 seconds)
+-    this.startFeedbackHeartbeat();
+-
+-    // Step 6: Set up data channel (MRP tunnel)
+-    this.log('SETUP data channel...');
+-    await this.setupDataChannel();
+-    this.log('data channel OK');
 +  async connect({ signal }: { signal?: AbortSignal } = {}): Promise<void> {
 +    this.assertOpen();
 +    if (this.started) throw new Error('AirPlay connection already started');
@@ -1874,7 +1243,7 @@ index 8851355..58039f6 100644
 +      this.log(`TCP connected (local ${this.localAddress})`);
 +
 +      // Initially handle raw (unencrypted) data for pair-verify
-+      this.socket.on('data', (data) => this.onRawData(Buffer.from(data)));
++      this.socket.on('data', (data: Buffer) => this.onRawData(data));
 +
 +      // Step 2: Pair-verify on this connection
 +      this.log('pair-verify...');
@@ -1886,7 +1255,7 @@ index 8851355..58039f6 100644
 +
 +      // Switch from raw mode to encrypted RTSP mode
 +      this.socket.removeAllListeners('data');
-+      this.socket.on('data', (data) => this.onEncryptedData(Buffer.from(data)));
++      this.socket.on('data', (data: Buffer) => this.onEncryptedData(data));
 +      if (this.rawBuffer.length) {
 +        const remaining = this.rawBuffer;
 +        this.rawBuffer = Buffer.alloc(0);
@@ -1917,6 +1286,8 @@ index 8851355..58039f6 100644
 +    }
    }
  
+-  /** Write a progress line to stderr. */
++  /** Write a progress line to the logger, or to stderr. */
    private log(msg: string): void {
 -    console.error(`[AirPlay] ${msg}`);
 +    if (this.options.logger) this.options.logger(msg);
@@ -1924,10 +1295,13 @@ index 8851355..58039f6 100644
    }
  
    // --- Pair-verify directly on the RTSP socket ---
-@@ -257,49 +322,52 @@ export class AirPlayConnection extends EventEmitter {
-   }
+@@ -292,56 +365,58 @@ export class AirPlayConnection extends EventEmitter {
  
-   /** Send a plain HTTP POST on the raw socket and read the response */
+   /**
+    * Send a plain HTTP POST on the control socket; `onRawData` resolves it with the response
+-   * body. Only one request may be in flight. The response status code is not checked.
++   * body. Only one request may be in flight; a non-2xx status rejects it.
+    */
 -  private httpPostOnSocket(path: string, body: Buffer): Promise<Buffer> {
 -    return new Promise((resolve, reject) => {
 -      const headers = [
@@ -1974,7 +1348,7 @@ index 8851355..58039f6 100644
 +    }
    }
  
-   /** Handle raw (unencrypted) data during pair-verify phase */
+   /** Buffer unencrypted bytes during pair-verify and resolve the pending POST once a full response arrives. */
    private onRawData(data: Buffer): void {
 +    if (this.closed) return;
      this.rawBuffer = Buffer.concat([this.rawBuffer, data]);
@@ -2004,12 +1378,20 @@ index 8851355..58039f6 100644
  
    // --- Encrypted RTSP ---
  
-   private encryptedBuffer = Buffer.alloc(0);
+-  private encryptedBuffer = Buffer.alloc(0);
++  private encryptedBuffer: Buffer = Buffer.alloc(0);
 +  private rtspBuffer = Buffer.alloc(0);
  
+   /**
+-   * Send an RTSP request (encrypted once the session exists) and resolve with the next
+-   * `rtsp-response` event. Responses are matched by arrival order, not CSeq, and there is
+-   * no timeout.
++   * Send an encrypted RTSP request and resolve with the response carrying its CSeq.
++   * A non-2xx status rejects; a missing reply times out and ends the connection.
+    */
    private async sendRTSP(
      method: string,
-@@ -307,14 +375,16 @@ export class AirPlayConnection extends EventEmitter {
+@@ -349,14 +424,16 @@ export class AirPlayConnection extends EventEmitter {
      headers: Record<string, string> = {},
      body?: Buffer,
    ): Promise<{ headers: Record<string, string>; body: Buffer }> {
@@ -2027,7 +1409,7 @@ index 8851355..58039f6 100644
      };
  
      let request = `${method} ${uri} RTSP/1.0\r\n`;
-@@ -333,12 +403,15 @@ export class AirPlayConnection extends EventEmitter {
+@@ -375,12 +452,15 @@ export class AirPlayConnection extends EventEmitter {
        data = Buffer.from(this.session.encrypt(data));
      }
  
@@ -2048,8 +1430,8 @@ index 8851355..58039f6 100644
 +    }
    }
  
-   private get rtspUri(): string {
-@@ -384,14 +457,13 @@ export class AirPlayConnection extends EventEmitter {
+   /** Session URI used for SETUP/RECORD: `rtsp://<local address>/<session id>`. */
+@@ -432,21 +512,16 @@ export class AirPlayConnection extends EventEmitter {
        const eventInputKey = await hkdfSha512(
          this.sharedSecret!, 'Events-Salt', 'Events-Write-Encryption-Key', 32,
        );
@@ -2060,13 +1442,20 @@ index 8851355..58039f6 100644
 -      this.eventSocket = await connectSocket(this.host, eventPort);
 +      this.eventSocket = await this.openSocket(eventPort);
        this.log('event socket connected');
-       this.eventSocket.on('data', (data) => this.onEventChannelData(Buffer.from(data)));
+       this.eventSocket.on('data', (data: Buffer) => this.onEventChannelData(data));
 -      this.eventSocket.on('error', (err) => this.log(`event channel error: ${err.message}`));
 -      this.eventSocket.on('close', () => this.log('event channel closed'));
      }
    }
  
-@@ -447,16 +519,15 @@ export class AirPlayConnection extends EventEmitter {
+-  /**
+-   * RTSP SETUP for an MRP data stream, connect to the returned `dataPort` (falling back to
+-   * the control port), derive DataStream keys from the seed, then run the MRP handshake.
+-   */
+   private async setupDataChannel(): Promise<void> {
+     // Seed must be an integer (not Buffer) in the bplist so it encodes as uint64.
+     // bplist-creator truncates values > 2^31-1, so we limit to that range.
+@@ -499,16 +574,15 @@ export class AirPlayConnection extends EventEmitter {
        'DataStream-Input-Encryption-Key',
        32,
      );
@@ -2079,13 +1468,25 @@ index 8851355..58039f6 100644
 +    this.dataSocket = await this.openSocket(dataPort);
      this.log('data socket connected');
  
-     this.dataSocket.on('data', (data) => this.onDataChannelData(Buffer.from(data)));
+     this.dataSocket.on('data', (data: Buffer) => this.onDataChannelData(data));
 -    this.dataSocket.on('error', (err) => this.log(`data channel error: ${err.message}`));
 -    this.dataSocket.on('close', () => this.log('data channel closed by remote'));
      this.dataSocket.on('end', () => this.log('data channel ended by remote'));
  
      // Initialize MRP protocol on data channel
-@@ -471,10 +542,8 @@ export class AirPlayConnection extends EventEmitter {
+@@ -517,8 +591,9 @@ export class AirPlayConnection extends EventEmitter {
+ 
+   /**
+    * MRP handshake on the data channel: DeviceInfo (awaits the reply), SetConnectionState,
+-   * ClientUpdatesConfig, GetKeyboardSession, then a 500 ms settle delay.
+-   * @throws if the DeviceInfo reply does not arrive within 5 s.
++   * ClientUpdatesConfig and GetKeyboardSession, awaiting the correlated reply to each
++   * except SetConnectionState.
++   * @throws if a reply does not arrive in time (DeviceInfo within 5 s).
+    */
+   private async initMRPProtocol(): Promise<void> {
+     this.log('sending DeviceInfo...');
+@@ -528,10 +603,8 @@ export class AirPlayConnection extends EventEmitter {
        uniqueIdentifier: this.credentials.clientId,
        name: 'Node ATV Remote',
      });
@@ -2097,7 +1498,14 @@ index 8851355..58039f6 100644
      this.log('DeviceInfo exchange complete');
  
      // 2. CryptoPairing is NOT performed over AirPlay transport.
-@@ -492,34 +561,13 @@ export class AirPlayConnection extends EventEmitter {
+@@ -543,103 +616,63 @@ export class AirPlayConnection extends EventEmitter {
+     const connState = await MRPMessage.setConnectionState(2);
+     await this.sendMRPMessage(connState);
+ 
+-    // 4. ClientUpdatesConfig (pyatv waits for a reply; we only send)
++    // 4. ClientUpdatesConfig (pyatv uses send_and_receive)
+     const updatesConfig = await MRPMessage.clientUpdatesConfig({
+       artworkUpdates: true,
        nowPlayingUpdates: true,
        volumeUpdates: true,
        keyboardUpdates: true,
@@ -2106,15 +1514,19 @@ index 8851355..58039f6 100644
 -    await this.sendMRPMessage(updatesConfig);
 +    await this.sendMRPMessageAndWait(updatesConfig);
  
-     // 5. GetKeyboardSession (pyatv uses send_and_receive)
+-    // 5. GetKeyboardSession (pyatv waits for a reply; we only send)
++    // 5. GetKeyboardSession (pyatv uses send_and_receive)
      const getKeyboard = await MRPMessage.sendCommand(MessageType.GetKeyboardSession);
 -    await this.sendMRPMessage(getKeyboard);
 -
 -    // Wait a moment for the Apple TV to process init messages and send updates
--    await new Promise((r) => setTimeout(r, 500));
+-    await delay(500);
 -  }
 -
--  /** Wait for an MRP message of a specific type from the data channel */
+-  /**
+-   * Resolve with the next MRP message of `type` from the data channel.
+-   * @throws (rejects) after `timeoutMs` with no matching message.
+-   */
 -  private waitForMRPMessage(type: number, timeoutMs = 5000): Promise<Record<string, unknown>> {
 -    return new Promise((resolve, reject) => {
 -      const timer = setTimeout(() => {
@@ -2134,42 +1546,21 @@ index 8851355..58039f6 100644
 +    await this.sendMRPMessageAndWait(getKeyboard, MessageType.Keyboard);
    }
  
-   /** Perform MRP-level pair-verify using CryptoPairingMessage */
-@@ -538,11 +586,8 @@ export class AirPlayConnection extends EventEmitter {
-       ephemeralPublicKeyRaw,
-     ]);
-     const m1Msg = await MRPMessage.cryptoPairing(m1Tlv);
--    const m2Promise = this.waitForMRPMessage(MessageType.CryptoPairing, 10000);
--    await this.sendMRPMessage(m1Msg);
--
-     // Wait for M2 response
--    const m2Response = await m2Promise;
-+    const m2Response = await this.sendMRPMessageAndWait(m1Msg, MessageType.CryptoPairing, 10000);
-     const m2PairingData = (m2Response as any)['.cryptoPairingMessage']?.pairingData as Buffer;
-     if (!m2PairingData) throw new Error('M2 missing pairingData');
- 
-@@ -620,11 +665,8 @@ export class AirPlayConnection extends EventEmitter {
-       [TlvTag.EncryptedData]: Buffer.concat([ciphertext, tag]),
-     });
-     const m3Msg = await MRPMessage.cryptoPairing(m3Tlv);
--    const m4Promise = this.waitForMRPMessage(MessageType.CryptoPairing);
--    await this.sendMRPMessage(m3Msg);
--
-     // Wait for M4 acknowledgment
--    await m4Promise;
-+    await this.sendMRPMessageAndWait(m3Msg, MessageType.CryptoPairing);
- 
-     // Over AirPlay, MRP encryption keys are derived but NOT applied.
-     // The data channel is already encrypted at the transport layer.
-@@ -634,56 +676,44 @@ export class AirPlayConnection extends EventEmitter {
- 
-   /** Handle encrypted data after pair-verify is complete */
+-  /** Buffer encrypted control-socket bytes after pair-verify and try to extract an RTSP response. */
++  /** Buffer encrypted control-socket bytes after pair-verify and parse RTSP responses. */
    private onEncryptedData(data: Buffer): void {
 +    if (this.closed) return;
      this.encryptedBuffer = Buffer.concat([this.encryptedBuffer, data]);
      this.tryParseRTSPResponse();
    }
  
+   /**
+-   * Once the buffer holds only whole HAP frames, decrypt it and emit `rtsp-response` for the
+-   * first complete message. Decrypt errors are logged and the data is dropped.
++   * Decrypt every complete HAP frame, then resolve each complete RTSP response by its CSeq.
++   * Encrypted fragments and partial plaintext replies stay buffered separately.
++   * A decrypt or parse failure ends the connection.
+    */
    private tryParseRTSPResponse(): void {
 -    let decrypted: Buffer;
      try {
@@ -2181,12 +1572,21 @@ index 8851355..58039f6 100644
 -        decrypted = this.encryptedBuffer;
 -        this.encryptedBuffer = Buffer.alloc(0);
 +      if (!this.session) throw new Error('AirPlay encryption not available');
-+      while (this.encryptedBuffer.length >= 2) {
-+        const size = 2 + this.encryptedBuffer.readUInt16LE(0) + 16;
-+        if (this.encryptedBuffer.length < size) break;
-+        const frame = this.encryptedBuffer.subarray(0, size);
-+        this.encryptedBuffer = this.encryptedBuffer.subarray(size);
-+        this.rtspBuffer = Buffer.concat([this.rtspBuffer, this.session.decrypt(frame)]);
++      const { plaintext, rest } = this.session.decryptAvailable(this.encryptedBuffer);
++      this.encryptedBuffer = rest;
++      this.rtspBuffer = Buffer.concat([this.rtspBuffer, plaintext]);
++      while (!this.closed) {
++        const parsed = parseHTTPMessage(this.rtspBuffer);
++        if (!parsed) break;
++        this.rtspBuffer = this.rtspBuffer.subarray(parsed.totalSize);
++        if (parsed.statusCode === undefined) throw new Error('Invalid AirPlay RTSP response');
++        const sequence = parsed.headers.cseq;
++        if (sequence && /^\d+$/.test(sequence) && Number.isSafeInteger(Number(sequence))) {
++          const key = `rtsp:${Number(sequence)}`;
++          if (parsed.statusCode >= 200 && parsed.statusCode < 300) this.pending.resolve(key, parsed);
++          else this.pending.reject(key, new Error(`AirPlay RTSP status ${parsed.statusCode}`));
++        }
++        this.emit('rtsp-response', { headers: parsed.headers, body: parsed.body });
        }
 -    } catch (err) {
 -      this.log(`decrypt error: ${err}`);
@@ -2207,6 +1607,7 @@ index 8851355..58039f6 100644
 -    this.emit('rtsp-response', { headers: parsed.headers, body: parsed.body });
 -  }
 -
+-  /** True when `buf` ends on a HAP frame boundary (no trailing partial frame); callers check non-empty. */
 -  private hasCompleteHAPFrame(buf: Buffer): boolean {
 -    let offset = 0;
 -    while (offset < buf.length) {
@@ -2215,43 +1616,31 @@ index 8851355..58039f6 100644
 -      const totalFrameSize = 2 + frameLen + 16;
 -      if (buf.length - offset < totalFrameSize) return false;
 -      offset += totalFrameSize;
-+      while (!this.closed) {
-+        const parsed = parseHTTPMessage(this.rtspBuffer);
-+        if (!parsed) break;
-+        this.rtspBuffer = this.rtspBuffer.subarray(parsed.totalSize);
-+        if (parsed.statusCode === undefined) throw new Error('Invalid AirPlay RTSP response');
-+        const sequence = parsed.headers.cseq;
-+        if (sequence && /^\d+$/.test(sequence) && Number.isSafeInteger(Number(sequence))) {
-+          const key = `rtsp:${Number(sequence)}`;
-+          if (parsed.statusCode >= 200 && parsed.statusCode < 300) this.pending.resolve(key, parsed);
-+          else this.pending.reject(key, new Error(`AirPlay RTSP status ${parsed.statusCode}`));
-+        }
-+        this.emit('rtsp-response', { headers: parsed.headers, body: parsed.body });
-+      }
 +    } catch (error) {
 +      this.fail(error instanceof Error ? error : new Error('Invalid AirPlay RTSP frame'));
      }
 -    return true;
    }
  
-   private eventEncBuffer = Buffer.alloc(0);
+   private eventEncBuffer: Buffer = Buffer.alloc(0);
    private eventDecBuffer = Buffer.alloc(0);
  
+-  /** Decrypt event-channel bytes and acknowledge any complete requests from the receiver. */
++  /** Decrypt event-channel bytes and acknowledge any complete requests; bad input ends the connection. */
    private onEventChannelData(data: Buffer): void {
 +    if (this.closed) return;
      this.eventEncBuffer = Buffer.concat([this.eventEncBuffer, data]);
      if (!this.eventSession) return;
  
-@@ -699,14 +729,15 @@ export class AirPlayConnection extends EventEmitter {
-       try {
-         const decrypted = this.eventSession.decrypt(frame);
-         this.eventDecBuffer = Buffer.concat([this.eventDecBuffer, decrypted]);
--      } catch (e) {
--        this.log(`event channel decrypt error: ${e}`);
-+      } catch {
-+        this.fail(new Error('Invalid AirPlay event encryption'));
-         return;
-       }
+@@ -647,13 +680,14 @@ export class AirPlayConnection extends EventEmitter {
+       const { plaintext, rest } = this.eventSession.decryptAvailable(this.eventEncBuffer);
+       this.eventEncBuffer = rest;
+       this.eventDecBuffer = Buffer.concat([this.eventDecBuffer, plaintext]);
+-    } catch (e) {
+-      this.log(`event channel decrypt error: ${e}`);
++    } catch {
++      this.fail(new Error('Invalid AirPlay event encryption'));
+       return;
      }
  
      // Parse HTTP requests from decrypted data and respond with 200 OK
@@ -2260,8 +1649,8 @@ index 8851355..58039f6 100644
 +    catch { this.fail(new Error('Invalid AirPlay event request')); }
    }
  
-   private processEventRequests(): void {
-@@ -726,13 +757,14 @@ export class AirPlayConnection extends EventEmitter {
+   /** Answer each buffered event-channel request with an encrypted `RTSP/1.0 200 OK`, echoing CSeq and Server. */
+@@ -674,17 +708,18 @@ export class AirPlayConnection extends EventEmitter {
  
        const response = `RTSP/1.0 200 OK\r\n${respHeaders.join('\r\n')}\r\n\r\n`;
        const encrypted = this.eventSession!.encrypt(Buffer.from(response));
@@ -2270,20 +1659,25 @@ index 8851355..58039f6 100644
      }
    }
  
-   private dataEncBuffer = Buffer.alloc(0);
+   private dataEncBuffer: Buffer = Buffer.alloc(0);
  
+   /**
+-   * Decrypt data-channel bytes, ack every "sync" DataStream frame with a "rply", and hand
+-   * each protobuf payload to `handleMRPResponse`.
++   * Decrypt data-channel bytes, ack every "sync" DataStream frame with a "rply", and queue
++   * every protobuf in each frame for `handleMRPResponse` in wire order. Bad input ends the connection.
+    */
    private onDataChannelData(data: Buffer): void {
 +    if (this.closed) return;
      this.dataEncBuffer = Buffer.concat([this.dataEncBuffer, data]);
  
-     // Wait for complete HAP frames before decrypting
-@@ -749,24 +781,31 @@ export class AirPlayConnection extends EventEmitter {
-         this.dataDecBuffer = Buffer.concat([this.dataDecBuffer, decrypted]);
-       } catch (e) {
-         this.log(`data channel decrypt error: ${e}`);
-+        this.fail(new Error('Invalid AirPlay data encryption'));
-         return;
-       }
+     // Decrypt all complete HAP frames in one pass; one concat per chunk, not per 1 KB frame.
+@@ -694,23 +729,30 @@ export class AirPlayConnection extends EventEmitter {
+       this.dataDecBuffer = Buffer.concat([this.dataDecBuffer, plaintext]);
+     } catch (e) {
+       this.log(`data channel decrypt error: ${e}`);
++      this.fail(new Error('Invalid AirPlay data encryption'));
+       return;
      }
  
      // Parse complete DataStream frames from the decrypted buffer
@@ -2313,9 +1707,16 @@ index 8851355..58039f6 100644
        }
  
        // Advance buffer past this frame
-@@ -775,69 +814,116 @@ export class AirPlayConnection extends EventEmitter {
+@@ -719,83 +761,129 @@ export class AirPlayConnection extends EventEmitter {
    }
  
+   /**
+-   * Decode an MRP protobuf, emit it as `mrp-message`, and resolve the oldest waiter for its
+-   * type. Decode errors are logged, never thrown.
++   * Decode an MRP protobuf, emit it as `mrp-message`, and settle the request it answers:
++   * matched by identifier, or by type for an identifier-less request. A nonzero errorCode
++   * or an unexpected type rejects that request. A decode failure ends the connection.
+    */
    private async handleMRPResponse(protobufData: Buffer): Promise<void> {
 +    if (this.closed) return;
      try {
@@ -2329,7 +1730,7 @@ index 8851355..58039f6 100644
  
 -      // Also resolve any pending resolver that matches this message type
 -      const idx = this.pendingMRPResolvers.findIndex(
--        (r) => r.type === undefined || r.type === msg.type,
+-        (r) => r.type === msg.type,
 -      );
 -      if (idx >= 0) {
 -        const resolver = this.pendingMRPResolvers.splice(idx, 1)[0];
@@ -2350,6 +1751,8 @@ index 8851355..58039f6 100644
      }
    }
  
+-  /** POST /feedback every 2 s to keep the AirPlay session alive; failures are only logged. */
++  /** POST /feedback every 2 s, one at a time, to keep the AirPlay session alive; a failure ends the connection. */
    private startFeedbackHeartbeat(): void {
 +    this.assertOpen();
 +    let pending = false;
@@ -2367,11 +1770,13 @@ index 8851355..58039f6 100644
      }, 2000);
    }
  
-+  /**
+   /**
+-   * Send an MRP message and resolve with the next incoming message of `responseType`.
+-   * The waiter is registered before sending so a fast reply is not missed.
 +   * Send one MRP message and wait for its correlated reply. A timeout fails the connection
 +   * unless `fatalTimeout: false` is given; then only this request rejects and a late reply
 +   * is ignored. Use that for requests whose acknowledgement may be slow or absent.
-+   */
+    */
    async sendMRPMessageAndWait(
      protobufData: Buffer,
 -    responseType: number,
@@ -2404,6 +1809,11 @@ index 8851355..58039f6 100644
 +    }
    }
  
+   /**
+    * Frame an encoded MRP message as DataStream, encrypt it, and write it to the data channel.
+-   * @throws if the data channel is not connected or the socket write fails.
++   * @throws if the connection is closed, the data channel is not connected, or the write fails.
+    */
    async sendMRPMessage(protobufData: Buffer): Promise<void> {
 +    this.assertOpen();
      if (!this.dataSocket || !this.dataSession) throw new Error('Data channel not connected');
@@ -2416,15 +1826,18 @@ index 8851355..58039f6 100644
 -      });
 -    });
 +    await this.write(this.dataSocket, encrypted);
-   }
- 
--  close(): void {
++  }
++
++  /** End the connection with `error`, then emit it if anyone is listening. */
 +  private fail(error: Error): void {
 +    if (this.closed) return;
 +    this.shutdown(error);
 +    if (this.listenerCount('error')) this.emit('error', error);
-+  }
-+
+   }
+ 
+-  /** Stop the heartbeat and destroy all three sockets. Pending waiters are not rejected. */
+-  close(): void {
++  /** Reject everything pending, stop the heartbeat, destroy every socket, clear keys and buffers, emit `close`. */
 +  private shutdown(error: Error): void {
 +    if (this.closed) return;
 +    this.closed = true;
@@ -2451,48 +1864,42 @@ index 8851355..58039f6 100644
 +    this.emit('close');
    }
 +
++  /** Close the connection and reject pending requests. Safe to call more than once. */
 +  close(): void { this.shutdown(new Error('AirPlay connection closed')); }
  }
 diff --git a/src/discovery.ts b/src/discovery.ts
-index 3f67678..9f288b2 100644
+index 21aca07..b990510 100644
 --- a/src/discovery.ts
 +++ b/src/discovery.ts
-@@ -50,13 +50,16 @@ export class DiscoveredDevice {
- export interface ScanOptions {
+@@ -67,6 +67,8 @@ export interface ScanOptions {
    timeout?: number;
+   /** Keep only devices for which this returns true. */
    filter?: (device: DiscoveredDevice) => boolean;
++  /** Aborting stops the browsers and rejects with the signal's reason. */
 +  signal?: AbortSignal;
  }
  
+ /** Routable IPv4 addresses, in advertised order (link-local 169.254.x.x excluded). */
+@@ -77,15 +79,16 @@ function usableAddresses(service: Service): string[] {
+ /**
+  * Browse the local network for `timeout` ms and return discovered Apple TVs
+  * sorted by name. Devices are deduplicated by AirPlay device ID (or address);
+- * services with no routable IPv4 address are skipped. Never rejects.
++ * services with no routable IPv4 address are skipped. Rejects only when `signal` aborts.
+  */
  export async function scan(options: ScanOptions = {}): Promise<DiscoveredDevice[]> {
    const timeout = options.timeout ?? 5000;
 +  options.signal?.throwIfAborted();
    const devices = new Map<string, DiscoveredDevice>();
-+  const companionPorts = new Map<string, number>();
+   const companionPorts = new Map<string, number>();
+   const airplayAddresses = new Map<string, string[]>();
  
 -  return new Promise((resolve) => {
 +  return new Promise((resolve, reject) => {
      const instance = new Bonjour();
  
      const browser = instance.find({ type: 'airplay', protocol: 'tcp' }, (service: Service) => {
-@@ -78,6 +81,7 @@ export async function scan(options: ScanOptions = {}): Promise<DiscoveredDevice[
-             port: service.port,
-             deviceId: parsed.deviceId,
-             model: parsed.model,
-+            companionPort: companionPorts.get(address),
-           }),
-         );
-       }
-@@ -91,6 +95,8 @@ export async function scan(options: ScanOptions = {}): Promise<DiscoveredDevice[
-         );
-         if (!address) return;
- 
-+        companionPorts.set(address, service.port);
-+
-         for (const device of devices.values()) {
-           if (device.address === address) {
-             device.companionPort = service.port;
-@@ -99,16 +105,27 @@ export async function scan(options: ScanOptions = {}): Promise<DiscoveredDevice[
+@@ -123,21 +126,32 @@ export async function scan(options: ScanOptions = {}): Promise<DiscoveredDevice[
        },
      );
  
@@ -2508,11 +1915,21 @@ index 3f67678..9f288b2 100644
        instance.destroy();
 -
 -      let result = Array.from(devices.values());
+-      // Join once after both browsers stop, independent of advertisement order.
+-      for (const [key, device] of devices) {
+-        const match = airplayAddresses.get(key)!.find((a) => companionPorts.has(a));
+-        device.companionPort = match === undefined ? undefined : companionPorts.get(match);
+-      }
 -      if (options.filter) {
 -        result = result.filter(options.filter);
 +      if (cancelled) { reject(options.signal?.reason); return; }
 +      try {
 +        let result = Array.from(devices.values());
++        // Join once after both browsers stop, independent of advertisement order.
++        for (const [key, device] of devices) {
++          const match = airplayAddresses.get(key)!.find((a) => companionPorts.has(a));
++          device.companionPort = match === undefined ? undefined : companionPorts.get(match);
++        }
 +        if (options.filter) result = result.filter(options.filter);
 +        resolve(result.sort((a, b) => a.name.localeCompare(b.name)));
 +      } catch (error) {
@@ -2528,19 +1945,10 @@ index 3f67678..9f288b2 100644
    });
  }
 diff --git a/src/index.ts b/src/index.ts
-index 8466eac..5402e36 100644
+index 2678e5b..d07afec 100644
 --- a/src/index.ts
 +++ b/src/index.ts
-@@ -4,7 +4,7 @@ export type { KeyboardInfo, TextInputEvent, CompanionEvent } from './appletv.js'
- export { CompanionConnection } from './companion/connection.js';
- export { CompanionPairSetup } from './companion/pair-setup.js';
- export { CompanionSession } from './companion/companion-session.js';
--export { opackEncode, opackDecode } from './companion/opack.js';
-+export { opackEncode, opackDecode, OpackFloat } from './companion/opack.js';
- export type { OpackValue, OpackDict } from './companion/opack.js';
- export { FrameType, encodeFrame, parseFrames } from './companion/framing.js';
- export type { Frame } from './companion/framing.js';
-@@ -12,6 +12,8 @@ export { Credentials, parseCredentials } from './credentials.js';
+@@ -18,6 +18,8 @@ export { Credentials, parseCredentials } from './credentials.js';
  export { NowPlayingInfo, PlaybackState } from './now-playing-info.js';
  export { SupportedCommand, Command } from './supported-command.js';
  export { Message } from './message.js';
@@ -2550,12 +1958,12 @@ index 8466eac..5402e36 100644
  export type { HAPCredentials } from './auth/types.js';
  export type { ScanOptions, DiscoveredDevice } from './discovery.js';
 diff --git a/src/message.ts b/src/message.ts
-index ba91c37..25abaaa 100644
+index 9212cfa..ecde786 100644
 --- a/src/message.ts
 +++ b/src/message.ts
-@@ -8,7 +8,9 @@ export class Message {
-   readonly payload: Record<string, unknown>;
+@@ -15,7 +15,9 @@ export class Message {
  
+   /** Missing `type` defaults to 0 and missing `identifier` to the empty string. */
    constructor(decoded: Record<string, unknown>) {
 -    this.type = (decoded.type as MessageType) ?? 0;
 +    // protobufjs supplies the first enum member for an absent proto2 field.
@@ -2760,60 +2168,35 @@ index 0000000..a1c862a
 +  });
 +});
 diff --git a/src/mrp/messages.ts b/src/mrp/messages.ts
-index 499a60a..bb9d883 100644
+index 96b3c79..e20a12f 100644
 --- a/src/mrp/messages.ts
 +++ b/src/mrp/messages.ts
-@@ -2,11 +2,16 @@ import protobuf from 'protobufjs';
- import { fileURLToPath } from 'node:url';
- import { randomUUID } from 'node:crypto';
- import { dirname, join } from 'node:path';
-+import { existsSync } from 'node:fs';
+@@ -10,6 +10,7 @@ import { MRP_SCHEMA } from './schema.js';
  
- const __dirname = dirname(fileURLToPath(import.meta.url));
--const PROTO_DIR = join(__dirname, '..', 'proto');
-+// Single-file application bundles keep the packaged schemas next to their entry.
-+const PROTO_DIR = existsSync(join(__dirname, 'proto'))
-+  ? join(__dirname, 'proto')
-+  : join(__dirname, '..', 'proto');
- 
+ /** ProtocolMessage.type values: which extension field a message carries. Gaps are types this library does not use. */
  export enum MessageType {
 +  Unknown = 0,
    SendCommand = 1,
    SendCommandResult = 2,
    GetState = 3,
-@@ -47,8 +52,16 @@ export enum MessageType {
-   GenericMessage = 42,
+@@ -51,12 +52,16 @@ export enum MessageType {
    SendButtonEvent = 43,
    SetNowPlayingClient = 46,
-+  SetNowPlayingPlayer = 47,
+   SetNowPlayingPlayer = 47,
 +  ModifyOutputContextRequest = 48,
 +  GetVolume = 49,
 +  GetVolumeResult = 50,
-+  VolumeDidChange = 52,
-+  RemoveClient = 53,
-+  RemovePlayer = 54,
+   SetVolume = 51,
+   VolumeDidChange = 52,
+   RemoveClient = 53,
+   RemovePlayer = 54,
    UpdateClient = 55,
    UpdateContentItem = 56,
 +  VolumeControlCapabilitiesDidChange = 64,
+   SetDefaultSupportedCommands = 72,
  }
  
- let rootPromise: Promise<protobuf.Root> | null = null;
-@@ -74,6 +87,14 @@ const PROTO_FILES = [
-   'SetConnectionStateMessage.proto',
-   'SetHiliteModeMessage.proto',
-   'SetNowPlayingClientMessage.proto',
-+  'SetNowPlayingPlayerMessage.proto',
-+  'GetVolumeMessage.proto',
-+  'GetVolumeResultMessage.proto',
-+  'VolumeDidChangeMessage.proto',
-+  'VolumeControlCapabilitiesDidChangeMessage.proto',
-+  'RemoveClientMessage.proto',
-+  'RemovePlayerMessage.proto',
-+  'ModifyOutputContextRequestMessage.proto',
-   'PlaybackQueueRequestMessage.proto',
-   'TransactionMessage.proto',
-   'UpdateClientMessage.proto',
-@@ -162,7 +183,55 @@ async function encodeMessage(
+@@ -139,8 +144,56 @@ async function encodeMessage(
    return Buffer.from(ProtocolMessage.encode(message).finish());
  }
  
@@ -2827,6 +2210,7 @@ index 499a60a..bb9d883 100644
 +  Auxiliary = 5,
 +}
 +
+ /** Static builders that return encoded ProtocolMessage buffers ready to frame and send, plus `decode` for incoming ones. */
  export class MRPMessage {
 +  /**
 +   * Replace the system audio route with the given output device UIDs.
@@ -2866,9 +2250,305 @@ index 499a60a..bb9d883 100644
 +    });
 +  }
 +
+   /** DeviceInfo: the first message after connecting, describing this client to the Apple TV. */
    static async deviceInfo(options: DeviceInfoOptions): Promise<Buffer> {
      return encodeMessage(MessageType.DeviceInfo, {
-       key: '.deviceInfoMessage',
+diff --git a/src/mrp/schema.ts b/src/mrp/schema.ts
+index d2c7296..18cd9c0 100644
+--- a/src/mrp/schema.ts
++++ b/src/mrp/schema.ts
+@@ -780,7 +780,6 @@ export const MRP_SCHEMA: Record<string, unknown> = {
+       "edition": "proto2",
+       "fields": {
+         "uniqueIdentifier": {
+-          "rule": "required",
+           "type": "string",
+           "id": 1
+         },
+@@ -794,12 +793,10 @@ export const MRP_SCHEMA: Record<string, unknown> = {
+           "id": 3
+         },
+         "systemBuildVersion": {
+-          "rule": "required",
+           "type": "string",
+           "id": 4
+         },
+         "applicationBundleIdentifier": {
+-          "rule": "required",
+           "type": "string",
+           "id": 5
+         },
+@@ -808,7 +805,6 @@ export const MRP_SCHEMA: Record<string, unknown> = {
+           "id": 6
+         },
+         "protocolVersion": {
+-          "rule": "required",
+           "type": "int32",
+           "id": 7
+         },
+@@ -888,6 +884,11 @@ export const MRP_SCHEMA: Record<string, unknown> = {
+           "type": "string",
+           "id": 27
+         },
++        "groupedDevices": {
++          "rule": "repeated",
++          "type": "DeviceInfoMessage",
++          "id": 28
++        },
+         "isGroupLeader": {
+           "type": "bool",
+           "id": 29
+@@ -912,6 +913,10 @@ export const MRP_SCHEMA: Record<string, unknown> = {
+         "linkAgent": {
+           "type": "string",
+           "id": 34
++        },
++        "clusterID": {
++          "type": "string",
++          "id": 35
+         }
+       }
+     },
+@@ -931,6 +936,36 @@ export const MRP_SCHEMA: Record<string, unknown> = {
+       "id": 8,
+       "extend": "ProtocolMessage"
+     },
++    "getVolumeMessage": {
++      "edition": "proto2",
++      "type": "GetVolumeMessage",
++      "id": 53,
++      "extend": "ProtocolMessage"
++    },
++    "GetVolumeMessage": {
++      "edition": "proto2",
++      "fields": {
++        "outputDeviceUID": {
++          "type": "string",
++          "id": 1
++        }
++      }
++    },
++    "getVolumeResultMessage": {
++      "edition": "proto2",
++      "type": "GetVolumeResultMessage",
++      "id": 54,
++      "extend": "ProtocolMessage"
++    },
++    "GetVolumeResultMessage": {
++      "edition": "proto2",
++      "fields": {
++        "volume": {
++          "type": "float",
++          "id": 1
++        }
++      }
++    },
+     "keyboardMessage": {
+       "edition": "proto2",
+       "type": "KeyboardMessage",
+@@ -980,6 +1015,67 @@ export const MRP_SCHEMA: Record<string, unknown> = {
+         }
+       }
+     },
++    "modifyOutputContextRequestMessage": {
++      "edition": "proto2",
++      "type": "ModifyOutputContextRequestMessage",
++      "id": 52,
++      "extend": "ProtocolMessage"
++    },
++    "ModifyOutputContextRequestMessage": {
++      "edition": "proto2",
++      "fields": {
++        "type": {
++          "type": "ModifyOutputContextRequestType.Enum",
++          "id": 1
++        },
++        "addingDevices": {
++          "rule": "repeated",
++          "type": "string",
++          "id": 2
++        },
++        "removingDevices": {
++          "rule": "repeated",
++          "type": "string",
++          "id": 3
++        },
++        "settingDevices": {
++          "rule": "repeated",
++          "type": "string",
++          "id": 4
++        },
++        "clusterAwareAddingDevices": {
++          "rule": "repeated",
++          "type": "string",
++          "id": 5
++        },
++        "clusterAwareRemovingDevices": {
++          "rule": "repeated",
++          "type": "string",
++          "id": 6
++        },
++        "clusterAwareSettingDevices": {
++          "rule": "repeated",
++          "type": "string",
++          "id": 7
++        }
++      }
++    },
++    "ModifyOutputContextRequestType": {
++      "edition": "proto2",
++      "fields": {},
++      "nested": {
++        "Enum": {
++          "values": {
++            "Unknown": 0,
++            "SharedAudioPresentation": 1,
++            "SharedSystemAudio": 2,
++            "SharedSystemScreen": 3,
++            "iTunesAudio": 4,
++            "Auxiliary": 5
++          }
++        }
++      }
++    },
+     "notificationMessage": {
+       "edition": "proto2",
+       "type": "NotificationMessage",
+@@ -1341,13 +1437,17 @@ export const MRP_SCHEMA: Record<string, unknown> = {
+           "type": "string",
+           "id": 2
+         },
+-        "priority": {
++        "errorCode": {
+           "type": "int32",
+           "id": 4
+         },
+         "timestamp": {
+           "type": "uint64",
+           "id": 5
++        },
++        "errorDescription": {
++          "type": "string",
++          "id": 78
+         }
+       },
+       "extensions": [
+@@ -1359,6 +1459,7 @@ export const MRP_SCHEMA: Record<string, unknown> = {
+       "nested": {
+         "Type": {
+           "values": {
++            "UNKNOWN_MESSAGE": 0,
+             "SEND_COMMAND_MESSAGE": 1,
+             "SEND_COMMAND_RESULT_MESSAGE": 2,
+             "GET_STATE_MESSAGE": 3,
+@@ -1396,20 +1497,55 @@ export const MRP_SCHEMA: Record<string, unknown> = {
+             "SET_CONNECTION_STATE_MESSAGE": 38,
+             "SET_HILITE_MODE_MESSAGE": 40,
+             "WAKE_DEVICE_MESSAGE": 41,
++            "GENERIC_MESSAGE": 42,
+             "SEND_PACKED_VIRTUAL_TOUCH_EVENT_MESSAGE": 43,
+             "SET_NOW_PLAYING_CLIENT_MESSAGE": 46,
+             "SET_NOW_PLAYING_PLAYER_MESSAGE": 47,
++            "MODIFY_OUTPUT_CONTEXT_REQUEST_MESSAGE": 48,
++            "GET_VOLUME_MESSAGE": 49,
++            "GET_VOLUME_RESULT_MESSAGE": 50,
+             "SET_VOLUME_MESSAGE": 51,
+             "VOLUME_DID_CHANGE_MESSAGE": 52,
+             "REMOVE_CLIENT_MESSAGE": 53,
+             "REMOVE_PLAYER_MESSAGE": 54,
+             "UPDATE_CLIENT_MESSAGE": 55,
+             "UPDATE_CONTENT_ITEM_MESSAGE": 56,
++            "VOLUME_CONTROL_CAPABILITIES_DID_CHANGE_MESSAGE": 64,
+             "SET_DEFAULT_SUPPORTED_COMMANDS_MESSAGE": 72
+           }
+         }
+       }
+     },
++    "removeClientMessage": {
++      "edition": "proto2",
++      "type": "RemoveClientMessage",
++      "id": 57,
++      "extend": "ProtocolMessage"
++    },
++    "RemoveClientMessage": {
++      "edition": "proto2",
++      "fields": {
++        "client": {
++          "type": "NowPlayingClient",
++          "id": 1
++        }
++      }
++    },
++    "removePlayerMessage": {
++      "edition": "proto2",
++      "type": "RemovePlayerMessage",
++      "id": 58,
++      "extend": "ProtocolMessage"
++    },
++    "RemovePlayerMessage": {
++      "edition": "proto2",
++      "fields": {
++        "playerPath": {
++          "type": "PlayerPath",
++          "id": 1
++        }
++      }
++    },
+     "sendButtonEventMessage": {
+       "edition": "proto2",
+       "type": "SendButtonEventMessage",
+@@ -1526,6 +1662,21 @@ export const MRP_SCHEMA: Record<string, unknown> = {
+         }
+       }
+     },
++    "setNowPlayingPlayerMessage": {
++      "edition": "proto2",
++      "type": "SetNowPlayingPlayerMessage",
++      "id": 51,
++      "extend": "ProtocolMessage"
++    },
++    "SetNowPlayingPlayerMessage": {
++      "edition": "proto2",
++      "fields": {
++        "playerPath": {
++          "type": "PlayerPath",
++          "id": 1
++        }
++      }
++    },
+     "setStateMessage": {
+       "edition": "proto2",
+       "type": "SetStateMessage",
+@@ -1877,6 +2028,29 @@ export const MRP_SCHEMA: Record<string, unknown> = {
+         }
+       }
+     },
++    "volumeControlCapabilitiesDidChangeMessage": {
++      "edition": "proto2",
++      "type": "VolumeControlCapabilitiesDidChangeMessage",
++      "id": 68,
++      "extend": "ProtocolMessage"
++    },
++    "VolumeControlCapabilitiesDidChangeMessage": {
++      "edition": "proto2",
++      "fields": {
++        "capabilities": {
++          "type": "VolumeControlAvailabilityMessage",
++          "id": 1
++        },
++        "endpointUID": {
++          "type": "string",
++          "id": 3
++        },
++        "outputDeviceUID": {
++          "type": "string",
++          "id": 4
++        }
++      }
++    },
+     "volumeDidChangeMessage": {
+       "edition": "proto2",
+       "type": "VolumeDidChangeMessage",
 diff --git a/src/proto/DeviceInfoMessage.proto b/src/proto/DeviceInfoMessage.proto
 index 923aca0..086513e 100644
 --- a/src/proto/DeviceInfoMessage.proto
@@ -2974,7 +2654,7 @@ index 0000000..b4af483
 +  repeated string clusterAwareSettingDevices = 7;
 +}
 diff --git a/src/proto/ProtocolMessage.proto b/src/proto/ProtocolMessage.proto
-index d1e937e..f338c87 100644
+index 7358862..635e5d4 100644
 --- a/src/proto/ProtocolMessage.proto
 +++ b/src/proto/ProtocolMessage.proto
 @@ -4,6 +4,7 @@ message ProtocolMessage {
@@ -2985,23 +2665,25 @@ index d1e937e..f338c87 100644
      SEND_COMMAND_MESSAGE = 1;
      SEND_COMMAND_RESULT_MESSAGE = 2;
      GET_STATE_MESSAGE = 3;
-@@ -41,14 +42,24 @@ message ProtocolMessage {
+@@ -41,20 +42,26 @@ message ProtocolMessage {
      SET_CONNECTION_STATE_MESSAGE = 38;
      SET_HILITE_MODE_MESSAGE = 40;
      WAKE_DEVICE_MESSAGE = 41;
 +    GENERIC_MESSAGE = 42;
      SEND_PACKED_VIRTUAL_TOUCH_EVENT_MESSAGE = 43;
      SET_NOW_PLAYING_CLIENT_MESSAGE = 46;
-+    SET_NOW_PLAYING_PLAYER_MESSAGE = 47;
+     SET_NOW_PLAYING_PLAYER_MESSAGE = 47;
 +    MODIFY_OUTPUT_CONTEXT_REQUEST_MESSAGE = 48;
 +    GET_VOLUME_MESSAGE = 49;
 +    GET_VOLUME_RESULT_MESSAGE = 50;
-+    VOLUME_DID_CHANGE_MESSAGE = 52;
-+    REMOVE_CLIENT_MESSAGE = 53;
-+    REMOVE_PLAYER_MESSAGE = 54;
+     SET_VOLUME_MESSAGE = 51;
+     VOLUME_DID_CHANGE_MESSAGE = 52;
+     REMOVE_CLIENT_MESSAGE = 53;
+     REMOVE_PLAYER_MESSAGE = 54;
      UPDATE_CLIENT_MESSAGE = 55;
      UPDATE_CONTENT_ITEM_MESSAGE = 56;
 +    VOLUME_CONTROL_CAPABILITIES_DID_CHANGE_MESSAGE = 64;
+     SET_DEFAULT_SUPPORTED_COMMANDS_MESSAGE = 72;
    }
  
    optional Type type = 1; // Identifies which underlying message is filled in.
@@ -3085,25 +2767,6 @@ index 0000000..69dff3a
 +  optional string endpointUID = 3;
 +  optional string outputDeviceUID = 4;
 +}
-diff --git a/src/proto/VolumeDidChangeMessage.proto b/src/proto/VolumeDidChangeMessage.proto
-new file mode 100644
-index 0000000..33bb40b
---- /dev/null
-+++ b/src/proto/VolumeDidChangeMessage.proto
-@@ -0,0 +1,13 @@
-+syntax = "proto2";
-+
-+import "ProtocolMessage.proto";
-+
-+extend ProtocolMessage {
-+  optional VolumeDidChangeMessage volumeDidChangeMessage = 56;
-+}
-+
-+message VolumeDidChangeMessage {
-+  optional float volume = 1;
-+  optional string endpointUID = 2;
-+  optional string outputDeviceUID = 3;
-+}
 diff --git a/src/util/__tests__/data-stream.test.ts b/src/util/__tests__/data-stream.test.ts
 index edfa6f3..d182e46 100644
 --- a/src/util/__tests__/data-stream.test.ts
@@ -3161,43 +2824,30 @@ index edfa6f3..d182e46 100644
      const data = Buffer.from([0x08, 0x01]); // minimal protobuf
      const frame = buildDataStreamFrame(data);
 diff --git a/src/util/data-stream.ts b/src/util/data-stream.ts
-index f797944..fe9fbfa 100644
+index 2e7bcf1..ba02fb4 100644
 --- a/src/util/data-stream.ts
 +++ b/src/util/data-stream.ts
-@@ -15,18 +15,13 @@ export function encodeVarint(value: number): Buffer {
- 
- export function decodeVarint(buf: Buffer, offset = 0): { value: number; bytesRead: number } {
-   let value = 0;
--  let shift = 0;
--  let bytesRead = 0;
--
--  while (offset + bytesRead < buf.length) {
-+  for (let bytesRead = 0; bytesRead < 5 && offset + bytesRead < buf.length; bytesRead++) {
-     const byte = buf[offset + bytesRead];
--    value |= (byte & 0x7f) << shift;
--    bytesRead++;
--    if ((byte & 0x80) === 0) break;
--    shift += 7;
-+    value += (byte & 0x7f) * 2 ** (7 * bytesRead);
-+    if (value > 0xffffffff) throw new Error('DataStream length overflow');
-+    if ((byte & 0x80) === 0) return { value, bytesRead: bytesRead + 1 };
-   }
--
--  return { value, bytesRead };
-+  throw new Error('Incomplete DataStream length');
- }
- 
- // --- DataStream 32-byte header framing ---
-@@ -77,6 +72,8 @@ export function buildDataStreamFrame(protobufData: Buffer): Buffer {
+@@ -91,8 +91,10 @@ export function buildDataStreamFrame(protobufData: Buffer): Buffer {
  export interface ParsedDataStreamFrame {
+   /** Any type other than "rply" is reported as "sync". */
    messageType: 'sync' | 'rply';
-   protobufData: Buffer | null;  // null for rply frames with no data
+-  /** The MRP protobuf payload, or null when the frame has no `params.data` or its plist is unparseable. */
++  /** The first MRP protobuf payload, or null when the frame has no `params.data`. */
+   protobufData: Buffer | null;
 +  /** Every message in wire order; protobufData retains the first for compatibility. */
 +  protobufMessages: Buffer[];
    seqno: bigint;
+   /** Bytes the frame occupies in the input, header included; advance the buffer by this much. */
    totalSize: number;
- }
-@@ -85,6 +82,7 @@ export function parseDataStreamFrame(buf: Buffer, offset = 0): ParsedDataStreamF
+@@ -100,12 +102,14 @@ export interface ParsedDataStreamFrame {
+ 
+ /**
+  * Parse one frame starting at `offset`. Returns null if the buffer does not yet hold the
+- * whole frame. Plist parse errors are swallowed and reported as a frame with null payload.
++ * whole frame. A payload may carry several varint-length-prefixed protobufs.
++ * @throws on an invalid frame size, plist, or protobuf length prefix
+  */
+ export function parseDataStreamFrame(buf: Buffer, offset = 0): ParsedDataStreamFrame | null {
    if (buf.length - offset < HEADER_SIZE) return null;
  
    const totalSize = buf.readUInt32BE(offset);
@@ -3205,7 +2855,7 @@ index f797944..fe9fbfa 100644
    if (buf.length - offset < totalSize) return null;
  
    const messageTypeStr = buf.subarray(offset + 4, offset + 8).toString('ascii');
-@@ -92,28 +90,28 @@ export function parseDataStreamFrame(buf: Buffer, offset = 0): ParsedDataStreamF
+@@ -113,28 +117,29 @@ export function parseDataStreamFrame(buf: Buffer, offset = 0): ParsedDataStreamF
    const seqno = buf.readBigUInt64BE(offset + 20);
  
    if (totalSize <= HEADER_SIZE) {
@@ -3234,6 +2884,7 @@ index f797944..fe9fbfa 100644
 +    let cursor = 0;
 +    while (cursor < data.length) {
 +      const { value: length, bytesRead } = decodeVarint(data, cursor);
++      if (data[cursor + bytesRead - 1] & 0x80) throw new Error('Incomplete DataStream length');
 +      cursor += bytesRead;
 +      if (length > data.length - cursor) throw new Error('Truncated DataStream protobuf');
 +      protobufMessages.push(data.subarray(cursor, cursor + length));
@@ -3249,7 +2900,7 @@ index f797944..fe9fbfa 100644
 +  return { messageType, protobufData: protobufMessages[0] ?? null, protobufMessages, seqno, totalSize };
  }
  
- /** Build a "rply" frame to acknowledge a received sync frame */
+ /** Build a header-only "rply" frame acknowledging the received sync frame with `seqno`. */
 diff --git a/src/util/pending-requests.ts b/src/util/pending-requests.ts
 new file mode 100644
 index 0000000..9c2fa3d
