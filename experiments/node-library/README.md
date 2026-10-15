@@ -21,8 +21,8 @@ wraps bare Companion content in the `{ _i, _t, _c, _x }` envelope. The module
 already sends prebuilt `{ _t, _c }` envelopes; the library copies those and only
 sets `_i` and `_x`, so the bytes sent are unchanged.
 
-Test build 0.5.1-dev.6 bundles energee's unreleased default branch at `a189ea6`
-(#7, #25, #26, #27) instead. That branch already covers what this module used
+Test build 0.5.1-dev.8 bundles energee's unreleased default branch at `5cfc6af`
+(through #63) instead; 0.5.1-dev.6 and dev.7 used `a189ea6`. That branch already covers what this module used
 to patch for the AirPlay lifetime (cancellable setup through `close()`,
 CSeq-correlated RTSP and identifier-correlated MRP replies, non-fatal reply
 timeouts, a single outstanding heartbeat, full cleanup), the `errorCode` and
@@ -33,21 +33,27 @@ closes the connection to cancel setup, reads `errorCode` from replies, silences
 the AirPlay progress log in a subclass, and subscribes to output-device updates
 itself after connecting.
 
-The remaining patch on `a189ea6` adds only:
+Since `a189ea6`, energee's branch also delivers every protobuf in a batched
+DataStream frame, one after another in wire order (#31), and declares
+VolumeControlCapabilitiesDidChange (type 64) and reads volume capabilities
+during the handshake (#53). The module's own versions of those changes are
+dropped. The handshake now also sends GetVolumeControlCapabilities (62); the
+module does not read its type 63 reply.
 
-- GetVolume/GetVolumeResult and VolumeControlCapabilitiesDidChange messages, and
-  `MRPMessage.getVolume`.
+The remaining patch on `5cfc6af` adds only:
+
+- GetVolume/GetVolumeResult messages (types 49 and 50) and `MRPMessage.getVolume`.
 - An optional context type for `MRPMessage.modifyOutputDevices`; the module passes
   `SharedSystemAudio` (2).
-- Every protobuf in a DataStream frame, in wire order.
 - OPACK absolute time (`0x06`) decoded as pyatv 0.18.0 does, as an integer.
 - Companion pairing lifetime: a `start({ signal })` cancellation, a `closed`
   promise for peer close while awaiting the PIN, a `stage` getter, immediate
   rejection on socket loss, and M6 identity signature verification.
 - `MRPMessage` and `MessageType` exported from the package entry.
 
-The upstream build also imports `plist`, which the npm 0.4.0 manifest lacks;
-`.yarnrc.yml` adds it through `packageExtensions`.
+The upstream build requires `bplist-parser` 0.5, while the npm 0.4.0 manifest
+asks for 0.3; `package.json` raises it through `resolutions`. The build no
+longer imports `plist`.
 
 Release 0.4.0 also adds high-level controls on its `AppleTV` class: MRP skip,
 position, shuffle/repeat and `SetVolume`, plus Companion apps, accounts and power.
@@ -121,7 +127,7 @@ An independent loopback session caught that mistake; regenerated fixtures use
 receive regression checks failed before correcting the library's counter layout.
 
 The remaining source changes and their regression tests are in
-`upstream-opack.patch`, based on energee commit `a189ea6`. The Yarn patch under
+`upstream-opack.patch`, based on energee commit `5cfc6af`. The Yarn patch under
 `patches/` applies the corresponding compiled JavaScript, declarations, source
 maps and bundled schema to the published npm package. The patch-only `.proto`
 files are build input; the npm package carries no `.proto` files. This makes the experiment reproducible without
@@ -197,7 +203,7 @@ session about every 255 requests (roughly every two hours of health checks;
 issue #25). Release 0.4.0 keeps request IDs in 1 to 127, skipping any still
 awaiting a reply, and decodes `0x07` as -1.
 
-To verify the library source patch in a separate checkout of energee `a189ea6`, apply
+To verify the library source patch in a separate checkout of energee `5cfc6af`, apply
 `upstream-opack.patch`, install with the upstream lockfile
 (`pnpm install --frozen-lockfile`), then run `npm test` and `npm run build`. The
 source patch includes its tests. The resulting `dist`, without `__tests__`, matches

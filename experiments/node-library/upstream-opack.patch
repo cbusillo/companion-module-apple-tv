@@ -1,19 +1,18 @@
 diff --git a/scripts/gen-proto.mjs b/scripts/gen-proto.mjs
-index 24c35b5..b4b4ab6 100644
+index e52a056..26e114f 100644
 --- a/scripts/gen-proto.mjs
 +++ b/scripts/gen-proto.mjs
-@@ -48,6 +48,9 @@ const PROTO_FILES = [
+@@ -48,6 +48,8 @@ const PROTO_FILES = [
    'ModifyOutputContextRequestMessage.proto',
    'SetVolumeMessage.proto',
    'VolumeDidChangeMessage.proto',
 +  'GetVolumeMessage.proto',
 +  'GetVolumeResultMessage.proto',
-+  'VolumeControlCapabilitiesDidChangeMessage.proto',
- ];
- 
- const root = new protobuf.Root();
+   'GetVolumeControlCapabilitiesResultMessage.proto',
+   'VolumeControlCapabilitiesDidChangeMessage.proto',
+   'UpdateOutputDeviceMessage.proto',
 diff --git a/src/__tests__/exports.test.ts b/src/__tests__/exports.test.ts
-index 43aa532..007b4b7 100644
+index fb6dfd5..d6d3ccc 100644
 --- a/src/__tests__/exports.test.ts
 +++ b/src/__tests__/exports.test.ts
 @@ -2,11 +2,17 @@
@@ -33,9 +32,9 @@ index 43aa532..007b4b7 100644
 +  });
  });
  
- describe('pyatv-parity exports', () => {
+ describe('enum exports', () => {
 diff --git a/src/companion/__tests__/opack-compatibility.test.ts b/src/companion/__tests__/opack-compatibility.test.ts
-index 04aec04..0ab5a1d 100644
+index d3f112b..cffd19c 100644
 --- a/src/companion/__tests__/opack-compatibility.test.ts
 +++ b/src/companion/__tests__/opack-compatibility.test.ts
 @@ -104,4 +104,13 @@ describe('Companion OPACK compatibility', () => {
@@ -133,10 +132,10 @@ index 0000000..701dae8
 +  });
 +});
 diff --git a/src/companion/opack.ts b/src/companion/opack.ts
-index aef9941..60f0f52 100644
+index 0c80b40..b3a04b1 100644
 --- a/src/companion/opack.ts
 +++ b/src/companion/opack.ts
-@@ -43,6 +43,9 @@ const TAG_UUID = 0x05;
+@@ -42,6 +42,9 @@ const TAG_UUID = 0x05;
  // Minus one: Apple encodes -1 as 0x07, the slot before the small integers.
  const TAG_MINUS_ONE = 0x07;
  
@@ -146,7 +145,7 @@ index aef9941..60f0f52 100644
  // Small integers: 0x08 + value, for values 0..39
  const TAG_SMALL_INT_BASE = 0x08;
  const TAG_SMALL_INT_MAX_VALUE = 0x27; // 39
-@@ -365,6 +368,13 @@ function decodeLiteral(buf: Buffer, offset: number, context: DecodeContext): Dec
+@@ -364,6 +367,13 @@ function decodeLiteral(buf: Buffer, offset: number, context: DecodeContext): Dec
      return { value: Buffer.from(buf.subarray(offset + 1, offset + 17)), offset: offset + 17 };
    }
  
@@ -348,32 +347,8 @@ index d5ee48e..54eb05e 100644
        } else {
          this.frameQueue.push(frame);
        }
-diff --git a/src/connection.ts b/src/connection.ts
-index 9c954bb..b79c5d7 100644
---- a/src/connection.ts
-+++ b/src/connection.ts
-@@ -653,7 +653,7 @@ export class AirPlayConnection extends MRPConnection {
- 
-   /**
-    * Decrypt data-channel bytes, ack every "sync" DataStream frame with a "rply", and hand
--   * each protobuf payload to `handleMRPResponse`.
-+   * every protobuf payload in each frame to `handleMRPResponse`, in wire order.
-    */
-   private onDataChannelData(data: Buffer): void {
-     if (this.closed || !this.dataSession) return;
-@@ -677,8 +677,8 @@ export class AirPlayConnection extends MRPConnection {
-           socket?.write(encrypted, err => { if (err && this.dataSocket === socket) this.fail(err); });
-         }
- 
--        if (frame.protobufData) {
--          void this.handleMRPResponse(frame.protobufData).catch(error => {
-+        for (const protobufData of frame.protobufMessages) {
-+          void this.handleMRPResponse(protobufData).catch(error => {
-             // EventEmitter listener exceptions must remain uncaught exceptions, not detached rejections.
-             queueMicrotask(() => { throw error; });
-           });
 diff --git a/src/index.ts b/src/index.ts
-index c7a4a9f..9d062f7 100644
+index 2a09d78..27c54f6 100644
 --- a/src/index.ts
 +++ b/src/index.ts
 @@ -18,6 +18,7 @@ export { Credentials, parseCredentials } from './credentials.js';
@@ -438,10 +413,10 @@ index 0000000..8516f66
 +  });
 +});
 diff --git a/src/mrp/messages.ts b/src/mrp/messages.ts
-index 1b03251..02a9789 100644
+index 87cd859..5e402ed 100644
 --- a/src/mrp/messages.ts
 +++ b/src/mrp/messages.ts
-@@ -52,12 +52,15 @@ export enum MessageType {
+@@ -55,6 +55,8 @@ export enum MessageType {
    SetNowPlayingClient = 46,
    SetNowPlayingPlayer = 47,
    ModifyOutputContextRequest = 48,
@@ -450,14 +425,7 @@ index 1b03251..02a9789 100644
    SetVolume = 51,
    VolumeDidChange = 52,
    RemoveClient = 53,
-   RemovePlayer = 54,
-   UpdateClient = 55,
-   UpdateContentItem = 56,
-+  VolumeControlCapabilitiesDidChange = 64,
-   UpdateOutputDevice = 65,
-   RemoveOutputDevices = 66,
-   SetDefaultSupportedCommands = 72,
-@@ -152,16 +155,27 @@ async function encodeMessage(
+@@ -160,16 +162,27 @@ async function encodeMessage(
  
  /** Static builders that return encoded ProtocolMessage buffers ready to frame and send, plus `decode` for incoming ones. */
  export class MRPMessage {
@@ -489,12 +457,12 @@ index 1b03251..02a9789 100644
    static async deviceInfo(options: DeviceInfoOptions): Promise<Buffer> {
      return encodeMessage(MessageType.DeviceInfo, {
 diff --git a/src/mrp/schema.ts b/src/mrp/schema.ts
-index a9a9f73..797a6b4 100644
+index 705c0a3..3152615 100644
 --- a/src/mrp/schema.ts
 +++ b/src/mrp/schema.ts
-@@ -940,6 +940,36 @@ export const MRP_SCHEMA: Record<string, unknown> = {
-       "id": 8,
-       "extend": "ProtocolMessage"
+@@ -988,6 +988,36 @@ export const MRP_SCHEMA: Record<string, unknown> = {
+         }
+       }
      },
 +    "getVolumeMessage": {
 +      "edition": "proto2",
@@ -529,7 +497,7 @@ index a9a9f73..797a6b4 100644
      "keyboardMessage": {
        "edition": "proto2",
        "type": "KeyboardMessage",
-@@ -1460,12 +1490,15 @@ export const MRP_SCHEMA: Record<string, unknown> = {
+@@ -1550,6 +1580,8 @@ export const MRP_SCHEMA: Record<string, unknown> = {
              "SET_NOW_PLAYING_CLIENT_MESSAGE": 46,
              "SET_NOW_PLAYING_PLAYER_MESSAGE": 47,
              "MODIFY_OUTPUT_CONTEXT_REQUEST_MESSAGE": 48,
@@ -538,43 +506,6 @@ index a9a9f73..797a6b4 100644
              "SET_VOLUME_MESSAGE": 51,
              "VOLUME_DID_CHANGE_MESSAGE": 52,
              "REMOVE_CLIENT_MESSAGE": 53,
-             "REMOVE_PLAYER_MESSAGE": 54,
-             "UPDATE_CLIENT_MESSAGE": 55,
-             "UPDATE_CONTENT_ITEM_MESSAGE": 56,
-+            "VOLUME_CONTROL_CAPABILITIES_DID_CHANGE_MESSAGE": 64,
-             "UPDATE_OUTPUT_DEVICE_MESSAGE": 65,
-             "REMOVE_OUTPUT_DEVICES_MESSAGE": 66,
-             "SET_DEFAULT_SUPPORTED_COMMANDS_MESSAGE": 72
-@@ -2032,6 +2065,29 @@ export const MRP_SCHEMA: Record<string, unknown> = {
-         }
-       }
-     },
-+    "volumeControlCapabilitiesDidChangeMessage": {
-+      "edition": "proto2",
-+      "type": "VolumeControlCapabilitiesDidChangeMessage",
-+      "id": 68,
-+      "extend": "ProtocolMessage"
-+    },
-+    "VolumeControlCapabilitiesDidChangeMessage": {
-+      "edition": "proto2",
-+      "fields": {
-+        "capabilities": {
-+          "type": "VolumeControlAvailabilityMessage",
-+          "id": 1
-+        },
-+        "endpointUID": {
-+          "type": "string",
-+          "id": 3
-+        },
-+        "outputDeviceUID": {
-+          "type": "string",
-+          "id": 4
-+        }
-+      }
-+    },
-     "volumeDidChangeMessage": {
-       "edition": "proto2",
-       "type": "VolumeDidChangeMessage",
 diff --git a/src/proto/GetVolumeMessage.proto b/src/proto/GetVolumeMessage.proto
 new file mode 100644
 index 0000000..e272463
@@ -610,7 +541,7 @@ index 0000000..4dfa927
 +  optional float volume = 1;
 +}
 diff --git a/src/proto/ModifyOutputContextRequestMessage.proto b/src/proto/ModifyOutputContextRequestMessage.proto
-index 074b0c3..f4be197 100644
+index 7e390ba..dee23a7 100644
 --- a/src/proto/ModifyOutputContextRequestMessage.proto
 +++ b/src/proto/ModifyOutputContextRequestMessage.proto
 @@ -5,7 +5,7 @@ extend ProtocolMessage {
@@ -623,10 +554,10 @@ index 074b0c3..f4be197 100644
    repeated string removingDevices = 3;
    repeated string settingDevices = 4;
 diff --git a/src/proto/ProtocolMessage.proto b/src/proto/ProtocolMessage.proto
-index 63aa0c4..cee6ee2 100644
+index b67f289..b7e8cde 100644
 --- a/src/proto/ProtocolMessage.proto
 +++ b/src/proto/ProtocolMessage.proto
-@@ -47,12 +47,15 @@ message ProtocolMessage {
+@@ -51,6 +51,8 @@ message ProtocolMessage {
      SET_NOW_PLAYING_CLIENT_MESSAGE = 46;
      SET_NOW_PLAYING_PLAYER_MESSAGE = 47;
      MODIFY_OUTPUT_CONTEXT_REQUEST_MESSAGE = 48; // Payload extension 52, not type 65.
@@ -635,113 +566,3 @@ index 63aa0c4..cee6ee2 100644
      SET_VOLUME_MESSAGE = 51;
      VOLUME_DID_CHANGE_MESSAGE = 52;
      REMOVE_CLIENT_MESSAGE = 53;
-     REMOVE_PLAYER_MESSAGE = 54;
-     UPDATE_CLIENT_MESSAGE = 55;
-     UPDATE_CONTENT_ITEM_MESSAGE = 56;
-+    VOLUME_CONTROL_CAPABILITIES_DID_CHANGE_MESSAGE = 64;
-     UPDATE_OUTPUT_DEVICE_MESSAGE = 65; // Device update, not a routing acknowledgement.
-     REMOVE_OUTPUT_DEVICES_MESSAGE = 66;
-     SET_DEFAULT_SUPPORTED_COMMANDS_MESSAGE = 72;
-diff --git a/src/proto/VolumeControlCapabilitiesDidChangeMessage.proto b/src/proto/VolumeControlCapabilitiesDidChangeMessage.proto
-new file mode 100644
-index 0000000..69dff3a
---- /dev/null
-+++ b/src/proto/VolumeControlCapabilitiesDidChangeMessage.proto
-@@ -0,0 +1,14 @@
-+syntax = "proto2";
-+
-+import "ProtocolMessage.proto";
-+import "VolumeControlAvailabilityMessage.proto";
-+
-+extend ProtocolMessage {
-+  optional VolumeControlCapabilitiesDidChangeMessage volumeControlCapabilitiesDidChangeMessage = 68;
-+}
-+
-+message VolumeControlCapabilitiesDidChangeMessage {
-+  optional VolumeControlAvailabilityMessage capabilities = 1;
-+  optional string endpointUID = 3;
-+  optional string outputDeviceUID = 4;
-+}
-diff --git a/src/util/__tests__/data-stream.test.ts b/src/util/__tests__/data-stream.test.ts
-index 472fa74..73e1488 100644
---- a/src/util/__tests__/data-stream.test.ts
-+++ b/src/util/__tests__/data-stream.test.ts
-@@ -1,4 +1,5 @@
- import { describe, it, expect } from 'vitest';
-+import bplistCreator from 'bplist-creator';
- import { encodeVarint, decodeVarint, buildDataStreamFrame, parseDataStreamFrame } from '../data-stream.js';
- 
- describe('varint encoding', () => {
-@@ -31,6 +32,22 @@ describe('varint encoding', () => {
- });
- 
- describe('DataStream framing', () => {
-+  function batchFrame(messages: Buffer[]): Buffer {
-+    const payload = bplistCreator({ params: { data: Buffer.concat(messages.map(message =>
-+      Buffer.concat([encodeVarint(message.length), message]),
-+    )) } });
-+    const header = buildDataStreamFrame(Buffer.alloc(0)).subarray(0, 32);
-+    header.writeUInt32BE(32 + payload.length);
-+    return Buffer.concat([header, payload]);
-+  }
-+
-+  it('preserves every protobuf in a batch, in order', () => {
-+    const messages = [Buffer.from([8, 15]), Buffer.from([8, 17]), Buffer.from([8, 4])];
-+    const frame = parseDataStreamFrame(batchFrame(messages));
-+    expect(frame?.protobufMessages).toEqual(messages);
-+    expect(frame?.protobufData).toEqual(messages[0]);
-+  });
-+
-   it('builds a frame with a 32-byte header', () => {
-     const data = Buffer.from([0x08, 0x01]); // minimal protobuf
-     const frame = buildDataStreamFrame(data);
-diff --git a/src/util/data-stream.ts b/src/util/data-stream.ts
-index e1d8d9b..ca4d66b 100644
---- a/src/util/data-stream.ts
-+++ b/src/util/data-stream.ts
-@@ -91,8 +91,10 @@ export function buildDataStreamFrame(protobufData: Buffer): Buffer {
- export interface ParsedDataStreamFrame {
-   /** Any type other than "rply" is reported as "sync". */
-   messageType: 'sync' | 'rply';
--  /** The MRP protobuf payload, or null when the frame has no `params.data` or its plist is unparseable. */
-+  /** The first MRP protobuf payload, or null when the frame has no `params.data` or its plist is unparseable. */
-   protobufData: Buffer | null;
-+  /** Every length-prefixed protobuf in `params.data`, in wire order; a frame may batch several. */
-+  protobufMessages: Buffer[];
-   seqno: bigint;
-   /** Bytes the frame occupies in the input, header included; advance the buffer by this much. */
-   totalSize: number;
-@@ -115,7 +117,7 @@ export function parseDataStreamFrame(buf: Buffer, offset = 0): ParsedDataStreamF
-   const seqno = buf.readBigUInt64BE(offset + 20);
- 
-   if (totalSize <= HEADER_SIZE) {
--    return { messageType, protobufData: null, seqno, totalSize };
-+    return { messageType, protobufData: null, protobufMessages: [], seqno, totalSize };
-   }
- 
-   const plistBuf = buf.subarray(offset + HEADER_SIZE, offset + totalSize);
-@@ -128,14 +130,19 @@ export function parseDataStreamFrame(buf: Buffer, offset = 0): ParsedDataStreamF
- 
-     if (!data) {
-       // Empty payload (e.g., rply with just {})
--      return { messageType, protobufData: null, seqno, totalSize };
-+      return { messageType, protobufData: null, protobufMessages: [], seqno, totalSize };
-     }
- 
--    const { value: protoLength, bytesRead } = decodeVarint(data, 0);
--    const protobufData = data.subarray(bytesRead, bytesRead + protoLength);
--    return { messageType, protobufData, seqno, totalSize };
-+    const protobufMessages: Buffer[] = [];
-+    for (let cursor = 0; cursor < data.length;) {
-+      const { value: protoLength, bytesRead } = decodeVarint(data, cursor);
-+      cursor += bytesRead;
-+      protobufMessages.push(data.subarray(cursor, cursor + protoLength));
-+      cursor += protoLength;
-+    }
-+    return { messageType, protobufData: protobufMessages[0] ?? null, protobufMessages, seqno, totalSize };
-   } catch {
--    return { messageType, protobufData: null, seqno, totalSize };
-+    return { messageType, protobufData: null, protobufMessages: [], seqno, totalSize };
-   }
- }
- 
