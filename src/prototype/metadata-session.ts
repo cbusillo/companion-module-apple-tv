@@ -97,7 +97,8 @@ export async function withMetadataSession<T>(
 		if (closing || signal.aborted) return
 		const generation = state.audioGeneration
 		state.receive(message)
-		if (generation !== state.audioGeneration && (started || generation > 0)) {
+		// The first output identity also needs a read: an Apple TV may push no volume or capability at connect.
+		if (generation !== state.audioGeneration) {
 			if (started) refreshAudio()
 			else refreshRequested = true
 		}

@@ -45,27 +45,31 @@ async function session(peer, operation, signal = new AbortController().signal) {
 test('output changes recover capability and correlated volume without device controls', async () => {
 	const peer = new ReadPeer()
 	await session(peer, async (snapshots) => {
-		assert.equal(snapshots.at(-1).audio.volume, 35)
+		await until(() => peer.reads.length === 1)
+		peer.reads[0].resolve(reply(0.35))
+		await until(() => snapshots.at(-1).audio.volume === 35)
+		const startup = peer.requests.length
 		peer.volume(50) // A transitional report arrives before the output identity.
 		const reading = once(peer, 'read')
 		peer.route(['headphones'])
 		await reading
 		assert.equal(snapshots.at(-1).audio.volume, undefined)
 		assert.equal(snapshots.at(-1).audio.absolute, false)
+		const renewal = peer.requests.slice(startup)
 		assert.deepEqual(
-			peer.requests.map((message) => message.type),
+			renewal.map((message) => message.type),
 			[16, 16, 49],
 		)
 		assert.deepEqual(
-			peer.requests.slice(0, 2).map((message) => message['.clientUpdatesConfigMessage'].volumeUpdates),
+			renewal.slice(0, 2).map((message) => message['.clientUpdatesConfigMessage'].volumeUpdates),
 			[false, true],
 		)
-		for (const request of peer.requests.slice(0, 2)) {
+		for (const request of renewal.slice(0, 2)) {
 			const config = request['.clientUpdatesConfigMessage']
 			for (const key of ['artworkUpdates', 'nowPlayingUpdates', 'keyboardUpdates', 'outputDeviceUpdates'])
 				assert.equal(config[key], true)
 		}
-		peer.reads[0].resolve(reply(0.625))
+		peer.reads[1].resolve(reply(0.625))
 		await until(() => snapshots.at(-1).audio.volume === 62.5)
 		assert.equal(snapshots.at(-1).audio.absolute, true)
 		const count = peer.requests.length
@@ -75,6 +79,23 @@ test('output changes recover capability and correlated volume without device con
 	})
 	assert.equal(peer.closed, true)
 	assert.equal(peer.listenerCount('mrp-message'), 0)
+})
+
+/** Like the owner's Apple TV on the wire: nothing about volume at connect, only after the session asks. */
+class QuietPeer extends MetadataPeer {
+	level = 40
+	async connect() {
+		this.route()
+	}
+}
+
+test('a TV that pushes no volume at connect still reports it from the startup read', async () => {
+	const peer = new QuietPeer()
+	await session(peer, async (snapshots) => {
+		await until(() => snapshots.at(-1).audio.volume === 40)
+		assert.equal(snapshots.at(-1).audio.absolute, true)
+		assert.ok(peer.requests.some((message) => message.type === 49))
+	})
 })
 
 test('a late read cannot cross an output round trip or start concurrent renewals', async () => {
