@@ -204,10 +204,6 @@ without `__tests__` into the printed directory, set `dist/cli/index.js` to mode
 755, run `yarn patch-commit -s` on that directory, shorten the blob hashes on the
 patch's `index` lines to seven characters, and run `yarn install`.
 
-`.yarnrc.yml` preapproves exactly `node-appletv-remote@0.4.0` past the three-day
-npm age gate, because it was published on October 14, 2026. The entry can be
-removed after October 17, 2026; later versions remain gated.
-
 ## Supervised device test
 
 The development harness requires a Node 22 terminal on macOS or Linux. It is not
@@ -287,7 +283,10 @@ The controller now owns a Companion session and an authenticated AirPlay metadat
 session together. Numeric volume comes from metadata; it never falls back to the
 unqualified Companion volume reply. Absolute-volume writes still use Companion,
 but require both an acknowledgement and a new matching metadata volume report.
-Repeated cached snapshots cannot confirm a write. Missing volume or capabilities
+Repeated cached snapshots cannot confirm a write. The first output report after
+connecting starts a volume read, as every later output change does: the session
+renews its volume subscription and sends GetVolume. The owner's Apple TV sends no
+volume or capability report at connect until asked. Missing volume or capabilities
 after an output change remain unavailable until the TV reports them again.
 
 Mute restoration is bound to the complete output list and primary volume ID.

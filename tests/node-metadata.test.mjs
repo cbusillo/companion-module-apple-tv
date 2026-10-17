@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { EventEmitter, once } from 'node:events'
 import { spawnSync } from 'node:child_process'
 import test from 'node:test'
+import { MRPMessage } from 'node-appletv-remote'
 import { MetadataState } from '../dist/prototype/metadata.js'
 import { observeMetadata } from '../dist/prototype/metadata-pilot.js'
 
@@ -208,6 +209,16 @@ class Observer extends EventEmitter {
 		capability(receiver)
 		volume(receiver, 'tv-output', 0.3)
 		this.emit('test-ready')
+	}
+	// The startup read renews the volume subscription, which re-sends capabilities, then asks for the level.
+	async sendMRPMessage(data) {
+		if ((await MRPMessage.decode(data))['.clientUpdatesConfigMessage']?.volumeUpdates)
+			capability({ receive: (message) => this.emit('mrp-message', message) })
+	}
+	volumeReads = 0
+	async sendMRPMessageAndWait() {
+		this.volumeReads++
+		return { type: 50, '.getVolumeResultMessage': { volume: 0.3 } }
 	}
 	close() {
 		this.closes++
