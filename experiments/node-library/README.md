@@ -204,10 +204,6 @@ without `__tests__` into the printed directory, set `dist/cli/index.js` to mode
 755, run `yarn patch-commit -s` on that directory, shorten the blob hashes on the
 patch's `index` lines to seven characters, and run `yarn install`.
 
-`.yarnrc.yml` preapproves exactly `node-appletv-remote@0.4.0` past the three-day
-npm age gate, because it was published on October 14, 2026. The entry can be
-removed after October 17, 2026; later versions remain gated.
-
 ## Supervised device test
 
 The development harness requires a Node 22 terminal on macOS or Linux. It is not
