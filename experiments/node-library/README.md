@@ -287,7 +287,10 @@ The controller now owns a Companion session and an authenticated AirPlay metadat
 session together. Numeric volume comes from metadata; it never falls back to the
 unqualified Companion volume reply. Absolute-volume writes still use Companion,
 but require both an acknowledgement and a new matching metadata volume report.
-Repeated cached snapshots cannot confirm a write. Missing volume or capabilities
+Repeated cached snapshots cannot confirm a write. The first output report after
+connecting starts a volume read, as every later output change does: the session
+renews its volume subscription and sends GetVolume. The owner's Apple TV sends no
+volume or capability report at connect until asked. Missing volume or capabilities
 after an output change remain unavailable until the TV reports them again.
 
 Mute restoration is bound to the complete output list and primary volume ID.
