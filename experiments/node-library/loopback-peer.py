@@ -1,6 +1,7 @@
 """Independent pyatv wire peer for the Node harness; synthetic keys, loopback only."""
 
 import asyncio
+import binascii
 import hashlib
 import logging
 from pathlib import Path
@@ -8,6 +9,8 @@ import sys
 from typing import Any, TypedDict
 
 from gesture_parity import check_gestures
+from pyatv.auth.hap_srp import hkdf_expand
+from pyatv.auth.hap_tlv8 import TlvValue, read_tlv
 from pyatv.auth.server_auth import PIN_CODE
 from pyatv.protocols.companion.connection import FrameType
 from pyatv.protocols.companion.server_auth import CompanionServerAuth, ServerKeys
@@ -19,6 +22,7 @@ class PeerState(TypedDict):
     right_down: int
     drop_next_right: bool
     swipes: int
+    pairing_name: str
 
 
 class Peer(CompanionServerAuth, asyncio.Protocol):
@@ -40,6 +44,14 @@ class Peer(CompanionServerAuth, asyncio.Protocol):
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         assert isinstance(transport, asyncio.Transport)
         self.transport = transport
+
+    def _m5_setup(self, pairing_data: dict[int, bytes]) -> None:
+        # Decrypt M5 as the TV does: its Name entry is the label under Remote App and Devices.
+        key = hkdf_expand("Pair-Setup-Encrypt-Salt", "Pair-Setup-Encrypt-Info", binascii.unhexlify(self.session.key))
+        identity = read_tlv(chacha20.Chacha20Cipher(key, key).decrypt(pairing_data[TlvValue.EncryptedData], nonce=b"PS-Msg05"))
+        if TlvValue.Name in identity:
+            self.state["pairing_name"] = opack.unpack(identity[TlvValue.Name])[0]["name"]
+        super()._m5_setup(pairing_data)
 
     def enable_encryption(self, output_key: bytes, input_key: bytes) -> None:
         self.cipher = chacha20.Chacha20Cipher(output_key, input_key, nonce_length=12)
@@ -197,7 +209,7 @@ async def check_package(bundle: str) -> None:
     root = Path(__file__).resolve().parents[2]
     for peer_type, mode in ((Peer, "success"), (ClosedPairingPeer, "closed"), (BadSignaturePeer, "invalid-identity")):
         failures: list[Exception] = []
-        state: PeerState = {"right_down": 0, "drop_next_right": False, "swipes": 0}
+        state: PeerState = {"right_down": 0, "drop_next_right": False, "swipes": 0, "pairing_name": ""}
         def packaged_peer() -> Peer:
             peer = peer_type(failures, state)
             # Fixed synthetic salt plus the Node fixture's reproducible client
@@ -220,6 +232,8 @@ async def check_package(bundle: str) -> None:
             await asyncio.wait_for(process.wait(), 30)
             if process.returncode or failures:
                 raise RuntimeError(f"Packaged pairing failed: {mode}")
+            if mode == "success" and not state["pairing_name"]:
+                raise RuntimeError("Packaged pairing sent no name; the TV would list it as Unknown")
         finally:
             if process is not None and process.returncode is None:
                 process.kill()
@@ -233,7 +247,7 @@ async def main() -> None:
         await check_package(sys.argv[2])
         return
     failures: list[Exception] = []
-    state: PeerState = {"right_down": 0, "drop_next_right": False, "swipes": 0}
+    state: PeerState = {"right_down": 0, "drop_next_right": False, "swipes": 0, "pairing_name": ""}
     server = await asyncio.get_running_loop().create_server(lambda: Peer(failures, state), "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
     root = Path(__file__).resolve().parents[2]

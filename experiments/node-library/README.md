@@ -40,6 +40,9 @@ The remaining patch adds only what 0.4.0 lacks:
 - Companion pairing lifetime: bounded waits, cancellation, peer-close
   notification while awaiting the PIN, a four-digit PIN check, and M6 identity
   signature verification.
+- A Companion pairing `name` option, sent in M5 as pyatv does. Without it the TV
+  lists the pairing as Unknown under Remote App and Devices; the module sends
+  "Companion".
 - `scan({ signal })` cancellation.
 
 Release 0.4.0 also adds high-level controls on its `AppleTV` class: MRP skip,

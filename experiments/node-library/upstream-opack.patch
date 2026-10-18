@@ -731,7 +731,7 @@ index 8e0da48..242771a 100644
      }
    }
 diff --git a/src/companion/pair-setup.ts b/src/companion/pair-setup.ts
-index d298c25..db3ef09 100644
+index d298c25..77edaff 100644
 --- a/src/companion/pair-setup.ts
 +++ b/src/companion/pair-setup.ts
 @@ -7,21 +7,25 @@
@@ -762,7 +762,7 @@ index d298c25..db3ef09 100644
   */
  export class CompanionPairSetup {
    private socket: Socket | undefined;
-@@ -39,13 +43,23 @@ export class CompanionPairSetup {
+@@ -39,13 +43,27 @@ export class CompanionPairSetup {
  
    /** Queued frames that arrived before anyone was waiting for them. */
    private frameQueue: Frame[] = [];
@@ -781,14 +781,18 @@ index d298c25..db3ef09 100644
    constructor(
      private host: string,
      private port: number,
-+    private options: { timeoutMs?: number } = {},
++    private options: {
++      timeoutMs?: number;
++      /** Label the Apple TV lists for this pairing under Remote App and Devices. */
++      name?: string;
++    } = {},
    ) {
 +    if (!host || !Number.isInteger(port) || port < 1 || port > 65535) throw new RangeError('Invalid pairing target');
 +    if (!Number.isFinite(this.timeoutMs) || this.timeoutMs <= 0) throw new RangeError('Invalid pairing timeout');
      this.clientId = randomUUID();
  
      const { publicKey, privateKey } = generateKeyPairSync('ed25519');
-@@ -61,29 +75,60 @@ export class CompanionPairSetup {
+@@ -61,29 +79,60 @@ export class CompanionPairSetup {
     * Open socket and send M1. The Apple TV should display the PIN after this.
     * Call finish(pin) after the user reads the PIN.
     */
@@ -866,7 +870,7 @@ index d298c25..db3ef09 100644
    }
  
    /**
-@@ -110,6 +155,7 @@ export class CompanionPairSetup {
+@@ -110,6 +159,7 @@ export class CompanionPairSetup {
     */
    private async receivePairingData(): Promise<Buffer> {
      const frame = await this.waitForAnyFrame();
@@ -874,7 +878,7 @@ index d298c25..db3ef09 100644
      const decoded = opackDecode(frame.payload);
      if (!(decoded instanceof Map)) {
        throw new Error(`Companion PS: expected OPACK dict response, got frame type 0x${frame.type.toString(16)}`);
-@@ -156,6 +202,7 @@ export class CompanionPairSetup {
+@@ -156,6 +206,7 @@ export class CompanionPairSetup {
     * @throws if M4 lacks a proof (e.g. a wrong PIN) or the proof does not verify
     */
    async sendM3(pin: string, salt: Buffer, serverPublicKey: Buffer): Promise<void> {
@@ -882,7 +886,7 @@ index d298c25..db3ef09 100644
      this.srp.init(salt, pin);
      this.srp.setServerPublicKey(serverPublicKey);
  
-@@ -186,9 +233,10 @@ export class CompanionPairSetup {
+@@ -186,9 +237,10 @@ export class CompanionPairSetup {
     * Send M5 (our identifier, Ed25519 public key and signature, encrypted) and decrypt
     * M6 to learn the Apple TV's identifier and long-term public key.
     * @returns credentials to persist for later pair-verify
@@ -894,7 +898,15 @@ index d298c25..db3ef09 100644
      if (!this.sessionKey) {
        throw new Error('Session key not available; call sendM3 first');
      }
-@@ -252,10 +300,21 @@ export class CompanionPairSetup {
+@@ -221,6 +273,7 @@ export class CompanionPairSetup {
+       [TlvTag.Identifier]: clientIdBuf,
+       [TlvTag.PublicKey]: this.edPublicKeyRaw,
+       [TlvTag.Signature]: signature,
++      ...(this.options.name ? { [TlvTag.Name]: opackEncode(new Map<OpackValue, OpackValue>([['name', this.options.name]])) } : {}),
+     });
+ 
+     const nonce = Buffer.alloc(12, 0);
+@@ -252,10 +305,21 @@ export class CompanionPairSetup {
      const serverInfo = tlvDecode(decrypted);
      const serverId = serverInfo[TlvTag.Identifier];
      const serverLTPK = serverInfo[TlvTag.PublicKey];
@@ -918,7 +930,7 @@ index d298c25..db3ef09 100644
      return {
        clientId: this.clientId,
        clientLTSK: this.edPrivateKeyRaw,
-@@ -271,9 +330,11 @@ export class CompanionPairSetup {
+@@ -271,9 +335,11 @@ export class CompanionPairSetup {
     * Always closes the socket, whether pairing succeeds or fails.
     */
    async finish(pin: string): Promise<HAPCredentials> {
@@ -931,7 +943,7 @@ index d298c25..db3ef09 100644
      try {
        await this.sendM3(pin, this.salt, this.serverPublicKey);
        return await this.sendM5();
-@@ -282,39 +343,41 @@ export class CompanionPairSetup {
+@@ -282,39 +348,41 @@ export class CompanionPairSetup {
      }
    }
  
@@ -992,7 +1004,7 @@ index d298c25..db3ef09 100644
    }
  
    /** Parse buffered frames, handing each to the oldest waiter or queuing it. */
-@@ -323,10 +386,10 @@ export class CompanionPairSetup {
+@@ -323,10 +391,10 @@ export class CompanionPairSetup {
      this.buffer = remainder;
  
      for (const frame of frames) {

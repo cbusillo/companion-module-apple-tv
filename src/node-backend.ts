@@ -15,6 +15,8 @@ type Controller = Pick<
 > &
 	Partial<Pick<NodeController, 'audioOutputs' | 'routeAudio'>>
 type Pairing = Pick<CompanionPairSetup, 'start' | 'finish' | 'destroy' | 'closed' | 'stage'>
+/** How the TV lists this pairing under Remote App and Devices; without it the TV shows Unknown. */
+const PAIRING_NAME = 'Companion'
 export type SetupState =
 	| 'disabled'
 	| 'unpaired'
@@ -215,7 +217,8 @@ export class NodeBackend {
 				if (matches.length !== 1) throw new Error('Selected TV not uniquely discovered')
 				signal.throwIfAborted()
 				const pair =
-					this.options.pairing?.(matches[0]) ?? new CompanionPairSetup(matches[0].address, matches[0].companionPort!)
+					this.options.pairing?.(matches[0]) ??
+					new CompanionPairSetup(matches[0].address, matches[0].companionPort!, { name: PAIRING_NAME })
 				const pending: PendingPair = { deviceId: this.config.deviceId, pair, abort: this.abort, finishing: false }
 				this.pending = pending
 				await bounded(async () => pair.start({ signal }), 15000, signal)
