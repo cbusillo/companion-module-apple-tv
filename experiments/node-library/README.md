@@ -56,6 +56,9 @@ The remaining patch on `5cfc6af` adds only:
 - Companion pairing lifetime: a `start({ signal })` cancellation, a `closed`
   promise for peer close while awaiting the PIN, a `stage` getter, immediate
   rejection on socket loss, and M6 identity signature verification.
+- A Companion pairing `name` option, sent in M5 as pyatv does. Without it the TV
+  lists the pairing as Unknown under Remote App and Devices; the module sends
+  "Companion".
 - `MRPMessage` and `MessageType` exported from the package entry.
 
 The upstream build requires `bplist-parser` 0.5, while the npm 0.4.0 manifest

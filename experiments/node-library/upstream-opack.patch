@@ -160,7 +160,7 @@ index 0c80b40..b3a04b1 100644
      return { value: -1, offset: offset + 1 };
    }
 diff --git a/src/companion/pair-setup.ts b/src/companion/pair-setup.ts
-index d5ee48e..54eb05e 100644
+index d5ee48e..edc0415 100644
 --- a/src/companion/pair-setup.ts
 +++ b/src/companion/pair-setup.ts
 @@ -8,9 +8,9 @@
@@ -185,7 +185,7 @@ index d5ee48e..54eb05e 100644
   */
  export class CompanionPairSetup {
    private socket: Socket | undefined;
-@@ -39,7 +40,15 @@ export class CompanionPairSetup {
+@@ -39,11 +40,23 @@ export class CompanionPairSetup {
    /** Queued frames that arrived before anyone was waiting for them. */
    private frameQueue: Frame[] = [];
    /** Waiters for the next frame, served in FIFO order regardless of frame type. */
@@ -202,7 +202,15 @@ index d5ee48e..54eb05e 100644
  
    constructor(
      private host: string,
-@@ -58,19 +67,36 @@ export class CompanionPairSetup {
+     private port: number,
++    private options: {
++      /** Label the Apple TV lists for this pairing under Remote App and Devices. */
++      name?: string;
++    } = {},
+   ) {
+     this.clientId = randomUUID();
+ 
+@@ -58,19 +71,36 @@ export class CompanionPairSetup {
  
    /**
     * Open socket and send M1. The Apple TV should display the PIN after this.
@@ -247,7 +255,7 @@ index d5ee48e..54eb05e 100644
      this.socket.on('data', (data: Buffer) => {
        this.buffer = Buffer.concat([this.buffer, data]);
        this.processFrames();
-@@ -147,6 +173,7 @@ export class CompanionPairSetup {
+@@ -147,6 +177,7 @@ export class CompanionPairSetup {
     * @throws if M4 lacks a proof (e.g. a wrong PIN) or the proof does not verify
     */
    async sendM3(pin: string, salt: Buffer, serverPublicKey: Buffer): Promise<void> {
@@ -255,7 +263,7 @@ index d5ee48e..54eb05e 100644
      this.srp.init(salt, pin);
      this.srp.setServerPublicKey(serverPublicKey);
  
-@@ -177,9 +204,10 @@ export class CompanionPairSetup {
+@@ -177,9 +208,10 @@ export class CompanionPairSetup {
     * Send M5 (our identifier, Ed25519 public key and signature, encrypted) and decrypt
     * M6 to learn the Apple TV's identifier and long-term public key.
     * @returns credentials to persist for later pair-verify
@@ -267,7 +275,15 @@ index d5ee48e..54eb05e 100644
      if (!this.sessionKey) {
        throw new Error('Session key not available; call sendM3 first');
      }
-@@ -239,9 +267,19 @@ export class CompanionPairSetup {
+@@ -208,6 +240,7 @@ export class CompanionPairSetup {
+       [TlvTag.Identifier]: clientIdBuf,
+       [TlvTag.PublicKey]: this.edPublicKeyRaw,
+       [TlvTag.Signature]: signature,
++      ...(this.options.name ? { [TlvTag.Name]: opackEncode(new Map<OpackValue, OpackValue>([['name', this.options.name]])) } : {}),
+     });
+ 
+     const nonce = Buffer.alloc(12, 0);
+@@ -239,9 +272,19 @@ export class CompanionPairSetup {
      const serverInfo = tlvDecode(decrypted);
      const serverId = serverInfo[TlvTag.Identifier];
      const serverLTPK = serverInfo[TlvTag.PublicKey];
@@ -289,7 +305,7 @@ index d5ee48e..54eb05e 100644
  
      return {
        clientId: this.clientId,
-@@ -269,10 +307,20 @@ export class CompanionPairSetup {
+@@ -269,10 +312,20 @@ export class CompanionPairSetup {
      }
    }
  
@@ -311,7 +327,7 @@ index d5ee48e..54eb05e 100644
    }
  
    /** Frame and write a payload; a no-op once the socket is gone. */
-@@ -286,20 +334,21 @@ export class CompanionPairSetup {
+@@ -286,20 +339,21 @@ export class CompanionPairSetup {
      if (this.frameQueue.length > 0) {
        return Promise.resolve(this.frameQueue.shift()!);
      }
@@ -338,7 +354,7 @@ index d5ee48e..54eb05e 100644
        this.processFrames();
      });
    }
-@@ -312,7 +361,7 @@ export class CompanionPairSetup {
+@@ -312,7 +366,7 @@ export class CompanionPairSetup {
      for (const frame of frames) {
        const resolver = this.pendingFrameResolvers.shift();
        if (resolver) {
