@@ -54,8 +54,11 @@ Text entry is not implemented.
 Power toggle requires a current known state. Wake sends Home only while the TV
 reports Off, so it opens the Home screen rather than resuming the previous stream.
 Sleep (`sleep`) only ever sleeps the TV: it sends the sleep key without reading
-power first, so it never wakes a TV that is already asleep. Read the `power`
-variable to confirm the result.
+power first, so it never wakes a TV that is already asleep. Wake (`wake`) only
+ever wakes it: it reads power first and sends Home only while the TV reports
+Off, so it never sleeps an awake TV or navigates Home on one. Read the `power`
+variable, or use the **Apple TV is on** feedback, to confirm the result. The
+feedback is true only while `power` reads On.
 Wake from an already-asleep TV and a cycle with twenty seconds asleep passed on
 the test device. An earlier five-second cycle failed; no minimum safe interval
 has been established. Avoid immediate sleep/wake automation until it is qualified
@@ -68,6 +71,10 @@ discards the saved level. Switching back to AirPods does not automatically resto
 audio. A missing or discarded level is **Unavailable**, not a guessed mute state.
 Output changes are observable only when reported by the TV; numeric volume does
 not prove perceived loudness or per-output accuracy.
+
+Presets provide ready-made Power (state, Wake, Sleep), Remote, Apps and Now
+Playing buttons. The Apps group lists one Open button per app the TV reports
+after connecting.
 
 Variables include connection, title, artist, app, playback state, elapsed and
 remaining time, progress, volume, mute-save state, power, personal output route

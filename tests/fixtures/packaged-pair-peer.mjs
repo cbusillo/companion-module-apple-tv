@@ -40,6 +40,7 @@ const context = {
 	setVariableDefinitions() {},
 	setActionDefinitions() {},
 	setFeedbackDefinitions() {},
+	setPresetDefinitions() {},
 	checkFeedbacks() {},
 	setVariableValues(update) {
 		Object.assign(values, update)

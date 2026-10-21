@@ -32,6 +32,7 @@ const context = {
 	setFeedbackDefinitions: (definitions) => {
 		feedbacks = definitions
 	},
+	setPresetDefinitions() {},
 	checkFeedbacks() {},
 	updateStatus: (status, message) => states.push({ status, message }),
 	saveConfig: (config, secrets) => saves.push(structuredClone({ config, secrets })),
