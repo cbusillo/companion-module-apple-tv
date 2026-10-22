@@ -1,0 +1,12 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["github>cbusillo/odoo-devkit//renovate/default"],
+  "packageRules": [
+    {
+      "description": "Companion 5.1.0 accepts only base 2.2.x (package.json \"companion\"). Move to a newer base line deliberately, with the minimum Companion version.",
+      "matchPackageNames": ["@companion-module/base"],
+      "matchUpdateTypes": ["major", "minor"],
+      "enabled": false
+    }
+  ]
+}
