@@ -15,7 +15,7 @@
   destructive-helper and shared-infrastructure changes also run complete
   modules through changed code and callers, including the synthetic protocol
   and packaged-peer harnesses where affected. Record missing coverage.
-- CI runs `qualityGate.test.ci`, the complete existing build/test/package
+- `qualityGate.test.ci` describes the complete existing CI build/test/package
   sequence; the `validation-gate` also requires macOS and Windows packaging.
   Wait for all current-head checks before `gh-pr.py ready`. The whole suite
   runs only in CI. Do not label or operate the train yourself.

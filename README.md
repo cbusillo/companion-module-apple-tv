@@ -171,8 +171,7 @@ reference-worker selection. The whole suite runs only in CI.
 independent protocol/metadata and package commands in that metadata. Install the
 locked Node and Python dependencies first using its setup commands. CI's
 `validation-gate` retains the separate macOS and Windows packaged-runtime checks;
-all current-head checks must pass before ready. This adoption changes no hardware,
-pairing or submission authority.
+all current-head checks must pass before ready.
 
 CI checks the bundle on Linux, macOS and Windows. Synthetic tests cover setup,
 secret persistence, restart, cancellation, migration, encryption, metadata,
