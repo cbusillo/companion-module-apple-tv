@@ -2,6 +2,10 @@
 	"defaultBranch": "main",
 	"projectType": "companion-module",
 	"qualityGate": {
+		"test": {
+			"local": "node --test {test_paths}",
+			"ci": "bash -euo pipefail -c \"$(jq -er '.qualityGate.build.node, .qualityGate.lint.node, .qualityGate.tests[], .qualityGate.package[]' .github/github.json)\""
+		},
 		"setup": {
 			"node": "corepack enable && yarn install --immutable",
 			"python": "uv sync --locked"
