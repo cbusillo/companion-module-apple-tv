@@ -161,19 +161,18 @@ under `companion` in `package.json`. `yarn package` fails when the bundled
 `@companion-module/base` version falls outside that range. Raise both values and
 the Requirements section together when moving to a newer base line.
 
-```sh
-yarn install --immutable
-yarn build
-yarn test
-yarn lint
-yarn package
-yarn test:package
-uv sync --locked
-uv run python -m unittest discover -s tests -p 'test_*.py' -v
-uv run --python 3.13 --locked python experiments/node-library/loopback-peer.py
-uv run --python 3.13 --locked python experiments/node-library/loopback-peer.py --package pkg/apple-tv/main.js
-uv run --python 3.13 --locked python experiments/node-library/mrp_fixtures.py | node experiments/node-library/metadata-oracle.mjs
-```
+Local checks select affected test files with `qualityGate.test.local` in
+[workflow metadata](.github/github.json), after the build/type check. Run required
+lint, inspection and complete affected safety modules under
+[AGENTS.md](AGENTS.md#github-workflow). That guide also describes focused Python
+reference-worker selection. The whole suite runs only in CI.
+
+`qualityGate.test.ci` composes the existing canonical build, lint, Node/Python,
+independent protocol/metadata and package commands in that metadata. Install the
+locked Node and Python dependencies first using its setup commands. CI's
+`validation-gate` retains the separate macOS and Windows packaged-runtime checks;
+all current-head checks must pass before ready. This adoption changes no hardware,
+pairing or submission authority.
 
 CI checks the bundle on Linux, macOS and Windows. Synthetic tests cover setup,
 secret persistence, restart, cancellation, migration, encryption, metadata,

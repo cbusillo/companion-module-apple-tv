@@ -7,8 +7,18 @@
 - Pull requests land through the Launchplane merge train with the
   `ready-to-merge` label. Do not merge them directly.
 - Use normal merge commits. Do not squash or rebase pull requests.
-- Run the gates in `.github/github.json` before review. The `Validation`
-  workflow and the Companion module checks must pass on the current PR head.
+- Use the focused `qualityGate.test.local` command in `.github/github.json`,
+  replacing `{test_paths}` with affected Node test files after the build/type
+  check. For Python reference-worker changes, select a module filename with
+  `uv run python -m unittest discover -s tests -p '{test_pattern}' -v`.
+- Run required lint and inspection. Safety, authorization, credential,
+  destructive-helper and shared-infrastructure changes also run complete
+  modules through changed code and callers, including the synthetic protocol
+  and packaged-peer harnesses where affected. Record missing coverage.
+- CI runs `qualityGate.test.ci`, the complete existing build/test/package
+  sequence; the `validation-gate` also requires macOS and Windows packaging.
+  Wait for all current-head checks before `gh-pr.py ready`. The whole suite
+  runs only in CI. Do not label or operate the train yourself.
 
 ## Hardware Safety
 
