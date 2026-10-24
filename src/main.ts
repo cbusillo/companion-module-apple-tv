@@ -186,7 +186,9 @@ export default class AppleTV extends InstanceBase<ModuleSchema> {
 				],
 				callback: async (event) =>
 					this.backend?.perform(
-						Object.hasOwn(remoteActions, event.options.command) ? remoteActions[event.options.command] : undefined,
+						Object.hasOwn(remoteActions, event.options.command)
+							? remoteActions[event.options.command]?.action
+							: undefined,
 					),
 			},
 			launchApp: {

@@ -1,4 +1,5 @@
 import { combineRgb, type CompanionPresetDefinitions, type CompanionPresetSection } from '@companion-module/base'
+import { remoteActions } from './actions.js'
 import type { ModuleSchema } from './main.js'
 
 const white = combineRgb(255, 255, 255)
@@ -16,20 +17,6 @@ function command(name: string, text: string, commandId: string, size: 'auto' | '
 		feedbacks: [],
 	}
 }
-
-const remote: [string, string, string][] = [
-	['up', 'Up', 'Up'],
-	['down', 'Down', 'Down'],
-	['left', 'Left', 'Left'],
-	['right', 'Right', 'Right'],
-	['select', 'Select', 'OK'],
-	['back', 'Back', 'Back'],
-	['home', 'Home', 'Home'],
-	['playPause', 'Play/Pause', 'Play\\nPause'],
-	['controlCenter', 'Control Center', 'Control\\nCenter'],
-	['seekBackward', 'Back 10 seconds', '-10s'],
-	['seekForward', 'Forward 10 seconds', '+10s'],
-]
 
 /** Ready-made buttons. Variable text uses the connection label so it follows renames. */
 export function buildPresets(
@@ -62,7 +49,12 @@ export function buildPresets(
 			notes: 'Title and elapsed time of what is playing. Pressing plays or pauses.',
 		},
 	}
-	for (const [id, name, text] of remote) presets[`remote_${id}`] = command(name, text, id)
+	const remoteIds: string[] = []
+	for (const [id, { preset }] of Object.entries(remoteActions)) {
+		if (!preset) continue
+		remoteIds.push(`remote_${id}`)
+		presets[`remote_${id}`] = command(preset.name, preset.text, id)
+	}
 	const appIds: string[] = []
 	for (const app of apps) {
 		const id = `app_${app.id.replace(/[^A-Za-z0-9]/g, '_')}`
@@ -77,7 +69,7 @@ export function buildPresets(
 	}
 	const structure: CompanionPresetSection<ModuleSchema>[] = [
 		{ id: 'power', name: 'Power', definitions: ['power_state', 'wake', 'sleep'] },
-		{ id: 'remote', name: 'Remote', definitions: remote.map(([id]) => `remote_${id}`) },
+		{ id: 'remote', name: 'Remote', definitions: remoteIds },
 		{
 			id: 'apps',
 			name: 'Apps',
