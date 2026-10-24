@@ -18,6 +18,7 @@ export const remoteActions: Record<string, RemoteAction> = {
 	screensaver: { kind: 'button', button: 'screensaver' },
 	power: { kind: 'power' },
 	sleep: { kind: 'power', state: 'Off' },
+	wake: { kind: 'power', state: 'On' },
 	volumeUp: { kind: 'button', button: 'volumeUp' },
 	volumeDown: { kind: 'button', button: 'volumeDown' },
 	seekForward: { kind: 'seek', seconds: 10 },

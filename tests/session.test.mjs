@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import AppleTV, { UpgradeScripts } from '../dist/main.js'
+import { remoteActions } from '../dist/actions.js'
 import { config, saved, nextTurn, setupFixture } from './fixtures/node-setup-peer.mjs'
 
 test('completed discovery notifies an open Companion editor with the new choices', async () => {
@@ -51,6 +52,9 @@ function fixture() {
 		setFeedbackDefinitions: (feedbacks) => {
 			f.feedbacks = feedbacks
 		},
+		setPresetDefinitions: (structure, presets) => {
+			f.presets = { structure, presets }
+		},
 		checkFeedbacks: (types) => {
 			f.feedbackChecks = [...(f.feedbackChecks ?? []), ...types]
 		},
@@ -64,7 +68,16 @@ test('Companion entrypoint restores saved pairing and routes existing button IDs
 		await f.module.init(config, false, saved())
 		await nextTurn()
 		const actions = f.source.actions
-		for (const command of ['select', 'seekBackward', 'seekForward30', 'swipeUp', 'toggleMute', 'power'])
+		for (const command of [
+			'select',
+			'seekBackward',
+			'seekForward30',
+			'swipeUp',
+			'toggleMute',
+			'power',
+			'sleep',
+			'wake',
+		])
 			await actions.command.callback({ options: { command } })
 		await actions.launchApp.callback({ options: { appId: 'synthetic.app' } })
 		assert.deepEqual(f.controllers[0].actions, [
@@ -74,6 +87,8 @@ test('Companion entrypoint restores saved pairing and routes existing button IDs
 			{ kind: 'swipe', direction: 'up' },
 			{ kind: 'mute' },
 			{ kind: 'power' },
+			{ kind: 'power', state: 'Off' },
+			{ kind: 'power', state: 'On' },
 			{ kind: 'launch', bundleId: 'synthetic.app' },
 		])
 		const before = f.controllers[0].actions.length
@@ -81,6 +96,16 @@ test('Companion entrypoint restores saved pairing and routes existing button IDs
 		assert.equal(f.controllers[0].actions.length, before)
 		assert.equal(f.values.last_result, 'unknown command; not sent')
 		assert.equal(f.values.power, 'On')
+		assert.equal(f.source.feedbacks.powerOn.type, 'boolean')
+		assert.equal(f.source.feedbacks.powerOn.callback(), true)
+		assert.ok(f.source.feedbackChecks.includes('powerOn'))
+		const { structure, presets } = f.source.presets
+		for (const section of structure) for (const id of section.definitions) assert.ok(presets[id], id)
+		for (const preset of Object.values(presets))
+			for (const action of preset.steps[0].down)
+				if (action.actionId === 'command') assert.ok(Object.hasOwn(remoteActions, action.options.command))
+		assert.equal(presets.wake.steps[0].down[0].options.command, 'wake')
+		assert.match(presets.power_state.style.text, /\$\(Synthetic Apple TV:power\)/)
 		assert.equal(f.values.title, 'Synthetic title')
 		assert.equal(f.pairs.length, 0)
 	} finally {

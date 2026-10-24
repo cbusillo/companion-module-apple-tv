@@ -14,6 +14,7 @@ import { NodeBackend, type BackendOptions, type PersonalOutputValues, type Setup
 import type { RouteTarget } from './personal-output.js'
 import type { ModuleSecrets } from './node-credentials.js'
 import { remoteActions } from './actions.js'
+import { buildPresets } from './presets.js'
 import { MRPMessage } from 'node-appletv-remote'
 
 export type ModuleSchema = {
@@ -24,7 +25,10 @@ export type ModuleSchema = {
 		launchApp: { options: { appId: string } }
 		personalOutput: { options: { target: string } }
 	}
-	feedbacks: { personalOutputActive: { type: 'boolean'; options: Record<string, never> } }
+	feedbacks: {
+		personalOutputActive: { type: 'boolean'; options: Record<string, never> }
+		powerOn: { type: 'boolean'; options: Record<string, never> }
+	}
 	variables: { connection: string; last_result: string } & DisplayValues & PersonalOutputValues
 }
 
@@ -61,6 +65,7 @@ export default class AppleTV extends InstanceBase<ModuleSchema> {
 	config: ModuleConfig = { enabled: false, deviceId: '' }
 	private backend?: NodeBackend
 	private apps: { id: string; name: string }[] = []
+	private power = 'Unknown'
 	private configurationTasks = new Set<Promise<void>>()
 	private configurationVersion = 0
 	private destroyed = false
@@ -109,7 +114,13 @@ export default class AppleTV extends InstanceBase<ModuleSchema> {
 					this.updateStatus(statuses[state], message)
 					if (state === 'error') this.log('warn', message)
 				},
-				values: (values) => this.setVariableValues(values),
+				values: (values) => {
+					this.setVariableValues(values)
+					if (values.power !== undefined && values.power !== this.power) {
+						this.power = values.power
+						this.checkFeedbacks('powerOn')
+					}
+				},
 				log: (level, message) => this.log(level, message),
 				feedback: () => this.checkFeedbacks('personalOutputActive'),
 				apps: (apps) => {
@@ -128,6 +139,14 @@ export default class AppleTV extends InstanceBase<ModuleSchema> {
 				defaultStyle: { bgcolor: combineRgb(0, 102, 204), color: combineRgb(255, 255, 255) },
 				options: [],
 				callback: () => this.backend?.personalOutputActive ?? false,
+			},
+			powerOn: {
+				type: 'boolean',
+				name: 'Apple TV is on',
+				description: 'True while the TV reports that it is awake; false when asleep, unknown or disconnected',
+				defaultStyle: { bgcolor: combineRgb(0, 153, 0), color: combineRgb(255, 255, 255) },
+				options: [],
+				callback: () => this.power === 'On',
 			},
 		})
 		await this.configUpdated(config, secrets)
@@ -151,6 +170,8 @@ export default class AppleTV extends InstanceBase<ModuleSchema> {
 		void task.then(() => this.configurationTasks.delete(task))
 	}
 	private defineActions(): void {
+		const { structure, presets } = buildPresets(this.label, this.apps)
+		this.setPresetDefinitions(structure, presets)
 		this.setActionDefinitions({
 			command: {
 				name: 'Remote command',
