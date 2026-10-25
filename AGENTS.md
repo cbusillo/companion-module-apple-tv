@@ -4,7 +4,7 @@
 
 This module lets Bitfocus Companion discover, pair with, and control Apple TV devices on the local network.
 It provides remote buttons, app launching, and Now Playing variables, running in Companion's Node runtime.
-Evidence: [README.md](README.md); pairing still requires an explicit request while the owner watches the TV.
+Evidence: [README.md](README.md); the Hardware Safety rules below apply to all real-device work.
 
 ## GitHub Workflow
 
