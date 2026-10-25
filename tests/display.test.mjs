@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { displayValues, timeText } from '../dist/display.js'
+import { displayValues, timeText, VolumeText } from '../dist/display.js'
 
 test('long playback durations remain readable', () => {
 	assert.equal(timeText(3661), '1:01:01')
@@ -17,4 +17,23 @@ test('live and completed playback never show negative remaining time', () => {
 })
 test('partial status retains existing metadata and filters unknown fields', () => {
 	assert.deepEqual(displayValues({ metadata_state: 'Stale', credentials: 'private' }), { metadata_state: 'Stale' })
+})
+test('volume shows whole percent', () => {
+	const text = new VolumeText()
+	assert.equal(text.value(37.25, 'airpods', 1, 0), '37')
+	assert.equal(text.value(37.5, 'airpods', 1, 0), '38')
+	assert.equal(text.value(null, undefined, 1, 0), '')
+})
+test('a pending volume change keeps the last level only for the same output and briefly', () => {
+	const text = new VolumeText(5000)
+	assert.equal(text.value(40, 'airpods', 1, 0), '40')
+	assert.equal(text.value(null, 'airpods', 1, 1000), '40')
+	assert.equal(text.value(42, 'airpods', 1, 1500), '42')
+	assert.equal(text.value(null, 'airpods', 1, 7000), '')
+	text.value(40, 'airpods', 1, 0)
+	assert.equal(text.value(null, 'speakers', 1, 100), '')
+	text.value(40, 'airpods', 1, 0)
+	assert.equal(text.value(null, 'airpods', 2, 100), '')
+	text.value(40, 'airpods', 1, 0)
+	assert.equal(text.value(null, undefined, 1, 100), '')
 })

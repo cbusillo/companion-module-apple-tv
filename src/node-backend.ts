@@ -4,7 +4,7 @@ import { bounded } from './prototype/session.js'
 import { CommandNotSent } from './prototype/queue.js'
 import { CompanionRequestRejected, UnsupportedCommand } from './prototype/companion.js'
 import { decodePairing, encodePairing, type ModuleSecrets, type SavedPairing } from './node-credentials.js'
-import { displayDefaults, displayValues, type DisplayValues } from './display.js'
+import { displayDefaults, displayValues, VolumeText, type DisplayValues } from './display.js'
 import { PlaybackClock } from './playback.js'
 import type { DeviceChoice, ModuleConfig } from './config.js'
 import { PersonalOutputRouter, type OutputLink, type PersonalRoute, type RouteTarget } from './personal-output.js'
@@ -13,7 +13,7 @@ type Controller = Pick<
 	NodeController,
 	'state' | 'feedback' | 'nowPlaying' | 'start' | 'stop' | 'waitUntilReady' | 'observe' | 'perform' | 'listApps'
 > &
-	Partial<Pick<NodeController, 'audioOutputs' | 'routeAudio'>>
+	Partial<Pick<NodeController, 'audioOutputs' | 'routeAudio' | 'audioOutputIdentity' | 'audioRevision'>>
 type Pairing = Pick<CompanionPairSetup, 'start' | 'finish' | 'destroy' | 'closed' | 'stage'>
 /** How the TV lists this pairing under Remote App and Devices; without it the TV shows Unknown. */
 const PAIRING_NAME = 'Companion'
@@ -68,6 +68,7 @@ export class NodeBackend {
 	private unsubscribe?: () => void
 	private timer?: NodeJS.Timeout
 	private clock = new PlaybackClock()
+	private volumeText = new VolumeText()
 	private state: SetupState = 'disabled'
 	private lastValues = ''
 	private activeRecord?: string
@@ -346,7 +347,11 @@ export class NodeBackend {
 		const values = {
 			...displayDefaults,
 			metadata_state: ready ? 'Connected' : 'Offline',
-			volume: feedback?.volume == null ? '' : String(feedback.volume),
+			volume: this.volumeText.value(
+				feedback?.volume,
+				ready ? controller.audioOutputIdentity : undefined,
+				controller.audioRevision ?? -1,
+			),
 			mute_state: feedback?.mute ?? 'Unavailable',
 			power: feedback?.power ?? 'Unknown',
 			title: playing.title ?? 'Nothing Playing',
