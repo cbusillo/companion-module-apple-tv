@@ -1,5 +1,11 @@
 # Apple TV Companion Module Agent Notes
 
+## What Companion's Apple TV module does
+
+This module lets Bitfocus Companion discover, pair with, and control Apple TV devices on the local network.
+It provides remote buttons, app launching, and Now Playing variables, running in Companion's Node runtime.
+Evidence: [README.md](README.md); the Hardware Safety rules below apply to all real-device work.
+
 ## GitHub Workflow
 
 - Treat `main` as a protected no-direct-work branch. Create a focused task
