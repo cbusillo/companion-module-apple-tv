@@ -29,7 +29,26 @@
 		},
 		"inspection": {
 			"tool": "jetbrains",
-			"ide": "PyCharm",
+			"lanes": [
+				{
+					"id": "typescript",
+					"ide": "WebStorm",
+					"required": true,
+					"include": [
+						"**/*.ts",
+						"**/*.tsx",
+						"**/*.mts",
+						"**/*.cts",
+						"**/*.js",
+						"**/*.jsx",
+						"**/*.mjs",
+						"**/*.cjs",
+						"**/*.json"
+					]
+				},
+				{ "id": "python", "ide": "PyCharm", "required": true, "include": ["**/*.py", "**/*.yaml", "**/*.yml"] }
+			],
+			"coveredBy": { "Eslint": "lint.node" },
 			"profile": "Companion Apple TV",
 			"prepare": {
 				"python": {
