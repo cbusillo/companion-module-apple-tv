@@ -158,9 +158,13 @@ used because it did not reliably select AirPods.
 Use Node 22 and Yarn 4. Python is used only for the independent protocol oracle
 and retained reference-worker tests, not by the packaged module.
 
-The shared `Companion Apple TV` JetBrains inspection profile is selected by the
-inspection gate. It leaves arrow-parameter parentheses to Prettier and disables
-unused-global-symbol findings only under `tests/`, where duck-typed fakes expose
+Root inspection lanes route TypeScript, JavaScript and JSON to native WebStorm
+and Python/YAML to native PyCharm. Inspect each product separately. WebStorm
+prepares the committed Yarn lockfile in its private snapshot; PyCharm keeps the
+structured Python preparation. ESLint is covered by `yarn lint`. The shared
+`Companion Apple TV` JetBrains inspection profile is selected by both lanes.
+It leaves arrow-parameter parentheses to Prettier and disables unused-global-symbol
+findings only under `tests/`, where duck-typed fakes expose
 members indirectly. Other IDE state remains local and ignored.
 
 The minimum Companion version and the module API range it accepts are recorded
