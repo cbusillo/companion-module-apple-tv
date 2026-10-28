@@ -194,9 +194,9 @@ so far covers one Apple TV; this does not establish compatibility with every tvO
 version, app, audio route or operating-system installation.
 
 The [library patch and qualification notes](experiments/node-library/README.md)
-describe the reproducible extensions to `node-appletv-remote` 0.4.0 and the separate
-developer harness. Source and compiled patches are checked in together. No
-upstream acceptance or distribution approval is implied by the candidate.
+describe the small patch to `node-appletv-remote` 0.5.0 and the separate developer
+harness. No upstream acceptance or distribution approval is implied by the
+candidate.
 
 ## Provenance
 

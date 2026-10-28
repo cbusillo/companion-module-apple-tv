@@ -207,12 +207,14 @@ test('unexpected socket error aborts a pending request without an unhandled Even
 	assert.equal(connection.closed, true)
 })
 
-test('a session the TV closes names the close, a prior socket error and the last dropped frame', async () => {
-	for (const [hadError, dropped, expected] of [
-		[false, undefined, 'Companion connection closed by the TV'],
-		[true, undefined, 'Companion connection closed by the TV after a socket error'],
+test('a session the TV closes names the close, the socket error behind it and the last dropped frame', async () => {
+	const reset = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' })
+	for (const [socketError, dropped, expected] of [
+		[undefined, undefined, 'Companion connection closed by the TV'],
+		// The library emits close and then, synchronously, the error that caused it.
+		[reset, undefined, 'Companion connection error: read ECONNRESET'],
 		[
-			false,
+			undefined,
 			'Companion frame type 8 (13 bytes) dropped: OPACK: unknown tag 0x6 at offset 4',
 			'Companion connection closed by the TV; last dropped frame: Companion frame type 8 (13 bytes) dropped: OPACK: unknown tag 0x6 at offset 4',
 		],
@@ -221,7 +223,8 @@ test('a session the TV closes names the close, a prior socket error and the last
 		await assert.rejects(
 			run(connection, async () => {
 				if (dropped) connection.emit('frame-error', new Error(dropped))
-				connection.emit('close', hadError)
+				connection.emit('close')
+				if (socketError) connection.emit('error', socketError)
 				await new Promise(() => {})
 			}),
 			{ message: expected },
