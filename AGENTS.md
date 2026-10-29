@@ -8,10 +8,7 @@ Evidence: [README.md](README.md); the Hardware Safety rules below apply to all r
 
 ## GitHub Workflow
 
-- Treat `main` as a protected no-direct-work branch. Create a focused task
-  branch, push it, and open a pull request.
-- Pull requests land through the Launchplane merge train with the
-  `ready-to-merge` label. Do not merge them directly.
+- Follow the shared [GitHub workflow](https://github.com/cbusillo/codex-skills/blob/main/skills/github/SKILL.md).
 - Use normal merge commits. Do not squash or rebase pull requests.
 - Use the focused `qualityGate.test.local` command in `.github/github.json`,
   replacing `{test_paths}` with affected Node test files after the build/type
