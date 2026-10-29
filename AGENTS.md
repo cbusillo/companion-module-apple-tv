@@ -14,12 +14,10 @@ Evidence: [README.md](README.md); the Hardware Safety rules below apply to all r
   replacing `{test_paths}` with affected Node test files after the build/type
   check. For Python reference-worker changes, select a module filename with
   `uv run python -m unittest discover -s tests -p '{test_pattern}' -v`.
-- Trace changed code and callers to complete covering modules, including the
-  synthetic protocol and packaged-peer harnesses where affected. Record missing
-  coverage.
-- `qualityGate.test.ci` describes the CI build/test/package sequence;
-  the `validation-gate` also requires macOS and Windows packaging.
-  Do not label or operate the train yourself.
+- For safety changes, including pairing and credential handling, trace changed
+  code and callers to complete covering modules, including the synthetic protocol
+  and packaged-peer harnesses where affected. Record missing coverage.
+- Do not label or operate the train yourself.
 
 ## Hardware Safety
 

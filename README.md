@@ -173,16 +173,14 @@ under `companion` in `package.json`. `yarn package` fails when the bundled
 the Requirements section together when moving to a newer base line.
 
 Local checks select affected test files with `qualityGate.test.local` in
-[workflow metadata](.github/github.json), after the build/type check. Run required
-lint, inspection and complete affected safety modules under
-[AGENTS.md](AGENTS.md#github-workflow). That guide also describes focused Python
-reference-worker selection. The whole suite runs only in CI.
+[workflow metadata](.github/github.json), after the build/type check.
+[AGENTS.md](AGENTS.md#github-workflow) describes focused Python reference-worker
+selection and covering-module tracing.
 
 `qualityGate.test.ci` composes the existing canonical build, lint, Node/Python,
 independent protocol/metadata and package commands in that metadata. Install the
 locked Node and Python dependencies first using its setup commands. CI's
-`validation-gate` retains the separate macOS and Windows packaged-runtime checks;
-all current-head checks must pass before ready.
+`validation-gate` retains the separate macOS and Windows packaged-runtime checks.
 
 CI checks the bundle on Linux, macOS and Windows. Synthetic tests cover setup,
 secret persistence, restart, cancellation, migration, encryption, metadata,
