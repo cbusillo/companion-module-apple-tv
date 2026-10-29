@@ -14,8 +14,8 @@ Evidence: [README.md](README.md); the Hardware Safety rules below apply to all r
   replacing `{test_paths}` with affected Node test files after the build/type
   check. For Python reference-worker changes, select a module filename with
   `uv run python -m unittest discover -s tests -p '{test_pattern}' -v`.
-- For safety changes, including pairing and credential handling, trace changed
-  code and callers to complete covering modules, including the synthetic protocol
+- For safety changes, including pairing and credential handling, run complete
+  modules covering changed code and callers, including the synthetic protocol
   and packaged-peer harnesses where affected. Record missing coverage.
 - Do not label or operate the train yourself.
 
