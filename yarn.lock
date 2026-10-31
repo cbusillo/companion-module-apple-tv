@@ -5,6 +5,13 @@ __metadata:
   version: 10
   cacheKey: 10c0
 
+"@borewit/text-codec@npm:^0.2.1, @borewit/text-codec@npm:^0.2.2":
+  version: 0.2.2
+  resolution: "@borewit/text-codec@npm:0.2.2"
+  checksum: 10c0/2d3fb132bc6a132914a8fbf8e9ff2fa1ead210ecc395b28bb7355bd7719548a5e351ffe39f21c3bee8048f6cabd99eabd404bb5cc809cad9cba25abed19d271f
+  languageName: node
+  linkType: hard
+
 "@cacheable/memory@npm:^2.2.0":
   version: 2.2.0
   resolution: "@cacheable/memory@npm:2.2.0"
@@ -425,6 +432,23 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@tokenizer/inflate@npm:^0.4.1":
+  version: 0.4.1
+  resolution: "@tokenizer/inflate@npm:0.4.1"
+  dependencies:
+    debug: "npm:^4.4.3"
+    token-types: "npm:^6.1.1"
+  checksum: 10c0/9817516efe21d1ce3bdfb80a1f94efc8981064ce3873448ba79f4d81d96c0694c484c289bd042d346ae5536cf77f5aa9a367d39c3df700eb610761b7c306b4de
+  languageName: node
+  linkType: hard
+
+"@tokenizer/token@npm:^0.3.0":
+  version: 0.3.0
+  resolution: "@tokenizer/token@npm:0.3.0"
+  checksum: 10c0/7ab9a822d4b5ff3f5bca7f7d14d46bdd8432528e028db4a52be7fbf90c7f495cc1af1324691dda2813c6af8dc4b8eb29de3107d4508165f9aa5b53e7d501f155
+  languageName: node
+  linkType: hard
+
 "@types/esrecurse@npm:^4.3.1":
   version: 4.3.1
   resolution: "@types/esrecurse@npm:4.3.1"
@@ -634,13 +658,6 @@ __metadata:
   languageName: node
   linkType: hard
 
-"big-integer@npm:1.6.x":
-  version: 1.6.52
-  resolution: "big-integer@npm:1.6.52"
-  checksum: 10c0/9604224b4c2ab3c43c075d92da15863077a9f59e5d4205f4e7e76acd0cd47e8d469ec5e5dba8d9b32aa233951893b29329ca56ac80c20ce094b4a647a66abae0
-  languageName: node
-  linkType: hard
-
 "bonjour-service@npm:^1.3.0":
   version: 1.4.4
   resolution: "bonjour-service@npm:1.4.4"
@@ -660,12 +677,10 @@ __metadata:
   languageName: node
   linkType: hard
 
-"bplist-parser@npm:^0.3.2":
-  version: 0.3.2
-  resolution: "bplist-parser@npm:0.3.2"
-  dependencies:
-    big-integer: "npm:1.6.x"
-  checksum: 10c0/4dc307c11d2511a01255e87e370d4ab6f1962b35fdc27605fd4ce9a557a259c2dc9f87822617ddb1f7aa062a71e30ef20d6103329ac7ce235628f637fb0ed763
+"bplist-parser@npm:^0.5.0":
+  version: 0.5.0
+  resolution: "bplist-parser@npm:0.5.0"
+  checksum: 10c0/c0641aa57bc925751c5ff3c0689d62c7f0404a52431cc2ebb2aa1a4abaadf3970b9dcb010207a771cd72ed6bd3b13f4ea17b0af4da537ae4a52d7737cc1f053b
   languageName: node
   linkType: hard
 
@@ -715,7 +730,7 @@ __metadata:
     eslint: "npm:^10.12.0"
     husky: "npm:^9.1.7"
     lint-staged: "npm:^17.6.0"
-    node-appletv-remote: "patch:node-appletv-remote@npm%3A0.4.0#~/experiments/node-library/patches/node-appletv-remote-npm-0.4.0-4a36632b41.patch"
+    node-appletv-remote: "patch:node-appletv-remote@npm%3A0.5.0#~/experiments/node-library/patches/node-appletv-remote-npm-0.5.0-5edebab564.patch"
     prettier: "npm:^3.9.10"
     rimraf: "npm:^6.1.3"
     semver: "npm:^7.8.5"
@@ -723,6 +738,13 @@ __metadata:
     typescript-eslint: "npm:^8.71.2"
   languageName: unknown
   linkType: soft
+
+"content-type@npm:^2.1.0":
+  version: 2.1.0
+  resolution: "content-type@npm:2.1.0"
+  checksum: 10c0/f5d420f55fd0c7a7f7cbae9637777ce67a074aa79b489d8d9fee8599089592b5f8bb194e1d6885741fee20271034baca0d68d5419535b52d070c4f7e39f4b448
+  languageName: node
+  linkType: hard
 
 "cross-spawn@npm:^7.0.6":
   version: 7.0.6
@@ -1120,6 +1142,18 @@ __metadata:
   languageName: node
   linkType: hard
 
+"file-type@npm:^21.3.4":
+  version: 21.3.4
+  resolution: "file-type@npm:21.3.4"
+  dependencies:
+    "@tokenizer/inflate": "npm:^0.4.1"
+    strtok3: "npm:^10.3.4"
+    token-types: "npm:^6.1.1"
+    uint8array-extras: "npm:^1.4.0"
+  checksum: 10c0/6f15e7538c5d73f9308d2e897365d253a6647a6751bb1b0d85c78aebc02b8976afb7c6c9b3759687a064b1b3d60246e5504746b8f11e38b0d5a1b339087e00d2
+  languageName: node
+  linkType: hard
+
 "find-up@npm:^5.0.0":
   version: 5.0.0
   resolution: "find-up@npm:5.0.0"
@@ -1237,6 +1271,13 @@ __metadata:
   bin:
     husky: bin.js
   checksum: 10c0/35bb110a71086c48906aa7cd3ed4913fb913823715359d65e32e0b964cb1e255593b0ae8014a5005c66a68e6fa66c38dcfa8056dbbdfb8b0187c0ffe7ee3a58f
+  languageName: node
+  linkType: hard
+
+"ieee754@npm:^1.2.1":
+  version: 1.2.1
+  resolution: "ieee754@npm:1.2.1"
+  checksum: 10c0/b0782ef5e0935b9f12883a2e2aa37baa75da6e66ce6515c168697b42160807d9330de9a32ec1ed73149aea02e0d822e572bca6f1e22bdcbd2149e13b050b17bb
   languageName: node
   linkType: hard
 
@@ -1377,6 +1418,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"media-typer@npm:^2.0.0":
+  version: 2.0.0
+  resolution: "media-typer@npm:2.0.0"
+  checksum: 10c0/8b404e5e16dff1d83a211b23811425be7b33b32fc8ae0fdae757572ba54a05e7e3f6074af283a29d5f2b55920c4c321d54d7fa36703cd460f392e98c68cf09ff
+  languageName: node
+  linkType: hard
+
 "minimatch@npm:^10.2.2, minimatch@npm:^10.2.4, minimatch@npm:^10.2.5":
   version: 10.2.6
   resolution: "minimatch@npm:10.2.6"
@@ -1421,6 +1469,24 @@ __metadata:
   languageName: node
   linkType: hard
 
+"music-metadata@npm:^11.16.1":
+  version: 11.16.1
+  resolution: "music-metadata@npm:11.16.1"
+  dependencies:
+    "@borewit/text-codec": "npm:^0.2.2"
+    "@tokenizer/token": "npm:^0.3.0"
+    content-type: "npm:^2.1.0"
+    debug: "npm:^4.4.3"
+    file-type: "npm:^21.3.4"
+    media-typer: "npm:^2.0.0"
+    strtok3: "npm:^10.3.5"
+    token-types: "npm:^6.1.2"
+    uint8array-extras: "npm:^1.5.0"
+    win-guid: "npm:^0.2.1"
+  checksum: 10c0/44722a24c03b5e3d91b44b41a455b8d246f7daf7587e2fbed005ecfad74d7db7ea3a68e3df9eb2b6769de65e737ff13a7c0bf57416c1af0c5eec9b13027c8984
+  languageName: node
+  linkType: hard
+
 "natural-compare@npm:^1.4.0":
   version: 1.4.0
   resolution: "natural-compare@npm:1.4.0"
@@ -1428,35 +1494,37 @@ __metadata:
   languageName: node
   linkType: hard
 
-"node-appletv-remote@npm:0.4.0":
-  version: 0.4.0
-  resolution: "node-appletv-remote@npm:0.4.0"
+"node-appletv-remote@npm:0.5.0":
+  version: 0.5.0
+  resolution: "node-appletv-remote@npm:0.5.0"
   dependencies:
     "@noble/ciphers": "npm:^1.3.0"
     bonjour-service: "npm:^1.3.0"
     bplist-creator: "npm:^0.1.1"
-    bplist-parser: "npm:^0.3.2"
+    bplist-parser: "npm:^0.5.0"
     fast-srp-hap: "npm:^2.0.4"
-    protobufjs: "npm:^8.0.0"
+    music-metadata: "npm:^11.16.1"
+    protobufjs: "npm:^8.8.1"
   bin:
     atv: dist/cli/index.js
-  checksum: 10c0/7fe171bad3b61641ce2aeb119f253720a9ef1854c1a4e745893181abeff6a4dd19d330964fe74ac2e11f5e9497e9ca12fdcc58ae8a2dd6183be37a2b4136a21c
+  checksum: 10c0/6324cd4d1d8b7762a8091e491f1cba6af8485a5f8bee908af5ab5cc23c69e1e00caca43963104a4ab0151d52f69e5f6d25acded1089c5089d03ac5df2444112e
   languageName: node
   linkType: hard
 
-"node-appletv-remote@patch:node-appletv-remote@npm%3A0.4.0#~/experiments/node-library/patches/node-appletv-remote-npm-0.4.0-4a36632b41.patch":
-  version: 0.4.0
-  resolution: "node-appletv-remote@patch:node-appletv-remote@npm%3A0.4.0#~/experiments/node-library/patches/node-appletv-remote-npm-0.4.0-4a36632b41.patch::version=0.4.0&hash=49929b"
+"node-appletv-remote@patch:node-appletv-remote@npm%3A0.5.0#~/experiments/node-library/patches/node-appletv-remote-npm-0.5.0-5edebab564.patch":
+  version: 0.5.0
+  resolution: "node-appletv-remote@patch:node-appletv-remote@npm%3A0.5.0#~/experiments/node-library/patches/node-appletv-remote-npm-0.5.0-5edebab564.patch::version=0.5.0&hash=6186a0"
   dependencies:
     "@noble/ciphers": "npm:^1.3.0"
     bonjour-service: "npm:^1.3.0"
     bplist-creator: "npm:^0.1.1"
-    bplist-parser: "npm:^0.3.2"
+    bplist-parser: "npm:^0.5.0"
     fast-srp-hap: "npm:^2.0.4"
-    protobufjs: "npm:^8.0.0"
+    music-metadata: "npm:^11.16.1"
+    protobufjs: "npm:^8.8.1"
   bin:
     atv: dist/cli/index.js
-  checksum: 10c0/bd011cf0105c9e09e7d9b5103bf00037c91e275176e5dfad4a9629757102fac4c522ed624ff0aef299f8d74374b54dd10490c9549cc5869f0c15a03746bd7304
+  checksum: 10c0/e4dfb4f260f5ccccff0b345a56275636afcd33bc1dca3747faa569a99b0c9c9ee96018da206eaf7d765f901b24ea17fc7a2865c00000cf6f940164a0fdf56a4e
   languageName: node
   linkType: hard
 
@@ -1573,12 +1641,12 @@ __metadata:
   languageName: node
   linkType: hard
 
-"protobufjs@npm:^8.0.0":
-  version: 8.8.0
-  resolution: "protobufjs@npm:8.8.0"
+"protobufjs@npm:^8.8.1":
+  version: 8.8.1
+  resolution: "protobufjs@npm:8.8.1"
   dependencies:
     long: "npm:^5.3.2"
-  checksum: 10c0/2aa7fc766dce41858ce45ad750d9bfb2d30e9121f8c4f581ee3e5deda21440cae6bb23f41ec599d33b34963164e85f38eace687ba025d804fe926ab057c05703
+  checksum: 10c0/6d0bbbc7d8f9e2bd559fc7c360184062133f010e9f85257d9cb1f0671b3d73f153956b5678a88e95420023efc6be8646e41f0fb664909add6ec3ee8f38dfe294
   languageName: node
   linkType: hard
 
@@ -1680,6 +1748,15 @@ __metadata:
   languageName: node
   linkType: hard
 
+"strtok3@npm:^10.3.4, strtok3@npm:^10.3.5":
+  version: 10.6.2
+  resolution: "strtok3@npm:10.6.2"
+  dependencies:
+    "@tokenizer/token": "npm:^0.3.0"
+  checksum: 10c0/23d5a836b58d1b23f5eaff18afeeca628dbd13f22f69433e6438f83d09d1f7bdab9b9081d0fa69d5e1dcd01a1e7a5c763cc6cfbfb78951a3036464d5d8826e1d
+  languageName: node
+  linkType: hard
+
 "synckit@npm:^0.11.13":
   version: 0.11.13
   resolution: "synckit@npm:0.11.13"
@@ -1730,6 +1807,17 @@ __metadata:
     fdir: "npm:^6.5.0"
     picomatch: "npm:^4.0.4"
   checksum: 10c0/7f7bb0f197c88bc4b20c231e0deca4240ca3bf313a88f5a7fee93a872b84966a4d50220947c0455ad07a60b3b360961c5b7fd979222aeb716a9f99b412002e4c
+  languageName: node
+  linkType: hard
+
+"token-types@npm:^6.1.1, token-types@npm:^6.1.2":
+  version: 6.1.2
+  resolution: "token-types@npm:6.1.2"
+  dependencies:
+    "@borewit/text-codec": "npm:^0.2.1"
+    "@tokenizer/token": "npm:^0.3.0"
+    ieee754: "npm:^1.2.1"
+  checksum: 10c0/8786e28e3cb65b9e890bc3c38def98e6dfe4565538237f8c0e47dbe549ed8f5f00de8dc464717868308abb4729f1958f78f69e1c4c3deebbb685729113a6fee8
   languageName: node
   linkType: hard
 
@@ -1786,6 +1874,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"uint8array-extras@npm:^1.4.0, uint8array-extras@npm:^1.5.0":
+  version: 1.6.0
+  resolution: "uint8array-extras@npm:1.6.0"
+  checksum: 10c0/d53177c025ebea31af1e445abd474027b66341a56f207f352a5a486aa1d492e228bbc883dc4a51ea8358bb88d60a019351e20a92dd17c2ef8326e29fbad57127
+  languageName: node
+  linkType: hard
+
 "undici-types@npm:~8.9.0":
   version: 8.9.0
   resolution: "undici-types@npm:8.9.0"
@@ -1817,6 +1912,13 @@ __metadata:
   bin:
     node-which: ./bin/node-which
   checksum: 10c0/66522872a768b60c2a65a57e8ad184e5372f5b6a9ca6d5f033d4b0dc98aff63995655a7503b9c0a2598936f532120e81dd8cc155e2e92ed662a2b9377cc4374f
+  languageName: node
+  linkType: hard
+
+"win-guid@npm:^0.2.1":
+  version: 0.2.1
+  resolution: "win-guid@npm:0.2.1"
+  checksum: 10c0/4ef31b8553f9f6c775f71f8cda399b6089444657c8dec9cf3ffb4c4f074fb6a11806d7e7bcc4a1fa92015bcb54f1085ae860e9b9a9dca83129bdb3cd90f8c54a
   languageName: node
   linkType: hard
 

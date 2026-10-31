@@ -1,6 +1,6 @@
-/** Offline integration check of pyatv packets through the installed patched codec. */
+/** Offline integration check of pyatv packets through the installed codec. */
 import assert from 'node:assert/strict'
-import { MRPMessage, Message } from 'node-appletv-remote'
+import { Message, MRPMessage } from 'node-appletv-remote'
 import { MetadataState } from '../../dist/prototype/metadata.js'
 
 let input = ''
@@ -26,7 +26,7 @@ assert.equal(query['.getVolumeMessage'].outputDeviceUID, 'cluster-output')
 assert.equal(generated.type, query.type)
 assert.deepEqual(generated['.getVolumeMessage'], query['.getVolumeMessage'])
 const route = await decode('systemAudioRoute')
-const generatedRoute = await MRPMessage.decode(await MRPMessage.setSystemAudioOutputs(['personal-output']))
+const generatedRoute = await MRPMessage.decode(await MRPMessage.modifyOutputDevices('set', ['personal-output'], 2))
 assert.equal(route.type, 48)
 assert.equal(route['.modifyOutputContextRequestMessage'].type, 2)
 assert.equal(generatedRoute.type, route.type)

@@ -86,8 +86,8 @@ export async function withCompanionSession<T>(
 			lost.abort(new ConnectionLost(dropped ? `${reason}; last dropped frame: ${dropped}` : reason))
 	}
 	const onError = (error: unknown): void => lose(`Companion connection error: ${transportDetail(error)}`)
-	const onClose = (hadError?: unknown): void =>
-		lose(`Companion connection closed by the TV${hadError === true ? ' after a socket error' : ''}`)
+	// The library emits close just before the error that caused it; let that error name the loss.
+	const onClose = (): void => queueMicrotask(() => lose('Companion connection closed by the TV'))
 	connection.on('error', onError)
 	connection.on('close', onClose)
 	connection.on('frame-error', onDropped)
