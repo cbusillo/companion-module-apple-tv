@@ -547,7 +547,7 @@ test('system audio routing sends one SharedSystemAudio request on the metadata s
 		assert.equal(request['.modifyOutputContextRequestMessage'].type, 2)
 		assert.deepEqual(request['.modifyOutputContextRequestMessage'].settingDevices, ['synthetic-airpods'])
 		assert.deepEqual(request['.modifyOutputContextRequestMessage'].clusterAwareSettingDevices, ['synthetic-airpods'])
-		assert.deepEqual(request['.modifyOutputContextRequestMessage'].addingDevices, [])
+		assert.equal(request['.modifyOutputContextRequestMessage'].addingDevices?.length ?? 0, 0)
 		await until(() => controller.audioOutputs?.outputs.length === 2)
 		metadataPeers[0].routeMode = 'ignore'
 		assert.equal(await controller.routeAudio(before.epoch, ['tv-output']), true)

@@ -1,0 +1,273 @@
+diff --git a/dist/companion/connection.d.ts b/dist/companion/connection.d.ts
+index 7e9ec17298061ebe6d974b145e04fd2b41b2db44..3f9d79acf914ccf3109bd0897e8092a5b27a187c 100644
+--- a/dist/companion/connection.d.ts
++++ b/dist/companion/connection.d.ts
+@@ -8,7 +8,8 @@ import { type OpackDict } from './opack.js';
+ import type { HAPCredentials } from '../auth/types.js';
+ /**
+  * An authenticated, encrypted Companion link to one Apple TV.
+- * Emits `event` ({ identifier, data }) for unsolicited messages, plus `error` (when observed) and `close`.
++ * Emits `event` ({ identifier, data }) for unsolicited messages, `frame-error` for an authenticated
++ * frame it could not decode or deliver (the connection stays up), plus `error` (when observed) and `close`.
+  */
+ export declare class CompanionConnection extends EventEmitter {
+     private host;
+diff --git a/dist/companion/connection.js b/dist/companion/connection.js
+index c7bfb6a17646990cba3fd2b12c740a819c8c3ea0..5cab2b18c17de14bef788aacbfec59d026cea177 100644
+--- a/dist/companion/connection.js
++++ b/dist/companion/connection.js
+@@ -27,7 +27,8 @@ function envelope(content, type) {
+ }
+ /**
+  * An authenticated, encrypted Companion link to one Apple TV.
+- * Emits `event` ({ identifier, data }) for unsolicited messages, plus `error` (when observed) and `close`.
++ * Emits `event` ({ identifier, data }) for unsolicited messages, `frame-error` for an authenticated
++ * frame it could not decode or deliver (the connection stays up), plus `error` (when observed) and `close`.
+  */
+ export class CompanionConnection extends EventEmitter {
+     host;
+@@ -434,15 +435,22 @@ export class CompanionConnection extends EventEmitter {
+             // Companion leaves empty frames unencrypted; decrypting one would consume a nonce.
+             if (payloadLen === 0)
+                 continue;
++            let plaintext;
+             try {
+-                const plaintext = this.session.decrypt(header, encryptedPayload);
+-                const decoded = opackDecode(plaintext);
+-                this.handleMessage(decoded);
++                plaintext = this.session.decrypt(header, encryptedPayload);
+             }
+             catch (e) {
+                 this.fail(new Error(`Companion decrypt error: ${e}`));
+                 return;
+             }
++            // The stream is still in sync after an authenticated frame, so one this library cannot
++            // decode or deliver is dropped and reported as `frame-error`; it does not end the connection.
++            try {
++                this.handleMessage(opackDecode(plaintext));
++            }
++            catch (e) {
++                this.emit('frame-error', new Error(`Companion frame type ${header[0]} (${plaintext.length} bytes) dropped: ${e instanceof Error ? e.message : String(e)}`, { cause: e }));
++            }
+         }
+     }
+     /**
+diff --git a/dist/companion/pair-setup.d.ts b/dist/companion/pair-setup.d.ts
+index b42b63f698259aa3e68d83b2fe2ae882acc709c4..c727298430d8e5e61b6e87510ce8df2536713aec 100644
+--- a/dist/companion/pair-setup.d.ts
++++ b/dist/companion/pair-setup.d.ts
+@@ -33,6 +33,11 @@ export declare class CompanionPairSetup {
+     private frameQueue;
+     /** Waiters for the next frame, served in FIFO order regardless of frame type. */
+     private pendingFrameResolvers;
++    private resolveClosed;
++    /** Settles once the attempt ends: destroy(), finish(), or the TV closing the connection. */
++    readonly closed: Promise<void>;
++    /** Last step reached, kept after close so a caller can say which step failed. */
++    stage: 'connect' | 'pin' | 'proof' | 'identity' | 'complete';
+     constructor(host: string, port: number, options?: {
+         /** Label the Apple TV lists for this pairing under Remote App and Devices. */
+         name?: string;
+@@ -74,7 +79,7 @@ export declare class CompanionPairSetup {
+      * Send M5 (our identifier, Ed25519 public key and signature, encrypted) and decrypt
+      * M6 to learn the Apple TV's identifier and long-term public key.
+      * @returns credentials to persist for later pair-verify
+-     * @throws if called before sendM3, or if M6 is missing or malformed
++     * @throws if called before sendM3, or if M6 is missing, malformed, or fails its identity signature check
+      */
+     sendM5(): Promise<HAPCredentials>;
+     /**
+@@ -83,7 +88,7 @@ export declare class CompanionPairSetup {
+      * Always closes the socket, whether pairing succeeds or fails.
+      */
+     finish(pin: string): Promise<HAPCredentials>;
+-    /** Close the socket. Safe to call more than once. */
++    /** Close the socket, fail any waiting step, and settle `closed`. Safe to call more than once. */
+     destroy(): void;
+     /** Frame and write a payload; a no-op once the socket is gone. */
+     private writeFrame;
+diff --git a/dist/companion/pair-setup.js b/dist/companion/pair-setup.js
+index 2a4027ece806814233d067ae25356875030ed4bf..c4ee8818959145e2e5afd1c58840acdbee4b88a8 100644
+--- a/dist/companion/pair-setup.js
++++ b/dist/companion/pair-setup.js
+@@ -6,9 +6,9 @@
+  * the `_pd` key, and frames use PS_Start for M1, PS_Next for all subsequent messages.
+  */
+ import { connectSocket } from '../connection.js';
+-import { generateKeyPairSync, sign, randomUUID } from 'node:crypto';
++import { generateKeyPairSync, sign, verify, randomUUID } from 'node:crypto';
+ import { TlvTag, tlvEncode, tlvDecode } from '../util/tlv.js';
+-import { hkdfSha512, encryptChaCha20, decryptChaCha20, ed25519PrivateKeyFromSeed } from '../util/crypto.js';
++import { hkdfSha512, encryptChaCha20, decryptChaCha20, ed25519PrivateKeyFromSeed, ed25519PublicKeyFromRaw } from '../util/crypto.js';
+ import { SRPClient } from '../auth/srp.js';
+ import { FrameType, encodeFrame, parseFrames } from './framing.js';
+ import { opackEncode, opackDecode } from './opack.js';
+@@ -39,6 +39,11 @@ export class CompanionPairSetup {
+     frameQueue = [];
+     /** Waiters for the next frame, served in FIFO order regardless of frame type. */
+     pendingFrameResolvers = [];
++    resolveClosed;
++    /** Settles once the attempt ends: destroy(), finish(), or the TV closing the connection. */
++    closed = new Promise(resolve => { this.resolveClosed = resolve; });
++    /** Last step reached, kept after close so a caller can say which step failed. */
++    stage = 'connect';
+     constructor(host, port, options = {}) {
+         this.host = host;
+         this.port = port;
+@@ -57,12 +62,18 @@ export class CompanionPairSetup {
+         const { salt, serverPublicKey } = await this.sendM1();
+         this.salt = salt;
+         this.serverPublicKey = serverPublicKey;
++        this.stage = 'pin';
+     }
+     /** Connect the socket (Nagle off, 5 s timeout) and feed incoming data to the frame parser. */
+     async openSocket() {
+-        this.socket = await connectSocket(this.host, this.port);
+-        this.socket.on('error', () => { }); // Post-connect errors surface as reply timeouts.
+-        this.socket.on('close', () => { this.ended = true; });
++        const socket = await connectSocket(this.host, this.port);
++        if (this.ended) {
++            socket.destroy();
++            throw new Error('Companion pairing closed');
++        }
++        this.socket = socket;
++        this.socket.on('error', () => { }); // A socket error is followed by close.
++        this.socket.on('close', () => this.destroy());
+         this.socket.on('data', (data) => {
+             this.buffer = Buffer.concat([this.buffer, data]);
+             this.processFrames();
+@@ -130,6 +141,7 @@ export class CompanionPairSetup {
+      * @throws if M4 lacks a proof (e.g. a wrong PIN) or the proof does not verify
+      */
+     async sendM3(pin, salt, serverPublicKey) {
++        this.stage = 'proof';
+         this.srp.init(salt, pin);
+         this.srp.setServerPublicKey(serverPublicKey);
+         const clientPublicKey = this.srp.getPublicKey();
+@@ -157,6 +169,7 @@ export class CompanionPairSetup {
+      * @throws if called before sendM3, or if M6 is missing or malformed
+      */
+     async sendM5() {
++        this.stage = 'identity';
+         if (!this.sessionKey) {
+             throw new Error('Session key not available; call sendM3 first');
+         }
+@@ -196,9 +209,14 @@ export class CompanionPairSetup {
+         const serverInfo = tlvDecode(decrypted);
+         const serverId = serverInfo[TlvTag.Identifier];
+         const serverLTPK = serverInfo[TlvTag.PublicKey];
+-        if (!serverId || !serverLTPK) {
+-            throw new Error('Companion PS M6 missing Identifier or PublicKey');
++        const serverSignature = serverInfo[TlvTag.Signature];
++        if (!serverId?.length || serverLTPK?.length !== 32 || serverSignature?.length !== 64) {
++            throw new Error('Companion PS M6 missing valid identity or signature');
+         }
++        const accessoryKey = await hkdfSha512(this.sessionKey, 'Pair-Setup-Accessory-Sign-Salt', 'Pair-Setup-Accessory-Sign-Info', 32);
++        if (!verify(null, Buffer.concat([accessoryKey, serverId, serverLTPK]), ed25519PublicKeyFromRaw(serverLTPK), serverSignature))
++            throw new Error('Companion PS M6 signature verification failed');
++        this.stage = 'complete';
+         return {
+             clientId: this.clientId,
+             clientLTSK: this.edPrivateKeyRaw,
+@@ -223,13 +241,18 @@ export class CompanionPairSetup {
+             return await this.sendM5();
+         }
+         finally {
++            this.salt = undefined; // One attempt per instance.
+             this.destroy();
+         }
+     }
+-    /** Close the socket. Safe to call more than once. */
++    /** Close the socket, fail any waiting step, and settle `closed`. Safe to call more than once. */
+     destroy() {
++        this.ended = true;
+         this.socket?.destroy();
+         this.socket = undefined;
++        for (const resolver of this.pendingFrameResolvers.splice(0))
++            resolver(undefined);
++        this.resolveClosed();
+     }
+     /** Frame and write a payload; a no-op once the socket is gone. */
+     writeFrame(type, payload) {
+@@ -241,10 +264,15 @@ export class CompanionPairSetup {
+         if (this.frameQueue.length > 0) {
+             return Promise.resolve(this.frameQueue.shift());
+         }
++        if (this.ended)
++            return Promise.reject(new Error('Companion pairing closed'));
+         return new Promise((resolve, reject) => {
+             const onFrame = (frame) => {
+                 clearTimeout(timer);
+-                resolve(frame);
++                if (frame)
++                    resolve(frame);
++                else
++                    reject(new Error('Companion pairing closed'));
+             };
+             const timer = setTimeout(() => {
+                 const idx = this.pendingFrameResolvers.indexOf(onFrame);
+diff --git a/dist/index.d.ts b/dist/index.d.ts
+index 4b828a0f898ea7ec80917ea3b70b91d6b9b53e0d..0d0bb4312c3e07945f5341037a2ce081cf4a7efc 100644
+--- a/dist/index.d.ts
++++ b/dist/index.d.ts
+@@ -17,6 +17,7 @@ export { Credentials, parseCredentials } from './credentials.js';
+ export { NowPlayingInfo, PlaybackState, MediaType, MediaSubType } from './now-playing-info.js';
+ export { SupportedCommand, Command } from './supported-command.js';
+ export { Message } from './message.js';
++export { MRPMessage, MessageType } from './mrp/messages.js';
+ export { AirPlayConnection } from './connection.js';
+ export type { HAPCredentials } from './auth/types.js';
+ export type { ScanOptions, DiscoveredDevice, DiscoveredDeviceInfo } from './discovery.js';
+diff --git a/dist/index.js b/dist/index.js
+index ed1ea43fb4a2e51ba25eb7688974038efd33094c..680834a9f2e2b08a85e90f58479386e25add2fcb 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -14,6 +14,7 @@ export { Credentials, parseCredentials } from './credentials.js';
+ export { NowPlayingInfo, PlaybackState, MediaType, MediaSubType } from './now-playing-info.js';
+ export { SupportedCommand, Command } from './supported-command.js';
+ export { Message } from './message.js';
++export { MRPMessage, MessageType } from './mrp/messages.js';
+ export { AirPlayConnection } from './connection.js';
+ export { DeviceStorage, MemoryStorage, FileStorage, CustomStorage, STORAGE_VERSION } from './storage.js';
+ export { LegacyMRPConnection } from './mrp/legacy-connection.js';
+diff --git a/dist/mrp/messages.d.ts b/dist/mrp/messages.d.ts
+index 317d4345be1bea2e452c3c7bd31c62dc0df04701..e2daee9a9dc7953ef6757f385d28b0d4e005315d 100644
+--- a/dist/mrp/messages.d.ts
++++ b/dist/mrp/messages.d.ts
+@@ -95,8 +95,11 @@ export interface DeviceInfoOptions {
+ export declare class MRPMessage {
+     /** Read the current level for one output without changing its volume. */
+     static getVolume(outputDeviceUID: string): Promise<Buffer>;
+-    /** Shared audio routing uses discriminator 48, extension 52; paired fields support cluster-aware receivers. */
+-    static modifyOutputDevices(mode: 'add' | 'remove' | 'set', devices: string[]): Promise<Buffer>;
++    /**
++     * Shared audio routing uses discriminator 48, extension 52; paired fields support cluster-aware receivers.
++     * `contextType` 1 is SharedAudioPresentation (the default); 2 is SharedSystemAudio, which selects personal AirPods.
++     */
++    static modifyOutputDevices(mode: 'add' | 'remove' | 'set', devices: string[], contextType?: 1 | 2): Promise<Buffer>;
+     /** DeviceInfo: the first message after connecting, describing this client to the Apple TV. */
+     static deviceInfo(options: DeviceInfoOptions): Promise<Buffer>;
+     /** A bare ProtocolMessage of the given type with no extension payload. */
+diff --git a/dist/mrp/messages.js b/dist/mrp/messages.js
+index 7a27e714fac8afbc2d997311f6460fb7717d66dd..c8dae57f3823582653532e8fe2dc2a3468655f2a 100644
+--- a/dist/mrp/messages.js
++++ b/dist/mrp/messages.js
+@@ -138,12 +138,15 @@ export class MRPMessage {
+             fields: { outputDeviceUID },
+         });
+     }
+-    /** Shared audio routing uses discriminator 48, extension 52; paired fields support cluster-aware receivers. */
+-    static async modifyOutputDevices(mode, devices) {
++    /**
++     * Shared audio routing uses discriminator 48, extension 52; paired fields support cluster-aware receivers.
++     * `contextType` 1 is SharedAudioPresentation (the default); 2 is SharedSystemAudio, which selects personal AirPods.
++     */
++    static async modifyOutputDevices(mode, devices, contextType = 1) {
+         const field = { add: 'addingDevices', remove: 'removingDevices', set: 'settingDevices' }[mode];
+         return encodeMessage(MessageType.ModifyOutputContextRequest, {
+             key: '.modifyOutputContextRequestMessage', typeName: 'ModifyOutputContextRequestMessage',
+-            fields: { type: 1, [field]: devices,
++            fields: { type: contextType, [field]: devices,
+                 [`clusterAware${field[0].toUpperCase()}${field.slice(1)}`]: devices },
+         });
+     }

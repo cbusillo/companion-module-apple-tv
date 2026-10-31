@@ -222,7 +222,8 @@ export class NodeBackend {
 					new CompanionPairSetup(matches[0].address, matches[0].companionPort!, { name: PAIRING_NAME })
 				const pending: PendingPair = { deviceId: this.config.deviceId, pair, abort: this.abort, finishing: false }
 				this.pending = pending
-				await bounded(async () => pair.start({ signal }), 15000, signal)
+				// Cancellation reaches the attempt through clearPairing(), which destroys it.
+				await bounded(async () => pair.start(), 15000, signal)
 				if (generation !== this.generation) return
 				void pair.closed.then(() => {
 					if (this.pending !== pending || pending.finishing || generation !== this.generation) return

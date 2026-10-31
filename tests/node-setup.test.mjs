@@ -148,7 +148,6 @@ test('disabled, changed-target and expired PIN sessions close without finishing 
 					{ pin: '1234' },
 				)
 			assert.ok(f.pairs[0].destroys >= 1)
-			assert.equal(f.pairs[0].signal.aborted, true)
 			assert.deepEqual(f.pairs[0].finishes, [])
 			assert.ok(f.saves.every((call) => !Object.hasOwn(call.secrets, 'pin')))
 		} finally {

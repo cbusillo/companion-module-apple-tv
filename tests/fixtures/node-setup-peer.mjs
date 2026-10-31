@@ -90,9 +90,7 @@ export function setupFixture(overrides = {}) {
 				starts: 0,
 				finishes: [],
 				destroys: 0,
-				signal: undefined,
-				async start({ signal }) {
-					this.signal = signal
+				async start() {
 					this.starts++
 				},
 				async finish(pin) {
